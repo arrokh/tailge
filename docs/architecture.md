@@ -1,6 +1,43 @@
 # Tailge architecture
 
-The system context diagram is in the README. This document describes the internal control flow and implementation seams for the full-screen Bubble Tea workspace. The domain contract remains in [`CONTEXT.md`](../CONTEXT.md), and the accepted full-screen decision is [`adr/0001-full-screen-tui.md`](adr/0001-full-screen-tui.md).
+This document describes Tailge's system context, internal control flow, implementation seams, and safety invariants. The usage guide is [`usage.md`](usage.md), the domain contract is [`CONTEXT.md`](../CONTEXT.md), and the accepted full-screen decision is [`adr/0001-full-screen-tui.md`](adr/0001-full-screen-tui.md).
+
+## System context
+
+Tailge runs on the same machine as the local services it discovers. It observes local listeners and controls the local Tailscale client; it does not proxy application traffic or control processes on remote machines.
+
+```mermaid
+flowchart LR
+    subgraph LocalMachine["Local machine"]
+        Service["Local TCP service"]
+        Tailge["tailge<br/>CLI and TUI"]
+        Discovery["Listener discovery<br/>lsof / ss"]
+        TSClient["Tailscale client<br/>Serve / Funnel"]
+
+        Service -->|local listener| Discovery
+        Discovery --> Tailge
+        Tailge -->|observe readiness and routes<br/>request exact mutations| TSClient
+        TSClient -->|forward exposed traffic| Service
+    end
+
+    subgraph Tailnet["Local Tailscale network / tailnet"]
+        Peer["Tailnet peer<br/>private client"]
+    end
+
+    ControlPlane["Tailscale control plane"]
+    Internet(("Public internet"))
+
+    TSClient <-->|identity and route coordination| ControlPlane
+    TSClient <-->|Serve: private route| Peer
+    TSClient <-->|Funnel: public route| Internet
+```
+
+The exposure paths have different audiences:
+
+- **Serve** forwards a selected local listener to authenticated tailnet peers.
+- **Funnel** forwards a selected local listener to the public internet and always requires explicit public confirmation.
+- **Tailge** remains a control and observation plane. Application data flows between the local service, Tailscale, and the selected client network.
+- A route is not proof that the local process is healthy. Tailge refreshes listener state and provider state independently and reports unknown or unverified outcomes instead of guessing.
 
 ## Runtime shape
 
