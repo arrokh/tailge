@@ -396,6 +396,48 @@ func TestApplyRouteDisablesOneOfMultipleRoutes(t *testing.T) {
 	}
 }
 
+func TestApprovedBatchMutationsAllowPriorOtherTargetChanges(t *testing.T) {
+	firstTarget := model.Target{Address: "127.0.0.1", Port: 8080, Protocol: "tcp"}.Normalized()
+	secondTarget := model.Target{Address: "127.0.0.1", Port: 8081, Protocol: "tcp"}.Normalized()
+	firstRoute := model.ExposureRoute{ID: "serve:tcp=8080", ProviderKey: "serve:tcp=8080", Target: firstTarget, Mode: model.ExposureServe, Ownership: model.OwnershipManaged, State: model.ExposureActive}
+	secondRoute := model.ExposureRoute{ID: "serve:tcp=8081", ProviderKey: "serve:tcp=8081", Target: secondTarget, Mode: model.ExposureServe, Ownership: model.OwnershipManaged, State: model.ExposureActive}
+	provider := &fakeProvider{snapshot: model.ExposureSnapshot{Authoritative: true, Routes: []model.ExposureRoute{firstRoute, secondRoute}}, caps: tailscale.Capabilities{Serve: true, ExactServe: true}, readiness: ready()}
+	discoverer := &fakeDiscoverer{snapshot: model.ListenerSnapshot{Authoritative: true, Listeners: []model.Listener{testListener(firstTarget, "first"), testListener(secondTarget, "second")}}}
+	controller := NewController(discoverer, provider)
+	allRoutesHash := tailscale.RoutesHash(provider.snapshot.Routes)
+	firstApproval := MutationApproval{Target: firstTarget, RouteIDsHash: RouteIDsHash(provider.snapshot.Routes, firstTarget), TargetRoutesHash: RouteIdentityHash(provider.snapshot.Routes, firstTarget), AllRoutesHash: allRoutesHash, AllowOtherRouteChanges: true}
+	secondApproval := MutationApproval{Target: secondTarget, RouteIDsHash: RouteIDsHash(provider.snapshot.Routes, secondTarget), TargetRoutesHash: RouteIdentityHash(provider.snapshot.Routes, secondTarget), AllRoutesHash: allRoutesHash, AllowOtherRouteChanges: true}
+	first, err := controller.ApplyRouteApproved(context.Background(), firstTarget, firstRoute.ProviderKey, false, time.Second, firstApproval)
+	if err != nil || !first.Verified {
+		t.Fatalf("first batch disable failed: receipt=%#v err=%v", first, err)
+	}
+	second, err := controller.ApplyRouteApproved(context.Background(), secondTarget, secondRoute.ProviderKey, false, time.Second, secondApproval)
+	if err != nil || !second.Verified {
+		t.Fatalf("second batch disable failed after first route changed: receipt=%#v err=%v", second, err)
+	}
+	if len(provider.removes) != 2 {
+		t.Fatalf("batch disabled %d routes, want 2: %#v", len(provider.removes), provider.removes)
+	}
+}
+
+func TestApprovedBatchMutationRejectsChangedTargetRouteIdentity(t *testing.T) {
+	target := model.Target{Address: "127.0.0.1", Port: 8080, Protocol: "tcp"}.Normalized()
+	route := model.ExposureRoute{ID: "serve:tcp=8080", ProviderKey: "serve:tcp=8080", Target: target, Mode: model.ExposureServe, Ownership: model.OwnershipManaged, State: model.ExposureActive}
+	provider := &fakeProvider{snapshot: model.ExposureSnapshot{Authoritative: true, Routes: []model.ExposureRoute{route}}, caps: tailscale.Capabilities{Serve: true, ExactServe: true}, readiness: ready()}
+	discoverer := &fakeDiscoverer{snapshot: model.ListenerSnapshot{Authoritative: true, Listeners: []model.Listener{testListener(target, "api")}}}
+	controller := NewController(discoverer, provider)
+	approval := MutationApproval{Target: target, RouteIDsHash: RouteIDsHash(provider.snapshot.Routes, target), TargetRoutesHash: RouteIdentityHash(provider.snapshot.Routes, target), AllowOtherRouteChanges: true}
+	provider.mu.Lock()
+	provider.snapshot.Routes[0].Backend = "tcp://127.0.0.1:9999"
+	provider.mu.Unlock()
+	if _, err := controller.ApplyRouteApproved(context.Background(), target, route.ProviderKey, false, time.Second, approval); err == nil {
+		t.Fatal("batch approval accepted a changed target route identity")
+	}
+	if len(provider.removes) != 0 {
+		t.Fatal("changed target route was removed")
+	}
+}
+
 func TestApplyRouteModeRejectsAmbiguousModeSelection(t *testing.T) {
 	target := model.Target{Address: "127.0.0.1", Port: 8080, Protocol: "tcp"}.Normalized()
 	first := model.ExposureRoute{ID: "serve:https", ProviderKey: "serve:https=443", Target: target, Mode: model.ExposureServe, Ownership: model.OwnershipManaged, State: model.ExposureActive}

@@ -149,8 +149,17 @@ func (tx mutationTransaction) run(ctx context.Context) (receipt model.OperationR
 		return model.OperationReceipt{}, model.NewError(model.ErrUnknown, "exposure", "current exposure state is not authoritative", true, "unknown", "Refresh Tailscale state before changing exposure.")
 	}
 	if approval != nil {
-		if approval.Target.Normalized().Key() != target.Key() || approval.AllRoutesHash == "" || tailscale.RoutesHash(exposures.Routes) != approval.AllRoutesHash {
+		if approval.Target.Normalized().Key() != target.Key() {
+			return model.OperationReceipt{}, model.NewError(model.ErrUnsafe, "exposure", "exposure target changed after confirmation", true, "changed", "Refresh and confirm the current route before retrying.")
+		}
+		if !approval.AllowOtherRouteChanges && (approval.AllRoutesHash == "" || tailscale.RoutesHash(exposures.Routes) != approval.AllRoutesHash) {
 			return model.OperationReceipt{}, model.NewError(model.ErrUnsafe, "exposure", "exposure state changed after confirmation", true, "changed", "Refresh and confirm the current route before retrying.")
+		}
+		if approval.AllowOtherRouteChanges && (approval.RouteIDsHash == "" || approval.TargetRoutesHash == "") {
+			return model.OperationReceipt{}, model.NewError(model.ErrUnsafe, "exposure", "batch approval is missing an exact route fingerprint", true, "changed", "Refresh and confirm the current route before retrying.")
+		}
+		if approval.TargetRoutesHash != "" && RouteIdentityHash(exposures.Routes, target) != approval.TargetRoutesHash {
+			return model.OperationReceipt{}, model.NewError(model.ErrUnsafe, "exposure", "the selected route identity changed after confirmation", true, "changed", "Refresh and confirm the current route before retrying.")
 		}
 		if approval.RouteIDsHash != "" && RouteIDsHash(exposures.Routes, target) != approval.RouteIDsHash {
 			return model.OperationReceipt{}, model.NewError(model.ErrUnsafe, "exposure", "the selected route changed after confirmation", true, "changed", "Refresh and confirm the current route before retrying.")

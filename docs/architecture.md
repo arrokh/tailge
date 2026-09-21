@@ -121,7 +121,7 @@ The Controller remains the reconciliation and lifecycle owner, while the transac
 
 ## Workspace policy and rendering
 
-`internal/tui/workspace_policy.go` owns action availability, process identity revalidation, operation-state decisions, and route transport classification. `workspaceModel` still owns Bubble Tea event sequencing and Applying registration, but it delegates policy decisions to the focused module. `workspace_render.go` and `workspace_modal.go` own the visual projection and modal/help layout, leaving event handling easier to scan without changing ADR-0001's full-screen workspace. Browser actions open observed HTTP/HTTPS URLs when present. For a Serve `tcp=` route without an observed URL, explicit `o` and `y` actions may resolve the provider-reported DNS name and exact listener port and use the same HTTP browser preview by default; this UI-only fallback never participates in route identity, approval, mutation, or verification. Funnel TCP without an observed URL remains `TCP-only` and is not copyable.
+`internal/tui/workspace_policy.go` owns action availability, process identity revalidation, operation-state decisions, and route transport classification. `workspaceModel` still owns Bubble Tea event sequencing and Applying registration, but it delegates policy decisions to the focused module. `workspace_render.go` and `workspace_modal.go` own the visual projection and modal/help layout, leaving event handling easier to scan without changing ADR-0001's full-screen workspace. Browser actions open observed HTTP/HTTPS URLs when present. For a Serve `tcp=` route without an observed URL, explicit `o` and `y` actions may resolve the provider-reported DNS name and exact listener port and use the same HTTP browser preview by default; this UI-only fallback never participates in route identity, approval, mutation, or verification. Interactive `y` copies through OSC 52 so SSH/Mosh and multiplexer sessions update the attached terminal client's clipboard rather than only the host OS clipboard. Funnel TCP without an observed URL remains `TCP-only` and is not copyable.
 
 ## Refresh coordinator
 
@@ -149,7 +149,7 @@ List rendering, details, selection continuity, and exposure action targeting all
 ## Safety invariants
 
 - Unknown, stale, unavailable, unsupported, ambiguous, or read-only observations never enable an unsafe mutation.
-- A preview is invalidated when its target, route set, listener identity, or selected target set changes; availability is rechecked immediately before mutation.
+- A preview is invalidated when its target, route set, listener identity, or selected target set changes; availability is rechecked immediately before mutation. Sequential batch operations retain per-target route identity fingerprints so an earlier confirmed batch mutation does not invalidate unrelated batch members.
 - Refresh can observe Applying state but cannot erase the operation lifecycle or start a concurrent mutation.
 - Confirmation defaults to Cancel; Funnel requires explicit focus on Confirm.
 - Exact route selectors are retained through disable and replacement operations.
