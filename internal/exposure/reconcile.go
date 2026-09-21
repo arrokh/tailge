@@ -238,6 +238,19 @@ func RouteIDs(routes []model.ExposureRoute, target model.Target) []string {
 	return ids
 }
 
+// RouteIdentityHash fingerprints the complete provider route identity for one
+// target. It is stronger than RouteIDsHash, which is retained for provider
+// preconditions but cannot detect a selector/backend change under the same ID.
+func RouteIdentityHash(routes []model.ExposureRoute, target model.Target) string {
+	matched := make([]model.ExposureRoute, 0)
+	for _, route := range routes {
+		if Matches(route.Target, target) {
+			matched = append(matched, route)
+		}
+	}
+	return tailscale.RoutesHash(matched)
+}
+
 type Provider interface {
 	Capabilities(context.Context) (tailscale.Capabilities, error)
 	List(context.Context) (model.ExposureSnapshot, error)
@@ -251,17 +264,22 @@ type ReadinessProvider interface {
 
 // MutationApproval binds a confirmed TUI action to the exact observations that
 // were shown to the operator. CLI callers may omit it, but interactive callers
-// must not silently replace a listener or route after confirmation.
+// must not silently replace a listener or route after confirmation. Batch
+// callers may allow unrelated routes to change because earlier batch members
+// are expected to mutate the provider route set; TargetRoutesHash and
+// RouteIDsHash still protect the exact route for this target.
 type MutationApproval struct {
-	Target              model.Target
-	ListenerID          string
-	ListenerPID         int
-	ListenerProcess     string
-	ListenerStart       string
-	ListenerCommandLine string
-	ListenerTarget      model.Target
-	RouteIDsHash        string
-	AllRoutesHash       string
+	Target                 model.Target
+	ListenerID             string
+	ListenerPID            int
+	ListenerProcess        string
+	ListenerStart          string
+	ListenerCommandLine    string
+	ListenerTarget         model.Target
+	RouteIDsHash           string
+	TargetRoutesHash       string
+	AllRoutesHash          string
+	AllowOtherRouteChanges bool
 }
 
 type Controller struct {

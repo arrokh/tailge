@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/arrokh/tailge/internal/config"
@@ -16,6 +17,7 @@ import (
 	"github.com/arrokh/tailge/internal/exposure"
 	"github.com/arrokh/tailge/internal/model"
 	"github.com/arrokh/tailge/internal/tailscale"
+	"github.com/aymanbagabas/go-osc52/v2"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -1328,9 +1330,10 @@ func (m *workspaceModel) startOperation() tea.Cmd {
 
 func (m *workspaceModel) mutationApproval(item exposure.ReconciledItem, target model.Target) exposure.MutationApproval {
 	approval := exposure.MutationApproval{
-		Target:        target,
-		RouteIDsHash:  exposure.RouteIDsHash(m.view.Exposures.Routes, target),
-		AllRoutesHash: tailscale.RoutesHash(m.view.Exposures.Routes),
+		Target:           target,
+		RouteIDsHash:     exposure.RouteIDsHash(m.view.Exposures.Routes, target),
+		TargetRoutesHash: exposure.RouteIdentityHash(m.view.Exposures.Routes, target),
+		AllRoutesHash:    tailscale.RoutesHash(m.view.Exposures.Routes),
 	}
 	if item.Listener != nil {
 		listener := *item.Listener
@@ -1421,7 +1424,9 @@ func (m *workspaceModel) startBatchOperation() tea.Cmd {
 		if m.actionSession.mode == model.ExposureDisabled && len(item.Routes) == 1 {
 			providerKey = item.Routes[0].ProviderKey
 		}
-		requests = append(requests, batchOperation{itemID: item.ID, target: target, providerKey: providerKey, confirmExternal: m.externalPreviewFor(item, providerKey), approval: m.mutationApproval(item, target)})
+		approval := m.mutationApproval(item, target)
+		approval.AllowOtherRouteChanges = true
+		requests = append(requests, batchOperation{itemID: item.ID, target: target, providerKey: providerKey, confirmExternal: m.externalPreviewFor(item, providerKey), approval: approval})
 	}
 	if len(requests) == 0 {
 		m.modal = modalNone
@@ -1778,7 +1783,11 @@ func (m *workspaceModel) urlShortcutStatus() string {
 		}
 		_, local = localURL(item)
 	}
-	return formatURLShortcutStatus(observed, tcpOnly, browserFallback, local, browserCommandAvailable(), clipboardAvailable())
+	clipboard := m.clipboard != nil
+	if !clipboard {
+		clipboard = clipboardAvailable()
+	}
+	return formatURLShortcutStatus(observed, tcpOnly, browserFallback, local, browserCommandAvailable(), clipboard)
 }
 
 func formatURLShortcutStatus(observed, tcpOnly, browserFallback, local, browser, clipboard bool) string {
@@ -2102,6 +2111,51 @@ type Clipboard interface {
 	Copy(context.Context, string) error
 }
 
+// OSC52Clipboard copies through the terminal stream instead of the operating
+// system clipboard on the machine running Tailge. This is what makes copying
+// work for SSH, Mosh, and terminal multiplexers: the terminal client receives
+// the sequence and updates its own clipboard.
+type OSC52Clipboard struct {
+	Output io.Writer
+	Mode   osc52.Mode
+	mu     sync.Mutex
+}
+
+func (c *OSC52Clipboard) Copy(ctx context.Context, value string) error {
+	if c == nil || c.Output == nil {
+		return fmt.Errorf("terminal output is unavailable")
+	}
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, err := osc52.New(value).Mode(c.Mode).WriteTo(c.Output)
+	return err
+}
+
+func terminalClipboard(out io.Writer) Clipboard {
+	if out == nil {
+		return nil
+	}
+	return &OSC52Clipboard{Output: out, Mode: terminalClipboardMode()}
+}
+
+func terminalClipboardMode() osc52.Mode {
+	// GNU screen does not pass OSC 52 directly, so wrap it in DCS. tmux can
+	// handle the normal OSC 52 sequence when set-clipboard is enabled; using
+	// TmuxMode unconditionally would instead require allow-passthrough.
+	term := os.Getenv("TERM")
+	if os.Getenv("STY") != "" || (strings.HasPrefix(term, "screen") && os.Getenv("TMUX") == "") {
+		return osc52.ScreenMode
+	}
+	return osc52.DefaultMode
+}
+
 type OSClipboard struct{}
 
 func clipboardCommand() (string, []string) {
@@ -2202,6 +2256,11 @@ func Run(in io.Reader, out, errOut io.Writer, discoverer *discovery.OSDiscoverer
 		return model.ErrInterrupted.ExitCode()
 	}
 	m := newWorkspaceModel(discoverer, provider, manager)
+	clipboardOutput := errOut
+	if clipboardOutput == nil {
+		clipboardOutput = out
+	}
+	m.clipboard = terminalClipboard(clipboardOutput)
 	program := tea.NewProgram(m, tea.WithInput(in), tea.WithOutput(out), tea.WithAltScreen())
 	finalModel, err := program.Run()
 	m.cancel()

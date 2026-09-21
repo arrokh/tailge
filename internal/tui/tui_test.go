@@ -86,6 +86,18 @@ func TestCopySelectedURLHandlesMissingClipboard(t *testing.T) {
 	}
 }
 
+func TestOSC52ClipboardWritesTerminalSequence(t *testing.T) {
+	var out bytes.Buffer
+	clipboard := OSC52Clipboard{Output: &out}
+	if err := clipboard.Copy(context.Background(), "https://dev.example.ts.net"); err != nil {
+		t.Fatalf("OSC52 copy failed: %v", err)
+	}
+	const want = "\x1b]52;c;aHR0cHM6Ly9kZXYuZXhhbXBsZS50cy5uZXQ=\x07"
+	if out.String() != want {
+		t.Fatalf("OSC52 sequence = %q, want %q", out.String(), want)
+	}
+}
+
 func TestRefreshBackoffIsBounded(t *testing.T) {
 	if got := refreshBackoff(time.Second, 0); got != time.Second {
 		t.Fatalf("initial interval=%s", got)
@@ -664,6 +676,15 @@ func TestWorkspaceDisableUnknownRouteUsesFocusedConfirmWithoutYES(t *testing.T) 
 	m.Update(keyType(tea.KeyEnter))
 	if m.modal != modalNone || len(m.activeOps) != 1 {
 		t.Fatalf("focused disable confirmation did not start: modal=%v ops=%d", m.modal, len(m.activeOps))
+	}
+}
+
+func TestURLShortcutStatusUsesTerminalClipboardTransport(t *testing.T) {
+	m := workspaceFixture()
+	m.view.Items[0].Routes[0].URL = "https://dev.example.ts.net"
+	m.clipboard = &OSC52Clipboard{Output: &bytes.Buffer{}}
+	if got := m.urlShortcutStatus(); !strings.Contains(got, "y copy[ok]") {
+		t.Fatalf("terminal clipboard transport was not advertised: %q", got)
 	}
 }
 

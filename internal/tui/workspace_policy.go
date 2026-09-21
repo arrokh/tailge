@@ -203,11 +203,11 @@ func rawTCPRouteSelector(item exposure.ReconciledItem) string {
 func serveTCPBrowserURL(status tailscale.Status, route model.ExposureRoute) (string, error) {
 	selector, err := tailscale.ParseListenerSelector(route.ProviderKey, route.Mode)
 	if err != nil || route.Mode != model.ExposureServe || selector.Transport != "tcp" {
-		return "", fmt.Errorf("route is not an exact Serve TCP listener")
+		return "", fmt.Errorf("route is not an exact serve TCP listener")
 	}
 	host := strings.TrimSuffix(strings.TrimSpace(status.Self.DNSName), ".")
 	if host == "" || strings.ContainsAny(host, "/?#\\: \t\r\n") {
-		return "", fmt.Errorf("Tailscale did not report a safe DNS name")
+		return "", fmt.Errorf("tailscale did not report a safe DNS name")
 	}
 	endpoint := net.JoinHostPort(host, strconv.Itoa(selector.Port))
 	return "http://" + endpoint + "/", nil
