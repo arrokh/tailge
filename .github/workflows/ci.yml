@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality and builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+
+      - name: Install pinned quality tools
+        env:
+          GOBIN: ${{ runner.temp }}/tailge-tools
+        run: |
+          mkdir -p "$GOBIN"
+          go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          echo "$GOBIN" >> "$GITHUB_PATH"
+
+      - name: Run quality checks and fuzz campaigns
+        run: make quality FUZZTIME=1s
+
+      - name: Build supported release targets
+        run: make cross-build
