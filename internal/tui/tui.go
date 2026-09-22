@@ -178,10 +178,11 @@ type workspaceModel struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	provider   *tailscale.Adapter
-	clipboard  Clipboard
-	controller *exposure.Controller
-	manager    config.Manager
+	provider          *tailscale.Adapter
+	clipboard         Clipboard
+	controller        *exposure.Controller
+	processTerminator discovery.ProcessTerminator
+	manager           config.Manager
 
 	searchInput  textinput.Model
 	paletteInput textinput.Model
@@ -195,7 +196,7 @@ func newInput(prompt string) textinput.Model {
 	return input
 }
 
-func newWorkspaceModel(discoverer *discovery.OSDiscoverer, provider *tailscale.Adapter, manager config.Manager) *workspaceModel {
+func newWorkspaceModel(discoverer discovery.ListenerObserver, processTerminator discovery.ProcessTerminator, provider *tailscale.Adapter, manager config.Manager) *workspaceModel {
 	ctx, cancel := context.WithCancel(context.Background())
 	search := newInput("/ ")
 	palette := newInput(": ")
@@ -209,9 +210,10 @@ func newWorkspaceModel(discoverer *discovery.OSDiscoverer, provider *tailscale.A
 			controller.MutationLockPath = manager.Path + ".exposure.lock"
 			return controller
 		}(),
-		manager:      manager,
-		searchInput:  search,
-		paletteInput: palette,
+		processTerminator: processTerminator,
+		manager:           manager,
+		searchInput:       search,
+		paletteInput:      palette,
 	}
 }
 
@@ -1138,10 +1140,6 @@ func (m *workspaceModel) startBatchOperation() tea.Cmd {
 	return tea.Sequence(cmds...)
 }
 
-type processTerminator interface {
-	Terminate(context.Context, model.Listener) error
-}
-
 func (m *workspaceModel) openTerminateProcess() {
 	if m.processBusy {
 		m.setBanner("Process termination is already in progress", true)
@@ -1206,14 +1204,7 @@ func (m *workspaceModel) startProcessTarget(target processTarget, batchIndex, ba
 			return processDoneMsg{itemID: target.itemID, pid: target.listener.PID, err: err, batchIndex: batchIndex, batchTotal: batchTotal}
 		}
 	}
-	if m.controller == nil || m.controller.Discoverer == nil {
-		err := fmt.Errorf("listener discovery is unavailable")
-		return func() tea.Msg {
-			return processDoneMsg{itemID: target.itemID, pid: listener.PID, err: err, batchIndex: batchIndex, batchTotal: batchTotal}
-		}
-	}
-	terminator, ok := m.controller.Discoverer.(processTerminator)
-	if !ok {
+	if m.processTerminator == nil {
 		err := fmt.Errorf("process termination is unsupported on this platform")
 		return func() tea.Msg {
 			return processDoneMsg{itemID: target.itemID, pid: listener.PID, err: err, batchIndex: batchIndex, batchTotal: batchTotal}
@@ -1225,7 +1216,7 @@ func (m *workspaceModel) startProcessTarget(target processTarget, batchIndex, ba
 	m.transient = fmt.Sprintf("Terminating process %d (%d/%d)", listener.PID, batchIndex+1, maxInt(1, batchTotal))
 	return func() tea.Msg {
 		defer cancel()
-		return processDoneMsg{itemID: target.itemID, pid: listener.PID, err: terminator.Terminate(ctx, listener), batchIndex: batchIndex, batchTotal: batchTotal}
+		return processDoneMsg{itemID: target.itemID, pid: listener.PID, err: m.processTerminator.Terminate(ctx, listener), batchIndex: batchIndex, batchTotal: batchTotal}
 	}
 }
 
@@ -1925,12 +1916,12 @@ func clamp(value, low, high int) int {
 // Run enters the full-screen Bubble Tea application. Bubble Tea owns the raw
 // terminal and alternate-screen lifecycle, including restoration on errors,
 // interrupts, and normal quit. No startup status is written outside it.
-func Run(in io.Reader, out, errOut io.Writer, discoverer *discovery.OSDiscoverer, provider *tailscale.Adapter, manager config.Manager) int {
+func Run(in io.Reader, out, errOut io.Writer, discoverer discovery.ListenerObserver, processTerminator discovery.ProcessTerminator, provider *tailscale.Adapter, manager config.Manager) int {
 	if in == nil {
 		fmt.Fprintln(errOut, "error: TUI input is unavailable")
 		return model.ErrInterrupted.ExitCode()
 	}
-	m := newWorkspaceModel(discoverer, provider, manager)
+	m := newWorkspaceModel(discoverer, processTerminator, provider, manager)
 	clipboardOutput := errOut
 	if clipboardOutput == nil {
 		clipboardOutput = out

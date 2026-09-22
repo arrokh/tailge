@@ -912,17 +912,20 @@ func TestWorkspaceFocusedConfirmationCanBeCancelledWithoutStickyError(t *testing
 	}
 }
 
-type fakeProcessDiscoverer struct{}
+type fakeProcessObserver struct{}
 
-func (fakeProcessDiscoverer) List(context.Context) (model.ListenerSnapshot, error) {
+func (fakeProcessObserver) List(context.Context) (model.ListenerSnapshot, error) {
 	return model.ListenerSnapshot{Authoritative: true}, nil
 }
 
-func (fakeProcessDiscoverer) Terminate(context.Context, model.Listener) error { return nil }
+type fakeProcessTerminator struct{}
+
+func (fakeProcessTerminator) Terminate(context.Context, model.Listener) error { return nil }
 
 func TestWorkspaceProcessTerminationUsesFocusedConfirmation(t *testing.T) {
 	m := workspaceFixture()
-	m.controller.Discoverer = fakeProcessDiscoverer{}
+	m.controller.Discoverer = fakeProcessObserver{}
+	m.processTerminator = fakeProcessTerminator{}
 	m.Update(keyRune('x'))
 	if m.modal != modalTerminateProcess || m.confirmFocus || !strings.Contains(m.View(), "TERMINATE PROCESS") || !strings.Contains(m.View(), "PID: 4242") {
 		t.Fatalf("x did not open focused non-token process confirmation: modal=%v focus=%t view=%q", m.modal, m.confirmFocus, m.View())
@@ -942,7 +945,8 @@ func TestWorkspaceProcessTerminationSupportsSelectedBatch(t *testing.T) {
 	m := workspaceFixture()
 	second := model.Listener{ID: "listener-two", Name: "api", Process: "python", ProcessStart: "test:4343", PID: 4343, Target: model.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}, Scope: model.ScopeLoopback, Metadata: model.MetadataComplete}
 	m.view.Items = append(m.view.Items, exposure.ReconciledItem{ID: second.ID, Listener: &second, State: model.ExposureState("disabled"), Mode: model.ExposureDisabled})
-	m.controller.Discoverer = fakeProcessDiscoverer{}
+	m.controller.Discoverer = fakeProcessObserver{}
+	m.processTerminator = fakeProcessTerminator{}
 	m.Update(keyRune('v'))
 	m.Update(keyRune('j'))
 	m.Update(keyRune('v'))
