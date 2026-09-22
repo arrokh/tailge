@@ -373,6 +373,19 @@ func (c *Controller) routeManagedLocked(route model.ExposureRoute) bool {
 	return false
 }
 
+func (c *Controller) decorateExposureRoutes(snapshot *model.ExposureSnapshot) {
+	if snapshot == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range snapshot.Routes {
+		if c.routeManagedLocked(snapshot.Routes[i]) {
+			snapshot.Routes[i].Ownership = model.OwnershipManaged
+		}
+	}
+}
+
 func (c *Controller) Refresh(ctx context.Context) (View, error) {
 	if c.Discoverer == nil || c.Provider == nil {
 		return View{}, model.NewError(model.ErrDependency, "exposure", "discovery and exposure providers are required", true, "unavailable", "Configure providers and retry.")

@@ -143,7 +143,7 @@ The safety gate is fail-closed: stale, ambiguous, unavailable, unsupported, exte
 
 `workspaceModel` supplies current observations and readiness through the action-availability seam. The session consumes those choices without reading the refresh lifecycle directly. This keeps `EXPOSURE ACTION` stable while refresh runs and keeps safety checks fail-closed.
 
-The operation start remains in `internal/tui/tui.go` because it must register the target with the workspace's Applying lifecycle. It rechecks the action session's preview, re-evaluates current action availability at the mutation boundary, and refuses to start while refresh is pending or readiness has become unsafe. The transaction implementation now lives in `internal/exposure/transaction.go`, where lock acquisition, preflight, exact mutation, verification, rollback, ownership, and operation events stay together.
+The operation start remains in `internal/tui/tui.go` because it must register the target with the workspace's Applying lifecycle. It rechecks the action session's preview, re-evaluates current action availability at the mutation boundary, and refuses to start while refresh is pending or readiness has become unsafe. `internal/exposure/exact_operation.go` owns the shared lock, preflight, exact mutation, verification, and rollback protocol; `internal/exposure/transaction.go` adapts its result into Controller lifecycle, ownership, and operation events.
 
 ## Listener observation and process termination
 
