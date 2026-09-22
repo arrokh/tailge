@@ -166,9 +166,15 @@ The compatibility `OSDiscoverer` name forwards to the observer and is retained f
 
 The Controller remains the reconciliation and lifecycle owner, while the transaction implementation concentrates mutation knowledge. CLI and Service workspace callers do not repeat the protocol.
 
+## Tailscale provider protocol
+
+The provider adapter is split into cohesive internal modules while preserving the `Exposer` surface. `provider_commands.go` owns executable discovery, bounded command execution, timeout/cancellation and provider-error classification, sanitization, and redaction. `provider_status.go` owns status decoding, target/handler validation, Serve/Funnel route observation, partial snapshots, and `AllowFunnel`-only interpretation. `provider_capabilities.go` owns version/help capability detection and readiness policy. `provider_mutation.go` owns exact Set/Remove translation and precondition checks. `provider_identity.go` owns target matching and route fingerprints; `route_identity.go` remains the canonical selector and handler-validation module.
+
+Each parser and policy module remains directly fixture-testable without starting a command. The command adapter is the only owner of Tailscale syntax and bounded output; callers continue to request domain operations and cannot reconstruct provider selectors. Malformed, incomplete, permission-denied, timed-out, or redaction-sensitive provider output remains fail-closed.
+
 ## Provider route identity
 
-`internal/tailscale/route_identity.go` owns canonical route identity. `RouteIdentity` is the shared representation used by route hashes and managed-route fingerprints; deterministic listener selectors are parsed once and rejected when they are service-shaped or otherwise ambiguous. Status walking and command execution stay in `tailscale.Adapter`, but provider selector rules no longer need to be reconstructed by exposure callers. The status parser also treats an `AllowFunnel`-only payload as an authoritative empty route set: permission can outlive the last handler, and that state must not be mistaken for an unknown active route.
+`internal/tailscale/route_identity.go` owns canonical route identity. `RouteIdentity` is the shared representation used by route hashes and managed-route fingerprints; deterministic listener selectors are parsed once and rejected when they are service-shaped or otherwise ambiguous. Provider status walking, capability/readiness evaluation, command execution, and exact mutation translation now have separate internal owners, while provider selector rules no longer need to be reconstructed by exposure callers. The status parser also treats an `AllowFunnel`-only payload as an authoritative empty route set: permission can outlive the last handler, and that state must not be mistaken for an unknown active route.
 
 ## Compatibility probe lifecycle
 
@@ -214,8 +220,8 @@ List rendering, details, selection continuity, and exposure action targeting all
 
 The module tests are intentionally close to their seams:
 
-- `internal/exposure/transaction.go` is exercised through controller mutation tests in `reconcile_test.go`, including approval invalidation, rollback, ownership revocation, exact route selection, and cross-operation safety.
-- `internal/tailscale/route_identity.go` has direct selector and fingerprint tests in `tailscale_test.go`; parser and command tests cover the Adapter's use of the same identity rules.
+- `internal/exposure/exact_operation.go` is exercised through controller mutation tests in `reconcile_test.go`, including approval invalidation, rollback, ownership revocation, exact route selection, and cross-operation safety.
+- `internal/tailscale/provider_status.go`, `provider_capabilities.go`, `provider_mutation.go`, and `route_identity.go` have direct parser, capability, readiness, selector, fingerprint, and command-adapter tests in `tailscale_test.go`.
 - `internal/probe/probe.go` has direct target and route-identity tests in `probe_test.go`, plus full disposable lifecycle tests in `cmd/tailge/main_test.go`.
 - `internal/tui/workspace_policy.go` is exercised by action availability, process identity, batch operation, and Applying lifecycle tests in `tui_test.go`.
 - `internal/discovery` has independent listener-observer parsing/fallback tests and process-terminator identity/cancellation tests in `discovery_test.go`.
