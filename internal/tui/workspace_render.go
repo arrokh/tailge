@@ -14,18 +14,22 @@ import (
 )
 
 func (m *workspaceModel) View() string {
-	if m.width < 1 {
-		m.width = 120
+	// Rendering is a projection, not a state transition. Work on a shallow copy
+	// so layout defaults and computed list scrolling cannot mutate the decision
+	// state while Bubble Tea is asking for a frame.
+	render := *m
+	if render.width < 1 {
+		render.width = 120
 	}
-	if m.height < 1 {
-		m.height = 30
+	if render.height < 1 {
+		render.height = 30
 	}
-	base := m.workspaceView()
-	if m.modal != modalNone {
-		if m.width < 30 || m.height < minModalRows {
+	base := render.workspaceView()
+	if render.modal != modalNone {
+		if render.width < 30 || render.height < minModalRows {
 			return "Terminal too small for this dialog — resize to at least 30 columns by 12 rows."
 		}
-		return overlay(base, m.modalView(), m.width, m.height)
+		return overlay(base, render.modalView(), render.width, render.height)
 	}
 	return base
 }
