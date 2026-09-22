@@ -4,19 +4,18 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/arrokh/tailge/internal/discovery"
 	"github.com/arrokh/tailge/internal/exposure"
-	"github.com/arrokh/tailge/internal/model"
+	"github.com/arrokh/tailge/internal/exposuredata"
 	"github.com/arrokh/tailge/internal/tailscale"
+	targetmodel "github.com/arrokh/tailge/internal/target"
+	"github.com/arrokh/tailge/internal/workspace"
 )
 
-type exposureActionAvailability struct {
-	disabled bool
-	reason   string
-	wait     bool
-}
+type exposureActionAvailability = workspace.ActionAvailability
 
 type exposureActionChoice struct {
-	mode     model.ExposureMode
+	mode     exposuredata.ExposureMode
 	label    string
 	disabled bool
 	reason   string
@@ -25,10 +24,10 @@ type exposureActionChoice struct {
 
 type exposureActionSession struct {
 	index    int
-	mode     model.ExposureMode
+	mode     exposuredata.ExposureMode
 	routeKey string
 	itemID   string
-	target   model.Target
+	target   targetmodel.Target
 	choices  []exposureActionChoice
 	confirm  bool
 	preview  actionPreview
@@ -41,18 +40,18 @@ type actionPreview struct {
 	selectionHash string
 }
 
-func modeIndex(mode model.ExposureMode) int {
+func modeIndex(mode exposuredata.ExposureMode) int {
 	switch mode {
-	case model.ExposureServe:
+	case exposuredata.ExposureServe:
 		return 1
-	case model.ExposureFunnel:
+	case exposuredata.ExposureFunnel:
 		return 2
 	default:
 		return 0
 	}
 }
 
-func (s *exposureActionSession) open(itemID string, target model.Target, mode model.ExposureMode) {
+func (s *exposureActionSession) open(itemID string, target targetmodel.Target, mode exposuredata.ExposureMode) {
 	s.itemID = itemID
 	s.target = target
 	s.mode = mode
@@ -63,17 +62,17 @@ func (s *exposureActionSession) open(itemID string, target model.Target, mode mo
 	s.preview = actionPreview{}
 }
 
-func (s *exposureActionSession) refreshChoices(availability func(model.ExposureMode) exposureActionAvailability) {
+func (s *exposureActionSession) refreshChoices(availability func(exposuredata.ExposureMode) workspace.ActionAvailability) {
 	s.choices = []exposureActionChoice{
-		{mode: model.ExposureDisabled, label: "Disabled"},
-		{mode: model.ExposureServe, label: "Serve (tailnet only)"},
-		{mode: model.ExposureFunnel, label: "Funnel (public internet)"},
+		{mode: exposuredata.ExposureDisabled, label: "Disabled"},
+		{mode: exposuredata.ExposureServe, label: "Serve (tailnet only)"},
+		{mode: exposuredata.ExposureFunnel, label: "Funnel (public internet)"},
 	}
 	for index := range s.choices {
 		state := availability(s.choices[index].mode)
-		s.choices[index].disabled = state.disabled
-		s.choices[index].reason = state.reason
-		s.choices[index].wait = state.wait
+		s.choices[index].disabled = state.Disabled
+		s.choices[index].reason = state.Reason
+		s.choices[index].wait = state.Wait
 	}
 }
 
@@ -115,10 +114,10 @@ func selectionFingerprint(items []exposure.ReconciledItem) string {
 // routeFingerprint delegates provider-independent route identity to the
 // canonical Tailscale identity module. Ownership/state availability is checked
 // separately by the workspace safety gate.
-func routeFingerprint(routes []model.ExposureRoute, target *model.Target) string {
-	matched := make([]model.ExposureRoute, 0, len(routes))
+func routeFingerprint(routes []exposuredata.ExposureRoute, target *targetmodel.Target) string {
+	matched := make([]exposuredata.ExposureRoute, 0, len(routes))
 	for _, route := range routes {
-		if target != nil && !model.TargetsMatch(route.Target, *target) {
+		if target != nil && !targetmodel.TargetsMatch(route.Target, *target) {
 			continue
 		}
 		matched = append(matched, route)
@@ -126,7 +125,7 @@ func routeFingerprint(routes []model.ExposureRoute, target *model.Target) string
 	return tailscale.RoutesHash(matched)
 }
 
-func listenerFingerprint(snapshot model.ListenerSnapshot, target model.Target) string {
+func listenerFingerprint(snapshot discovery.ListenerSnapshot, target targetmodel.Target) string {
 	ids := []string{}
 	for _, listener := range snapshot.Listeners {
 		if exposure.Matches(listener.Target, target) {

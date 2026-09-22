@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"bytes"
@@ -13,10 +13,13 @@ import (
 
 	"github.com/arrokh/tailge/internal/config"
 	"github.com/arrokh/tailge/internal/discovery"
-	"github.com/arrokh/tailge/internal/model"
+	"github.com/arrokh/tailge/internal/exposuredata"
+	"github.com/arrokh/tailge/internal/fault"
 	"github.com/arrokh/tailge/internal/probe"
+	readinessmodel "github.com/arrokh/tailge/internal/readiness"
 	"github.com/arrokh/tailge/internal/runner"
 	"github.com/arrokh/tailge/internal/tailscale"
+	"github.com/arrokh/tailge/internal/target"
 	"github.com/arrokh/tailge/internal/tui"
 )
 
@@ -48,7 +51,7 @@ func TestScanHumanPreservesPartialListenersOnSourceError(t *testing.T) {
 	})}
 	a := app{discoverer: discoverer}
 	var out, errOut bytes.Buffer
-	if code := a.scan(nil, &out, &errOut); code != model.ErrPermission.ExitCode() || !strings.Contains(out.String(), "api") || !strings.Contains(errOut.String(), "Permission") {
+	if code := a.scan(nil, &out, &errOut); code != fault.ErrPermission.ExitCode() || !strings.Contains(out.String(), "api") || !strings.Contains(errOut.String(), "Permission") {
 		t.Fatalf("partial human scan lost data: code=%d out=%q err=%q", code, out.String(), errOut.String())
 	}
 }
@@ -87,25 +90,25 @@ func TestCompletionOutputsFixedShellScript(t *testing.T) {
 	if code := completion([]string{"bash"}, &out, &errOut); code != 0 || !strings.Contains(out.String(), "complete -F _tailge tailge") {
 		t.Fatalf("completion failed: code=%d out=%q err=%q", code, out.String(), errOut.String())
 	}
-	if code := completion([]string{"powershell"}, &out, &errOut); code != model.ErrInvalidInput.ExitCode() {
+	if code := completion([]string{"powershell"}, &out, &errOut); code != fault.ErrInvalidInput.ExitCode() {
 		t.Fatalf("invalid shell code=%d", code)
 	}
 }
 
 func TestReadinessExitAndJSONPreserveReadOnlyFailureClass(t *testing.T) {
-	readiness := model.Readiness{Status: model.ReadinessReadOnly, Modes: []model.ModeReadiness{{Mode: model.ExposureServe, Status: model.ReadinessReadOnly}}}
+	readiness := readinessmodel.Readiness{Status: readinessmodel.ReadinessReadOnly, Modes: []readinessmodel.ModeReadiness{{Mode: exposuredata.ExposureServe, Status: readinessmodel.ReadinessReadOnly}}}
 	var stdout, stderr bytes.Buffer
-	if got := reportDoctorWithCode(&stdout, &stderr, readiness, nil, true, readinessExit(readiness)); got != model.ErrDependency.ExitCode() {
+	if got := reportDoctorWithCode(&stdout, &stderr, readiness, nil, true, readinessExit(readiness)); got != fault.ErrDependency.ExitCode() {
 		t.Fatalf("readiness JSON exit=%d", got)
 	}
 	var payload response
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil || len(payload.Errors) == 0 {
 		t.Fatalf("readiness JSON omitted typed failure: err=%v payload=%#v", err, payload)
 	}
-	if got := readinessExit(readiness); got != model.ErrDependency.ExitCode() {
+	if got := readinessExit(readiness); got != fault.ErrDependency.ExitCode() {
 		t.Fatalf("read-only exit=%d", got)
 	}
-	if got := readinessExit(model.Readiness{Status: model.ReadinessReady}); got != model.ErrVerification.ExitCode() {
+	if got := readinessExit(readinessmodel.Readiness{Status: readinessmodel.ReadinessReady}); got != fault.ErrVerification.ExitCode() {
 		t.Fatalf("missing-mode exit=%d", got)
 	}
 }
@@ -155,7 +158,7 @@ func TestServeProbeVerifiesCleanupAndPersistsVersionEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	target := model.Target{Address: "127.0.0.1", Port: 39001, Protocol: "tcp"}.Normalized()
+	target := target.Target{Address: "127.0.0.1", Port: 39001, Protocol: "tcp"}.Normalized()
 	active := false
 	provider := &tailscale.Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
 		command := strings.Join(args, " ")
@@ -193,7 +196,7 @@ func TestServeProbeVerifiesCleanupAndPersistsVersionEvidence(t *testing.T) {
 	}
 	cfg := config.Defaults()
 	probeRunner := probe.Runner{Discoverer: discoverer, Provider: provider, Config: manager, MutationLockPath: manager.Path + ".exposure.lock"}
-	if err := probeRunner.Run(context.Background(), &cfg, target, model.ExposureServe, false); err != nil {
+	if err := probeRunner.Run(context.Background(), &cfg, target, exposuredata.ExposureServe, false); err != nil {
 		t.Fatal(err)
 	}
 	if active || cfg.ServeProbeVersion != "1.102.4" {
@@ -229,7 +232,7 @@ func TestDoctorDoesNotProbeWhenNodeIsNotReady(t *testing.T) {
 	})}
 	var stdout, stderr bytes.Buffer
 	code := (app{config: manager, tailscale: provider}).doctor([]string{"--tailscale", "--probe", "serve", "--target", "127.0.0.1:39001", "--confirm-test-route", "--json"}, &stdout, &stderr)
-	if code != model.ErrDependency.ExitCode() {
+	if code != fault.ErrDependency.ExitCode() {
 		t.Fatalf("not-ready node returned code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	for _, call := range calls {
@@ -267,7 +270,7 @@ func TestDoctorDoesNotOverwriteInvalidConfigDuringProbe(t *testing.T) {
 	}), Now: time.Now}
 	var stdout, stderr bytes.Buffer
 	code := (app{config: manager, tailscale: provider}).doctor([]string{"--tailscale", "--probe", "serve", "--target", "127.0.0.1:39001", "--confirm-test-route", "--json"}, &stdout, &stderr)
-	if code != model.ErrConfig.ExitCode() {
+	if code != fault.ErrConfig.ExitCode() {
 		t.Fatalf("invalid config did not block probe: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	data, err := os.ReadFile(manager.Path)
@@ -279,13 +282,13 @@ func TestDoctorDoesNotOverwriteInvalidConfigDuringProbe(t *testing.T) {
 func TestProbeRouteIdentityRequiresTransportAppropriateEvidence(t *testing.T) {
 	tests := []struct {
 		name  string
-		route model.ExposureRoute
+		route exposuredata.ExposureRoute
 		want  bool
 	}{
-		{"https with URL", model.ExposureRoute{ProviderKey: "serve:https=443", Mode: model.ExposureServe, URL: "https://dev.example.ts.net"}, true},
-		{"https without URL", model.ExposureRoute{ProviderKey: "serve:https=443", Mode: model.ExposureServe}, false},
-		{"tcp without URL", model.ExposureRoute{ProviderKey: "serve:tcp=443", Mode: model.ExposureServe}, true},
-		{"wrong mode", model.ExposureRoute{ProviderKey: "funnel:tcp=443", Mode: model.ExposureServe}, false},
+		{"https with URL", exposuredata.ExposureRoute{ProviderKey: "serve:https=443", Mode: exposuredata.ExposureServe, URL: "https://dev.example.ts.net"}, true},
+		{"https without URL", exposuredata.ExposureRoute{ProviderKey: "serve:https=443", Mode: exposuredata.ExposureServe}, false},
+		{"tcp without URL", exposuredata.ExposureRoute{ProviderKey: "serve:tcp=443", Mode: exposuredata.ExposureServe}, true},
+		{"wrong mode", exposuredata.ExposureRoute{ProviderKey: "funnel:tcp=443", Mode: exposuredata.ExposureServe}, false},
 	}
 	for _, test := range tests {
 		if got := probe.RouteIdentityComplete(test.route); got != test.want {
@@ -299,7 +302,7 @@ func TestUncertainProbeCleansObservedRouteEvenWithUnexpectedSelector(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	target := model.Target{Address: "127.0.0.1", Port: 39004, Protocol: "tcp"}.Normalized()
+	target := target.Target{Address: "127.0.0.1", Port: 39004, Protocol: "tcp"}.Normalized()
 	active := false
 	provider := &tailscale.Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
 		command := strings.Join(args, " ")
@@ -335,7 +338,7 @@ func TestUncertainProbeCleansObservedRouteEvenWithUnexpectedSelector(t *testing.
 	}
 	cfg := config.Defaults()
 	probeRunner := probe.Runner{Discoverer: discoverer, Provider: provider, Config: manager, MutationLockPath: manager.Path + ".exposure.lock"}
-	if err := probeRunner.Run(context.Background(), &cfg, target, model.ExposureServe, false); err == nil {
+	if err := probeRunner.Run(context.Background(), &cfg, target, exposuredata.ExposureServe, false); err == nil {
 		t.Fatal("uncertain probe unexpectedly succeeded")
 	}
 	if active {
@@ -344,8 +347,8 @@ func TestUncertainProbeCleansObservedRouteEvenWithUnexpectedSelector(t *testing.
 }
 
 func TestProbeCleanupDoesNotAssumeUnseenRouteWasRemoved(t *testing.T) {
-	target := model.Target{Address: "127.0.0.1", Port: 39003, Protocol: "tcp"}.Normalized()
-	err := (probe.Runner{}).CleanupRoute(context.Background(), target, model.ExposureServe, model.ExposureSnapshot{Authoritative: true, Routes: []model.ExposureRoute{}}, "")
+	target := target.Target{Address: "127.0.0.1", Port: 39003, Protocol: "tcp"}.Normalized()
+	err := (probe.Runner{}).CleanupRoute(context.Background(), target, exposuredata.ExposureServe, exposuredata.ExposureSnapshot{Authoritative: true, Routes: []exposuredata.ExposureRoute{}}, "")
 	if err == nil || !strings.Contains(err.Error(), "not observed") {
 		t.Fatalf("unseen probe route was treated as cleaned: %v", err)
 	}
@@ -356,7 +359,7 @@ func TestFunnelProbeRequiresPublicConfirmationAndCleansExactRoute(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	target := model.Target{Address: "127.0.0.1", Port: 39002, Protocol: "tcp"}.Normalized()
+	target := target.Target{Address: "127.0.0.1", Port: 39002, Protocol: "tcp"}.Normalized()
 	active := false
 	provider := &tailscale.Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
 		command := strings.Join(args, " ")
@@ -394,10 +397,10 @@ func TestFunnelProbeRequiresPublicConfirmationAndCleansExactRoute(t *testing.T) 
 	}
 	cfg := config.Defaults()
 	probeRunner := probe.Runner{Discoverer: discoverer, Provider: provider, Config: manager, MutationLockPath: manager.Path + ".exposure.lock"}
-	if err := probeRunner.Run(context.Background(), &cfg, target, model.ExposureFunnel, false); err == nil || active {
+	if err := probeRunner.Run(context.Background(), &cfg, target, exposuredata.ExposureFunnel, false); err == nil || active {
 		t.Fatalf("unconfirmed funnel probe mutated state: active=%t err=%v", active, err)
 	}
-	if err := probeRunner.Run(context.Background(), &cfg, target, model.ExposureFunnel, true); err != nil {
+	if err := probeRunner.Run(context.Background(), &cfg, target, exposuredata.ExposureFunnel, true); err != nil {
 		t.Fatal(err)
 	}
 	if active || cfg.FunnelProbeVersion != "1.102.4" {
@@ -435,7 +438,7 @@ func TestTUIKeepsDiscoveryAvailableWhenTailscaleIsUnavailable(t *testing.T) {
 	}), Now: time.Now}
 	var out, errOut bytes.Buffer
 	code := tui.Run(delayedReader{Reader: strings.NewReader("?\nq\n"), delay: 500 * time.Millisecond}, &out, &errOut, discoverer, discovery.NewProcessTerminator(discoverer), provider, manager)
-	if code != 0 || !strings.Contains(out.String(), "web") || !strings.Contains(out.String(), string(model.ReadinessUnknown)) {
+	if code != 0 || !strings.Contains(out.String(), "web") || !strings.Contains(out.String(), string(readinessmodel.ReadinessUnknown)) {
 		t.Fatalf("TUI lost discovery/readiness state: code=%d out=%q err=%q", code, out.String(), errOut.String())
 	}
 }

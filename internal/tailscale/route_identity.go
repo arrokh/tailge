@@ -9,7 +9,8 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/arrokh/tailge/internal/model"
+	"github.com/arrokh/tailge/internal/exposuredata"
+	nettarget "github.com/arrokh/tailge/internal/target"
 )
 
 // RouteIdentity is the provider-independent identity retained for exact
@@ -20,13 +21,13 @@ type RouteIdentity struct {
 	ProviderKey string
 	Service     string
 	Path        string
-	Target      model.Target
-	Mode        model.ExposureMode
+	Target      nettarget.Target
+	Mode        exposuredata.ExposureMode
 	URL         string
 	Backend     string
 }
 
-func IdentityOf(route model.ExposureRoute) RouteIdentity {
+func IdentityOf(route exposuredata.ExposureRoute) RouteIdentity {
 	return RouteIdentity{ID: route.ID, ProviderKey: route.ProviderKey, Service: route.Service, Path: route.Path, Target: route.Target, Mode: route.Mode, URL: route.URL, Backend: route.Backend}
 }
 
@@ -34,7 +35,7 @@ func (identity RouteIdentity) CanonicalKey() string {
 	return strings.Join([]string{identity.ID, identity.ProviderKey, identity.Service, identity.Path, identity.Target.Key(), string(identity.Mode), identity.URL, identity.Backend}, "\x00")
 }
 
-func RouteFingerprint(route model.ExposureRoute) string {
+func RouteFingerprint(route exposuredata.ExposureRoute) string {
 	hash := sha256.Sum256([]byte(IdentityOf(route).CanonicalKey()))
 	return hex.EncodeToString(hash[:])
 }
@@ -43,12 +44,12 @@ func RouteFingerprint(route model.ExposureRoute) string {
 // Funnel. Service-style provider identities are deliberately not parsed here:
 // they do not identify a deterministic listener port.
 type ListenerSelector struct {
-	Mode      model.ExposureMode
+	Mode      exposuredata.ExposureMode
 	Transport string
 	Port      int
 }
 
-func ParseListenerSelector(value string, expectedMode model.ExposureMode) (ListenerSelector, error) {
+func ParseListenerSelector(value string, expectedMode exposuredata.ExposureMode) (ListenerSelector, error) {
 	parts := strings.SplitN(value, ":", 2)
 	if len(parts) != 2 || parts[0] != string(expectedMode) {
 		return ListenerSelector{}, fmt.Errorf("selector mode does not match requested exposure mode")
@@ -121,7 +122,7 @@ func isTargetField(key string) bool {
 	}
 }
 
-func targetArgument(target model.Target) string {
+func targetArgument(target nettarget.Target) string {
 	target = target.Normalized()
 	wildcard := target.Address == "0.0.0.0" || target.Address == "::"
 	if wildcard {
@@ -131,7 +132,7 @@ func targetArgument(target model.Target) string {
 			target.Address = "::1"
 		}
 	}
-	if !wildcard && model.ScopeForAddress(target.Address) == model.ScopeLoopback {
+	if !wildcard && nettarget.ScopeForAddress(target.Address) == nettarget.ScopeLoopback {
 		if strings.Contains(target.Address, ":") {
 			return "http://localhost:" + strconv.Itoa(target.Port)
 		}
@@ -140,7 +141,7 @@ func targetArgument(target model.Target) string {
 	return "http://" + target.String()
 }
 
-func targetArgumentForTransport(target model.Target, transport string) string {
+func targetArgumentForTransport(target nettarget.Target, transport string) string {
 	target = target.Normalized()
 	wildcard := target.Address == "0.0.0.0" || target.Address == "::"
 	if wildcard {
@@ -151,7 +152,7 @@ func targetArgumentForTransport(target model.Target, transport string) string {
 		}
 	}
 	host := target.String()
-	if !wildcard && model.ScopeForAddress(target.Address) == model.ScopeLoopback && strings.Contains(target.Address, ":") {
+	if !wildcard && nettarget.ScopeForAddress(target.Address) == nettarget.ScopeLoopback && strings.Contains(target.Address, ":") {
 		host = "localhost:" + strconv.Itoa(target.Port)
 	}
 	if transport == "tcp" {
@@ -173,18 +174,18 @@ func validateHandlerSelection(service, path, backend string) error {
 	return nil
 }
 
-func ProviderKeyForTargetWithCapabilities(mode model.ExposureMode, target model.Target, caps Capabilities) string {
+func ProviderKeyForTargetWithCapabilities(mode exposuredata.ExposureMode, target nettarget.Target, caps Capabilities) string {
 	transport := "tcp"
 	port := target.Normalized().Port
-	if mode == model.ExposureFunnel && !caps.FunnelLegacy {
+	if mode == exposuredata.ExposureFunnel && !caps.FunnelLegacy {
 		// Funnel's public listener is independent of the local backend port.
 		port = 10000
 	}
 	return providerKeyForTransportAndPort(mode, transport, port)
 }
 
-func providerKeyForTransportAndPort(mode model.ExposureMode, transport string, port int) string {
-	if (mode != model.ExposureServe && mode != model.ExposureFunnel) || (transport != "https" && transport != "tcp") || port < 1 || port > 65535 {
+func providerKeyForTransportAndPort(mode exposuredata.ExposureMode, transport string, port int) string {
+	if (mode != exposuredata.ExposureServe && mode != exposuredata.ExposureFunnel) || (transport != "https" && transport != "tcp") || port < 1 || port > 65535 {
 		return ""
 	}
 	return string(mode) + ":" + transport + "=" + strconv.Itoa(port)
@@ -232,14 +233,14 @@ func validProviderService(value string) bool {
 	return true
 }
 
-func routeSelectorForPort(mode model.ExposureMode, transport string, port int) string {
+func routeSelectorForPort(mode exposuredata.ExposureMode, transport string, port int) string {
 	if port < 1 || port > 65535 {
 		return ""
 	}
 	if transport == "" {
 		transport = "https"
 	}
-	if mode == model.ExposureServe || mode == model.ExposureFunnel {
+	if mode == exposuredata.ExposureServe || mode == exposuredata.ExposureFunnel {
 		return string(mode) + ":" + transport + "=" + strconv.Itoa(port)
 	}
 	return ""
@@ -262,13 +263,13 @@ func handlerPath(path []string) string {
 	return ""
 }
 
-func routeID(mode model.ExposureMode, target model.Target, url, service, handler, backend, path string) string {
-	return model.StableID(string(mode), target.Key(), url, service, handler, backend, path)
+func routeID(mode exposuredata.ExposureMode, target nettarget.Target, url, service, handler, backend, path string) string {
+	return nettarget.StableID(string(mode), target.Key(), url, service, handler, backend, path)
 }
 
-func dedupRoutes(routes []model.ExposureRoute) []model.ExposureRoute {
+func dedupRoutes(routes []exposuredata.ExposureRoute) []exposuredata.ExposureRoute {
 	seen := map[string]bool{}
-	result := make([]model.ExposureRoute, 0, len(routes))
+	result := make([]exposuredata.ExposureRoute, 0, len(routes))
 	for _, route := range routes {
 		key := string(route.Mode) + ":" + route.ID
 		if route.ID == "" {

@@ -233,6 +233,8 @@ JSON responses use `schema_version: 1` and include `data`, `warnings`, and/or st
 
 ## Development and CI
 
+The CLI entrypoint in `cmd/tailge/main.go` delegates construction to `internal/bootstrap` and command parsing/reporting to `internal/cli`. The Service workspace implementation is organized by flow under `internal/tui`, while framework-independent mutation policy, readiness explanations, exact URL/transport classification, process fingerprints, and typed shortcut effects live in `internal/workspace`. Domain records are owned by `internal/target`, `internal/discovery`, `internal/exposuredata`, `internal/readiness`, and `internal/fault` rather than a shared model hub. The architecture guide documents these seams and the end-to-end safety flow.
+
 Run checks from the repository root:
 
 ```sh

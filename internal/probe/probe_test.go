@@ -6,15 +6,18 @@ import (
 	"testing"
 
 	"github.com/arrokh/tailge/internal/config"
-	"github.com/arrokh/tailge/internal/model"
+	"github.com/arrokh/tailge/internal/discovery"
+	"github.com/arrokh/tailge/internal/exposuredata"
+	"github.com/arrokh/tailge/internal/fault"
 	"github.com/arrokh/tailge/internal/tailscale"
+	"github.com/arrokh/tailge/internal/target"
 )
 
 type probeDiscoverer struct {
-	snapshot model.ListenerSnapshot
+	snapshot discovery.ListenerSnapshot
 }
 
-func (d probeDiscoverer) List(context.Context) (model.ListenerSnapshot, error) {
+func (d probeDiscoverer) List(context.Context) (discovery.ListenerSnapshot, error) {
 	return d.snapshot, nil
 }
 
@@ -25,15 +28,15 @@ type probeProvider struct {
 func (p *probeProvider) Capabilities(context.Context) (tailscale.Capabilities, error) {
 	return tailscale.Capabilities{}, nil
 }
-func (p *probeProvider) List(context.Context) (model.ExposureSnapshot, error) {
-	return model.ExposureSnapshot{Authoritative: true}, nil
+func (p *probeProvider) List(context.Context) (exposuredata.ExposureSnapshot, error) {
+	return exposuredata.ExposureSnapshot{Authoritative: true}, nil
 }
-func (p *probeProvider) Set(context.Context, tailscale.ExposureChange) (model.OperationReceipt, error) {
+func (p *probeProvider) Set(context.Context, tailscale.ExposureChange) (exposuredata.OperationReceipt, error) {
 	p.sets++
-	return model.OperationReceipt{}, errors.New("unexpected mutation")
+	return exposuredata.OperationReceipt{}, errors.New("unexpected mutation")
 }
-func (p *probeProvider) Remove(context.Context, tailscale.RouteSelector, string) (model.OperationReceipt, error) {
-	return model.OperationReceipt{}, errors.New("unexpected removal")
+func (p *probeProvider) Remove(context.Context, tailscale.RouteSelector, string) (exposuredata.OperationReceipt, error) {
+	return exposuredata.OperationReceipt{}, errors.New("unexpected removal")
 }
 func (p *probeProvider) Version(context.Context) (string, error) {
 	return "test", nil
@@ -46,13 +49,13 @@ func (probeConfigStore) Save(context.Context, config.Config) error { return nil 
 func TestRunnerRejectsNonLoopbackBeforeMutation(t *testing.T) {
 	provider := &probeProvider{}
 	runner := Runner{
-		Discoverer: probeDiscoverer{snapshot: model.ListenerSnapshot{Authoritative: true}},
+		Discoverer: probeDiscoverer{snapshot: discovery.ListenerSnapshot{Authoritative: true}},
 		Provider:   provider,
 		Config:     probeConfigStore{},
 	}
 	cfg := config.Defaults()
-	err := runner.Run(context.Background(), &cfg, model.Target{Address: "192.168.1.20", Port: 3000, Protocol: "tcp"}, model.ExposureServe, false)
-	if err == nil || model.AsAppError(err).Code != model.ErrUnsafe {
+	err := runner.Run(context.Background(), &cfg, target.Target{Address: "192.168.1.20", Port: 3000, Protocol: "tcp"}, exposuredata.ExposureServe, false)
+	if err == nil || fault.AsAppError(err).Code != fault.ErrUnsafe {
 		t.Fatalf("non-loopback probe was accepted: %v", err)
 	}
 	if provider.sets != 0 {
@@ -61,7 +64,7 @@ func TestRunnerRejectsNonLoopbackBeforeMutation(t *testing.T) {
 }
 
 func TestRouteIdentityCompleteRequiresExactSelector(t *testing.T) {
-	base := model.ExposureRoute{Mode: model.ExposureServe, URL: "https://dev.ts.net:443"}
+	base := exposuredata.ExposureRoute{Mode: exposuredata.ExposureServe, URL: "https://dev.ts.net:443"}
 	if RouteIdentityComplete(base) {
 		t.Fatal("route without provider selector was treated as exact")
 	}

@@ -7,8 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arrokh/tailge/internal/model"
+	"github.com/arrokh/tailge/internal/exposuredata"
+	"github.com/arrokh/tailge/internal/fault"
+	readinessmodel "github.com/arrokh/tailge/internal/readiness"
 	"github.com/arrokh/tailge/internal/runner"
+	"github.com/arrokh/tailge/internal/target"
 )
 
 func statusJSON(backend string, online bool) string {
@@ -85,7 +88,7 @@ func TestStatusRejectsMalformedNodeAddresses(t *testing.T) {
 	adapter := &Adapter{Binary: "tailscale", Runner: runner.FuncRunner(func(context.Context, string, ...string) (runner.Result, error) {
 		return runner.Result{Stdout: `{"BackendState":"Running","TailscaleIPs":["not-an-ip"]}`}, nil
 	})}
-	if _, err := adapter.Status(context.Background()); err == nil || model.AsAppError(err).Code != model.ErrUnknown {
+	if _, err := adapter.Status(context.Background()); err == nil || fault.AsAppError(err).Code != fault.ErrUnknown {
 		t.Fatalf("malformed node address was accepted: %v", err)
 	}
 }
@@ -111,26 +114,26 @@ func TestCapabilitiesRecognizesExactFunnelHelpWithoutBroadReset(t *testing.T) {
 
 func TestReadinessSeparatesServeAndFunnelMutationEvidence(t *testing.T) {
 	adapter := &Adapter{Runner: readinessRunner(), Binary: "tailscale", Now: func() time.Time { return time.Unix(100, 0) }}
-	readiness, err := adapter.Readiness(context.Background(), ReadinessOptions{ServeProbeVersion: "1.80.0"})
+	report, err := adapter.Readiness(context.Background(), ReadinessOptions{ServeProbeVersion: "1.80.0"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if readiness.Status != model.ReadinessReady {
-		t.Fatalf("overall readiness = %s, want ready", readiness.Status)
+	if report.Status != readinessmodel.ReadinessReady {
+		t.Fatalf("overall readiness = %s, want ready", report.Status)
 	}
-	var serve, funnel model.ModeReadiness
-	for _, mode := range readiness.Modes {
-		if mode.Mode == model.ExposureServe {
+	var serve, funnel readinessmodel.ModeReadiness
+	for _, mode := range report.Modes {
+		if mode.Mode == exposuredata.ExposureServe {
 			serve = mode
 		}
-		if mode.Mode == model.ExposureFunnel {
+		if mode.Mode == exposuredata.ExposureFunnel {
 			funnel = mode
 		}
 	}
-	if serve.Status != model.ReadinessReady || !serve.Probe {
+	if serve.Status != readinessmodel.ReadinessReady || !serve.Probe {
 		t.Fatalf("serve readiness = %#v", serve)
 	}
-	if funnel.Status != model.ReadinessReady || funnel.Probe || len(funnel.Checks) == 0 || funnel.Checks[0].Status != model.ReadinessReady {
+	if funnel.Status != readinessmodel.ReadinessReady || funnel.Probe || len(funnel.Checks) == 0 || funnel.Checks[0].Status != readinessmodel.ReadinessReady {
 		t.Fatalf("funnel readiness = %#v", funnel)
 	}
 }
@@ -138,7 +141,7 @@ func TestReadinessSeparatesServeAndFunnelMutationEvidence(t *testing.T) {
 func TestListPreservesDependencyExitClassWhenRoutesAreUnavailable(t *testing.T) {
 	adapter := &Adapter{Binary: "/missing/tailscale", Now: time.Now}
 	snapshot, err := adapter.List(context.Background())
-	if err == nil || snapshot.Error == nil || snapshot.Error.Code != model.ErrDependency || model.AsAppError(err).Code != model.ErrDependency {
+	if err == nil || snapshot.Error == nil || snapshot.Error.Code != fault.ErrDependency || fault.AsAppError(err).Code != fault.ErrDependency {
 		t.Fatalf("dependency was misclassified: snapshot=%#v err=%v", snapshot, err)
 	}
 }
@@ -151,7 +154,7 @@ func TestListRejectsStatusDiagnosticsAsNonAuthoritative(t *testing.T) {
 		return runner.Result{Stdout: `{}`}, nil
 	})}
 	snapshot, err := adapter.List(context.Background())
-	if err == nil || snapshot.Authoritative || snapshot.Error == nil || snapshot.Error.Code != model.ErrUnknown {
+	if err == nil || snapshot.Authoritative || snapshot.Error == nil || snapshot.Error.Code != fault.ErrUnknown {
 		t.Fatalf("diagnostic status was treated as authoritative: snapshot=%#v err=%v", snapshot, err)
 	}
 	if strings.Contains(err.Error(), "private") {
@@ -163,26 +166,26 @@ func TestReadinessFailureStillReportsBothModes(t *testing.T) {
 	adapter := &Adapter{Runner: runner.FuncRunner(func(context.Context, string, ...string) (runner.Result, error) {
 		return runner.Result{ExitCode: 1}, errors.New("daemon unavailable")
 	}), Binary: "tailscale", Now: time.Now}
-	readiness, err := adapter.Readiness(context.Background(), ReadinessOptions{})
-	if err == nil || len(readiness.Modes) != 2 {
-		t.Fatalf("expected error and two mode results: readiness=%#v err=%v", readiness, err)
+	report, err := adapter.Readiness(context.Background(), ReadinessOptions{})
+	if err == nil || len(report.Modes) != 2 {
+		t.Fatalf("expected error and two mode results: report=%#v err=%v", report, err)
 	}
-	for _, mode := range readiness.Modes {
-		if mode.Status != model.ReadinessNotReady && mode.Status != model.ReadinessUnknown {
+	for _, mode := range report.Modes {
+		if mode.Status != readinessmodel.ReadinessNotReady && mode.Status != readinessmodel.ReadinessUnknown {
 			t.Fatalf("mode %s hid readiness failure: %s", mode.Mode, mode.Status)
 		}
 	}
 }
 
 func TestParseListenerSelectorAndRouteFingerprint(t *testing.T) {
-	selector, err := ParseListenerSelector("serve:https=443", model.ExposureServe)
+	selector, err := ParseListenerSelector("serve:https=443", exposuredata.ExposureServe)
 	if err != nil || selector.Transport != "https" || selector.Port != 443 {
 		t.Fatalf("selector=%#v err=%v", selector, err)
 	}
-	if _, err := ParseListenerSelector("funnel:svc:api", model.ExposureFunnel); err == nil {
+	if _, err := ParseListenerSelector("funnel:svc:api", exposuredata.ExposureFunnel); err == nil {
 		t.Fatal("service selector was accepted as a deterministic listener")
 	}
-	first := model.ExposureRoute{ID: "route", ProviderKey: "serve:https=443", Target: model.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}, Mode: model.ExposureServe, URL: "https://dev.ts.net:443", Backend: "http://127.0.0.1:3000"}
+	first := exposuredata.ExposureRoute{ID: "route", ProviderKey: "serve:https=443", Target: target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}, Mode: exposuredata.ExposureServe, URL: "https://dev.ts.net:443", Backend: "http://127.0.0.1:3000"}
 	second := first
 	second.Backend = "tcp://127.0.0.1:3000"
 	if RouteFingerprint(first) == RouteFingerprint(second) {
@@ -196,60 +199,60 @@ func TestParseListenerSelectorAndRouteFingerprint(t *testing.T) {
 }
 
 func TestParseStatusFindsTCPRoute(t *testing.T) {
-	routes, err := parseStatus(model.ExposureServe, []byte(`{"TCP":{"443":"127.0.0.1:8080"}}`), time.Unix(1, 0))
+	routes, err := parseStatus(exposuredata.ExposureServe, []byte(`{"TCP":{"443":"127.0.0.1:8080"}}`), time.Unix(1, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(routes) != 1 {
 		t.Fatalf("got %d routes: %#v", len(routes), routes)
 	}
-	if routes[0].Target.Address != "127.0.0.1" || routes[0].Target.Port != 8080 || routes[0].Mode != model.ExposureServe || routes[0].ProviderKey != "serve:tcp=443" {
+	if routes[0].Target.Address != "127.0.0.1" || routes[0].Target.Port != 8080 || routes[0].Mode != exposuredata.ExposureServe || routes[0].ProviderKey != "serve:tcp=443" {
 		t.Fatalf("unexpected route: %#v", routes[0])
 	}
 }
 
 func TestParseStatusAcceptsFunnelPermissionWithoutHandler(t *testing.T) {
-	routes, err := parseStatus(model.ExposureFunnel, []byte(`{"AllowFunnel":{"dev.example.ts.net:10000":true}}`), time.Unix(1, 0))
+	routes, err := parseStatus(exposuredata.ExposureFunnel, []byte(`{"AllowFunnel":{"dev.example.ts.net:10000":true}}`), time.Unix(1, 0))
 	if err != nil || len(routes) != 0 {
 		t.Fatalf("permission-only Funnel status was not treated as an authoritative empty route set: routes=%#v err=%v", routes, err)
 	}
 }
 
 func TestParseStatusRejectsUnrecognizedNonemptyShape(t *testing.T) {
-	if _, err := parseStatus(model.ExposureServe, []byte(`{"unexpected":"value"}`), time.Unix(1, 0)); err == nil {
+	if _, err := parseStatus(exposuredata.ExposureServe, []byte(`{"unexpected":"value"}`), time.Unix(1, 0)); err == nil {
 		t.Fatal("unrecognized status shape was treated as authoritative empty state")
 	}
-	if _, err := parseStatus(model.ExposureServe, []byte(`{"Target":{"unexpected":true}}`), time.Unix(1, 0)); err == nil {
+	if _, err := parseStatus(exposuredata.ExposureServe, []byte(`{"Target":{"unexpected":true}}`), time.Unix(1, 0)); err == nil {
 		t.Fatal("non-string target field was treated as authoritative")
 	}
-	if _, err := parseStatus(model.ExposureServe, []byte(`{"TCP":null}`), time.Unix(1, 0)); err == nil {
+	if _, err := parseStatus(exposuredata.ExposureServe, []byte(`{"TCP":null}`), time.Unix(1, 0)); err == nil {
 		t.Fatal("null TCP field was treated as authoritative")
 	}
-	if _, err := parseStatus(model.ExposureServe, []byte(`{"TCP":{"443":"not-a-target"}}`), time.Unix(1, 0)); err == nil {
+	if _, err := parseStatus(exposuredata.ExposureServe, []byte(`{"TCP":{"443":"not-a-target"}}`), time.Unix(1, 0)); err == nil {
 		t.Fatal("malformed TCP route was treated as authoritative")
 	}
-	if _, err := parseStatus(model.ExposureServe, []byte(`{"TCP":{"443":{"HTTPS":true}}}`), time.Unix(1, 0)); err == nil {
+	if _, err := parseStatus(exposuredata.ExposureServe, []byte(`{"TCP":{"443":{"HTTPS":true}}}`), time.Unix(1, 0)); err == nil {
 		t.Fatal("recognized route metadata without a target was treated as empty state")
 	}
-	if _, err := parseStatus(model.ExposureServe, []byte(`{"Service":"svc:missing-target"}`), time.Unix(1, 0)); err == nil {
+	if _, err := parseStatus(exposuredata.ExposureServe, []byte(`{"Service":"svc:missing-target"}`), time.Unix(1, 0)); err == nil {
 		t.Fatal("recognized service metadata without a route was treated as empty state")
 	}
-	if _, err := parseStatus(model.ExposureServe, []byte(`{"Web":{"dev.example.ts.net":"not-a-route"}}`), time.Unix(1, 0)); err == nil {
+	if _, err := parseStatus(exposuredata.ExposureServe, []byte(`{"Web":{"dev.example.ts.net":"not-a-route"}}`), time.Unix(1, 0)); err == nil {
 		t.Fatal("malformed Web route was treated as authoritative")
 	}
-	if _, err := parseStatus(model.ExposureServe, []byte(`{"Web":{"dev.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000","Backend":"http://127.0.0.1:3001"}}}}}`), time.Unix(1, 0)); err == nil {
+	if _, err := parseStatus(exposuredata.ExposureServe, []byte(`{"Web":{"dev.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000","Backend":"http://127.0.0.1:3001"}}}}}`), time.Unix(1, 0)); err == nil {
 		t.Fatal("conflicting handler targets were treated as authoritative")
 	}
-	if _, err := parseStatus(model.ExposureServe, []byte(`{"TCP":{"443":"127.0.0.1:8080"},"AllowFunnel":{"dev.example.ts.net:443":"true"}}`), time.Unix(1, 0)); err == nil {
+	if _, err := parseStatus(exposuredata.ExposureServe, []byte(`{"TCP":{"443":"127.0.0.1:8080"},"AllowFunnel":{"dev.example.ts.net:443":"true"}}`), time.Unix(1, 0)); err == nil {
 		t.Fatal("malformed AllowFunnel permission was treated as private Serve")
 	}
-	if routes, err := parseStatus(model.ExposureServe, []byte(`{}`), time.Unix(1, 0)); err != nil || len(routes) != 0 {
+	if routes, err := parseStatus(exposuredata.ExposureServe, []byte(`{}`), time.Unix(1, 0)); err != nil || len(routes) != 0 {
 		t.Fatalf("empty status should represent no routes: routes=%#v err=%v", routes, err)
 	}
-	if routes, err := parseStatus(model.ExposureServe, []byte(`{"tcp":{"443":"127.0.0.1:8080"}}`), time.Unix(1, 0)); err != nil || len(routes) != 1 {
+	if routes, err := parseStatus(exposuredata.ExposureServe, []byte(`{"tcp":{"443":"127.0.0.1:8080"}}`), time.Unix(1, 0)); err != nil || len(routes) != 1 {
 		t.Fatalf("case-insensitive TCP status was not parsed: routes=%#v err=%v", routes, err)
 	}
-	if routes, err := parseStatus(model.ExposureServe, []byte(`{"TCP":{"443":{"proxy":"127.0.0.1:8080"}}}`), time.Unix(1, 0)); err != nil || len(routes) != 1 {
+	if routes, err := parseStatus(exposuredata.ExposureServe, []byte(`{"TCP":{"443":{"proxy":"127.0.0.1:8080"}}}`), time.Unix(1, 0)); err != nil || len(routes) != 1 {
 		t.Fatalf("case-insensitive TCP target field was not parsed: routes=%#v err=%v", routes, err)
 	} else if routes[0].ProviderKey != "serve:tcp=443" {
 		t.Fatalf("TCP container was misclassified as HTTPS: %#v", routes[0])
@@ -257,7 +260,7 @@ func TestParseStatusRejectsUnrecognizedNonemptyShape(t *testing.T) {
 }
 
 func TestParseStatusHandlesUppercaseURLRouteKeys(t *testing.T) {
-	routes, err := parseStatus(model.ExposureServe, []byte(`{"HTTPS://DEV.example.ts.net:443":{"Proxy":"http://127.0.0.1:3000"}}`), time.Unix(1, 0))
+	routes, err := parseStatus(exposuredata.ExposureServe, []byte(`{"HTTPS://DEV.example.ts.net:443":{"Proxy":"http://127.0.0.1:3000"}}`), time.Unix(1, 0))
 	if err != nil || len(routes) != 1 {
 		t.Fatalf("routes=%#v err=%v", routes, err)
 	}
@@ -268,7 +271,7 @@ func TestParseStatusHandlesUppercaseURLRouteKeys(t *testing.T) {
 
 func TestParseStatusFindsWebProxyAndExactPublicPortSelector(t *testing.T) {
 	fixture := []byte(`{"TCP":{"443":{"HTTPS":true}},"Web":{"dev.example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"}}}}}`)
-	routes, err := parseStatus(model.ExposureServe, fixture, time.Unix(1, 0))
+	routes, err := parseStatus(exposuredata.ExposureServe, fixture, time.Unix(1, 0))
 	if err != nil || len(routes) != 1 {
 		t.Fatalf("routes=%#v err=%v", routes, err)
 	}
@@ -278,8 +281,8 @@ func TestParseStatusFindsWebProxyAndExactPublicPortSelector(t *testing.T) {
 }
 
 func TestTargetMatchesIPv4AndIPv6Loopback(t *testing.T) {
-	ipv4 := model.Target{Address: "127.0.0.1", Port: 4323, Protocol: "tcp"}
-	ipv6 := model.Target{Address: "::1", Port: 4323, Protocol: "tcp"}
+	ipv4 := target.Target{Address: "127.0.0.1", Port: 4323, Protocol: "tcp"}
+	ipv6 := target.Target{Address: "::1", Port: 4323, Protocol: "tcp"}
 	if !targetMatches(ipv4, ipv6) || !targetMatches(ipv6, ipv4) {
 		t.Fatal("loopback families were not matched")
 	}
@@ -287,7 +290,7 @@ func TestTargetMatchesIPv4AndIPv6Loopback(t *testing.T) {
 
 func TestParseStatusAcceptsTailscaleUnbracketedIPv6Proxy(t *testing.T) {
 	fixture := []byte(`{"TCP":{"4322":{"HTTPS":true}},"Web":{"dev.example.ts.net:4322":{"Handlers":{"/":{"Proxy":"http://::1:4322"}}}}}`)
-	routes, err := parseStatus(model.ExposureServe, fixture, time.Unix(1, 0))
+	routes, err := parseStatus(exposuredata.ExposureServe, fixture, time.Unix(1, 0))
 	if err != nil || len(routes) != 1 || routes[0].Target.Address != "::1" || routes[0].Target.Port != 4322 {
 		t.Fatalf("unbracketed IPv6 proxy was not parsed: routes=%#v err=%v", routes, err)
 	}
@@ -295,31 +298,31 @@ func TestParseStatusAcceptsTailscaleUnbracketedIPv6Proxy(t *testing.T) {
 
 func TestParseStatusUsesAllowFunnelToSeparateServeAndFunnel(t *testing.T) {
 	private := []byte(`{"TCP":{"3000":{"HTTPS":true}},"Web":{"dev.example.ts.net:3000":{"Handlers":{"/":{"Proxy":"http://0.0.0.0:3000"}}}}}`)
-	serveRoutes, err := parseStatus(model.ExposureServe, private, time.Unix(1, 0))
+	serveRoutes, err := parseStatus(exposuredata.ExposureServe, private, time.Unix(1, 0))
 	if err != nil || len(serveRoutes) != 1 {
 		t.Fatalf("private Serve routes=%#v err=%v", serveRoutes, err)
 	}
-	funnelRoutes, err := parseStatus(model.ExposureFunnel, private, time.Unix(1, 0))
+	funnelRoutes, err := parseStatus(exposuredata.ExposureFunnel, private, time.Unix(1, 0))
 	if err != nil || len(funnelRoutes) != 0 {
 		t.Fatalf("private config was incorrectly classified as Funnel: routes=%#v err=%v", funnelRoutes, err)
 	}
 
 	public := []byte(`{"TCP":{"3000":{"HTTPS":true}},"Web":{"dev.example.ts.net:3000":{"Handlers":{"/":{"Proxy":"http://0.0.0.0:3000"}}}},"AllowFunnel":{"dev.example.ts.net:3000":true}}`)
-	serveRoutes, err = parseStatus(model.ExposureServe, public, time.Unix(1, 0))
+	serveRoutes, err = parseStatus(exposuredata.ExposureServe, public, time.Unix(1, 0))
 	if err != nil || len(serveRoutes) != 0 {
 		t.Fatalf("public config was incorrectly retained as Serve: routes=%#v err=%v", serveRoutes, err)
 	}
-	funnelRoutes, err = parseStatus(model.ExposureFunnel, public, time.Unix(1, 0))
-	if err != nil || len(funnelRoutes) != 1 || funnelRoutes[0].Mode != model.ExposureFunnel {
+	funnelRoutes, err = parseStatus(exposuredata.ExposureFunnel, public, time.Unix(1, 0))
+	if err != nil || len(funnelRoutes) != 1 || funnelRoutes[0].Mode != exposuredata.ExposureFunnel {
 		t.Fatalf("public config was not classified as Funnel: routes=%#v err=%v", funnelRoutes, err)
 	}
 
 	mixed := []byte(`{"Web":{"private.example.ts.net:3000":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"}}},"public.example.ts.net:3000":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3001"}}}},"AllowFunnel":{"private.example.ts.net:3000":false,"public.example.ts.net:3000":true}}`)
-	serveRoutes, err = parseStatus(model.ExposureServe, mixed, time.Unix(1, 0))
+	serveRoutes, err = parseStatus(exposuredata.ExposureServe, mixed, time.Unix(1, 0))
 	if err != nil || len(serveRoutes) != 1 || serveRoutes[0].URL != "https://private.example.ts.net:3000" {
 		t.Fatalf("host-specific private Serve route was misclassified: routes=%#v err=%v", serveRoutes, err)
 	}
-	funnelRoutes, err = parseStatus(model.ExposureFunnel, mixed, time.Unix(1, 0))
+	funnelRoutes, err = parseStatus(exposuredata.ExposureFunnel, mixed, time.Unix(1, 0))
 	if err != nil || len(funnelRoutes) != 1 || funnelRoutes[0].URL != "https://public.example.ts.net:3000" {
 		t.Fatalf("host-specific public Funnel route was misclassified: routes=%#v err=%v", funnelRoutes, err)
 	}
@@ -327,7 +330,7 @@ func TestParseStatusUsesAllowFunnelToSeparateServeAndFunnel(t *testing.T) {
 
 func TestParseStatusPreservesServicePathAndBackendIdentity(t *testing.T) {
 	fixture := []byte(`{"Service":"svc:api","Web":{"dev.example.ts.net:8443":{"Handlers":{"/admin":{"Proxy":"http://127.0.0.1:3000/admin"}}}}}`)
-	routes, err := parseStatus(model.ExposureServe, fixture, time.Unix(1, 0))
+	routes, err := parseStatus(exposuredata.ExposureServe, fixture, time.Unix(1, 0))
 	if err != nil || len(routes) != 1 {
 		t.Fatalf("routes=%#v err=%v", routes, err)
 	}
@@ -338,7 +341,7 @@ func TestParseStatusPreservesServicePathAndBackendIdentity(t *testing.T) {
 }
 
 func TestParseStatusDoesNotGuessRemovalSelectorWhenPublicPortIsMissing(t *testing.T) {
-	routes, err := parseStatus(model.ExposureServe, []byte(`{"Web":{"dev.example.ts.net":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"}}}}}`), time.Unix(1, 0))
+	routes, err := parseStatus(exposuredata.ExposureServe, []byte(`{"Web":{"dev.example.ts.net":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"}}}}}`), time.Unix(1, 0))
 	if err != nil || len(routes) != 1 {
 		t.Fatalf("routes=%#v err=%v", routes, err)
 	}
@@ -367,7 +370,7 @@ func TestListDoesNotDuplicatePrivateServeAsFunnel(t *testing.T) {
 		}
 	})}
 	snapshot, err := adapter.List(context.Background())
-	if err != nil || !snapshot.Authoritative || len(snapshot.Routes) != 1 || snapshot.Routes[0].Mode != model.ExposureServe {
+	if err != nil || !snapshot.Authoritative || len(snapshot.Routes) != 1 || snapshot.Routes[0].Mode != exposuredata.ExposureServe {
 		t.Fatalf("private Serve status was duplicated or misclassified: routes=%#v authoritative=%t err=%v", snapshot.Routes, snapshot.Authoritative, err)
 	}
 }
@@ -375,14 +378,14 @@ func TestListDoesNotDuplicatePrivateServeAsFunnel(t *testing.T) {
 func TestTargetArgumentUsesReachableBackendAddress(t *testing.T) {
 	cases := []struct {
 		name   string
-		target model.Target
+		target target.Target
 		want   string
 	}{
-		{name: "loopback", target: model.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}, want: "127.0.0.1:3000"},
-		{name: "ipv6 loopback", target: model.Target{Address: "::1", Port: 3000, Protocol: "tcp"}, want: "http://localhost:3000"},
-		{name: "ipv4 wildcard", target: model.Target{Address: "0.0.0.0", Port: 3000, Protocol: "tcp"}, want: "http://127.0.0.1:3000"},
-		{name: "ipv6 wildcard", target: model.Target{Address: "::", Port: 3000, Protocol: "tcp"}, want: "http://[::1]:3000"},
-		{name: "local network", target: model.Target{Address: "192.168.1.20", Port: 3000, Protocol: "tcp"}, want: "http://192.168.1.20:3000"},
+		{name: "loopback", target: target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}, want: "127.0.0.1:3000"},
+		{name: "ipv6 loopback", target: target.Target{Address: "::1", Port: 3000, Protocol: "tcp"}, want: "http://localhost:3000"},
+		{name: "ipv4 wildcard", target: target.Target{Address: "0.0.0.0", Port: 3000, Protocol: "tcp"}, want: "http://127.0.0.1:3000"},
+		{name: "ipv6 wildcard", target: target.Target{Address: "::", Port: 3000, Protocol: "tcp"}, want: "http://[::1]:3000"},
+		{name: "local network", target: target.Target{Address: "192.168.1.20", Port: 3000, Protocol: "tcp"}, want: "http://192.168.1.20:3000"},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -411,10 +414,10 @@ func TestSetUsesLoopbackBackendForWildcardTarget(t *testing.T) {
 			return runner.Result{}, errors.New("unexpected command: " + command)
 		}
 	})}
-	target := model.Target{Address: "0.0.0.0", Port: 3000, Protocol: "tcp"}.Normalized()
+	target := target.Target{Address: "0.0.0.0", Port: 3000, Protocol: "tcp"}.Normalized()
 	if _, err := adapter.Set(context.Background(), ExposureChange{
 		Target: target,
-		Mode:   model.ExposureServe,
+		Mode:   exposuredata.ExposureServe,
 		Preconditions: ExposurePrecondition{
 			RouteIDsHash:  hashIDs(nil),
 			AllRoutesHash: RoutesHash(nil),
@@ -444,13 +447,13 @@ func TestSetRefusesProviderEndpointCollision(t *testing.T) {
 			return runner.Result{}, errors.New("unexpected command: " + command)
 		}
 	})}
-	target := model.Target{Address: "127.0.0.1", Port: 8080, Protocol: "tcp"}.Normalized()
+	target := target.Target{Address: "127.0.0.1", Port: 8080, Protocol: "tcp"}.Normalized()
 	snapshot, err := adapter.List(context.Background())
 	if err != nil || len(snapshot.Routes) != 1 {
 		t.Fatalf("snapshot=%#v err=%v", snapshot, err)
 	}
-	_, err = adapter.Set(context.Background(), ExposureChange{Target: target, Mode: model.ExposureServe, Preconditions: ExposurePrecondition{RouteIDsHash: hashIDs(nil), AllRoutesHash: RoutesHash(snapshot.Routes)}})
-	if err == nil || model.AsAppError(err).Code != model.ErrUnsafe {
+	_, err = adapter.Set(context.Background(), ExposureChange{Target: target, Mode: exposuredata.ExposureServe, Preconditions: ExposurePrecondition{RouteIDsHash: hashIDs(nil), AllRoutesHash: RoutesHash(snapshot.Routes)}})
+	if err == nil || fault.AsAppError(err).Code != fault.ErrUnsafe {
 		t.Fatalf("endpoint collision was not refused: %v", err)
 	}
 	for _, call := range calls {
@@ -480,10 +483,10 @@ func TestSetRestoresExactProviderListenerSelector(t *testing.T) {
 			return runner.Result{}, errors.New("unexpected command: " + command)
 		}
 	})}
-	target := model.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}.Normalized()
+	target := target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}.Normalized()
 	_, err := adapter.Set(context.Background(), ExposureChange{
 		Target:      target,
-		Mode:        model.ExposureServe,
+		Mode:        exposuredata.ExposureServe,
 		ProviderKey: "serve:https=443",
 		Preconditions: ExposurePrecondition{
 			RouteIDsHash:  hashIDs(nil),
@@ -520,12 +523,12 @@ func TestFunnelRemoveUsesExactListenerFlagAndNeverReset(t *testing.T) {
 			return runner.Result{}, errors.New("unexpected command: " + command)
 		}
 	})}
-	target := model.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}.Normalized()
+	target := target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}.Normalized()
 	snapshot, err := adapter.List(context.Background())
 	if err != nil || len(snapshot.Routes) != 1 {
 		t.Fatalf("snapshot=%#v err=%v", snapshot, err)
 	}
-	_, err = adapter.Remove(context.Background(), RouteSelector{ID: "funnel:tcp=443", Target: &target, Mode: model.ExposureFunnel, Backend: "127.0.0.1:3000", AllRoutesHash: RoutesHash(snapshot.Routes)}, hashIDs([]string{snapshot.Routes[0].ID}))
+	_, err = adapter.Remove(context.Background(), RouteSelector{ID: "funnel:tcp=443", Target: &target, Mode: exposuredata.ExposureFunnel, Backend: "127.0.0.1:3000", AllRoutesHash: RoutesHash(snapshot.Routes)}, hashIDs([]string{snapshot.Routes[0].ID}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,7 +544,7 @@ func TestFunnelRemoveUsesExactListenerFlagAndNeverReset(t *testing.T) {
 
 func TestCommandErrorPreservesTimeoutOverDiagnostics(t *testing.T) {
 	err := (&Adapter{}).commandError("serve", runner.Result{ExitCode: -1, Stderr: "permission denied", Truncated: true}, context.DeadlineExceeded)
-	if err.Code != model.ErrTimeout || err.Exit != model.ErrTimeout.ExitCode() {
+	if err.Code != fault.ErrTimeout || err.Exit != fault.ErrTimeout.ExitCode() {
 		t.Fatalf("timeout was misclassified: %#v", err)
 	}
 }
@@ -568,6 +571,6 @@ func FuzzParseStatusNeverPanics(f *testing.F) {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, text string) {
-		_, _ = parseStatus(model.ExposureServe, []byte(text), time.Unix(1, 0))
+		_, _ = parseStatus(exposuredata.ExposureServe, []byte(text), time.Unix(1, 0))
 	})
 }

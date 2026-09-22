@@ -8,7 +8,8 @@ import (
 
 	"github.com/arrokh/tailge/internal/config"
 	"github.com/arrokh/tailge/internal/exposure"
-	"github.com/arrokh/tailge/internal/model"
+	"github.com/arrokh/tailge/internal/exposuredata"
+	"github.com/arrokh/tailge/internal/target"
 )
 
 // workspaceSnapshot is the presentation seam between reconciled observations
@@ -24,21 +25,21 @@ func newWorkspaceSnapshot(view exposure.View, query string, cfg config.Config) w
 	return workspaceSnapshot{view: view, query: query, cfg: cfg}
 }
 
-func itemTarget(item exposure.ReconciledItem) (model.Target, bool) {
+func itemTarget(item exposure.ReconciledItem) (target.Target, bool) {
 	if item.Listener != nil {
 		return item.Listener.Target, true
 	}
 	if len(item.Routes) > 0 {
 		return item.Routes[0].Target, true
 	}
-	return model.Target{}, false
+	return target.Target{}, false
 }
 
 func itemSection(item exposure.ReconciledItem) string {
 	if item.Listener != nil {
 		return "LOCAL LISTENERS"
 	}
-	if item.State == model.ExposureInactive {
+	if item.State == exposuredata.ExposureInactive {
 		return "INACTIVE CONFIGURED ROUTES"
 	}
 	return "UNKNOWN / UNAVAILABLE"
@@ -83,7 +84,7 @@ func deduplicatePortItems(items []exposure.ReconciledItem) []exposure.Reconciled
 }
 
 func snapshotItemCopy(item exposure.ReconciledItem) exposure.ReconciledItem {
-	item.Routes = append([]model.ExposureRoute(nil), item.Routes...)
+	item.Routes = append([]exposuredata.ExposureRoute(nil), item.Routes...)
 	return item
 }
 
@@ -150,7 +151,7 @@ func displayed(view exposure.View, filter string, cfg config.Config) []exposure.
 	items := visible(view, filter)
 	result := make([]exposure.ReconciledItem, 0, len(items))
 	for _, item := range items {
-		if !cfg.ShowInactiveConfiguredPorts && item.Listener == nil && item.State == model.ExposureInactive {
+		if !cfg.ShowInactiveConfiguredPorts && item.Listener == nil && item.State == exposuredata.ExposureInactive {
 			continue
 		}
 		if !cfg.ShowSystemListeners && item.Listener != nil && len(item.Routes) == 0 && knownSystemProcess(item.Listener.Process) {

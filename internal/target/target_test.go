@@ -1,4 +1,4 @@
-package model
+package target
 
 import (
 	"strings"

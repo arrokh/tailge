@@ -92,7 +92,7 @@ fuzz:
 	$(GO) test ./internal/config -run '^$$' -fuzz '^FuzzParseNeverPanics$$' -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/discovery -run '^$$' -fuzz '^FuzzParseLsofNeverPanics$$' -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/discovery -run '^$$' -fuzz '^FuzzParseSSNeverPanics$$' -fuzztime=$(FUZZTIME)
-	$(GO) test ./internal/model -run '^$$' -fuzz '^FuzzParseTargetNeverPanics$$' -fuzztime=$(FUZZTIME)
+	$(GO) test ./internal/target -run '^$$' -fuzz '^FuzzParseTargetNeverPanics$$' -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/tailscale -run '^$$' -fuzz '^FuzzParseStatusNeverPanics$$' -fuzztime=$(FUZZTIME)
 
 check: format-check test race vet

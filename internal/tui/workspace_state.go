@@ -6,8 +6,12 @@ import (
 	"time"
 
 	"github.com/arrokh/tailge/internal/config"
+	"github.com/arrokh/tailge/internal/discovery"
 	"github.com/arrokh/tailge/internal/exposure"
-	"github.com/arrokh/tailge/internal/model"
+	"github.com/arrokh/tailge/internal/exposuredata"
+	"github.com/arrokh/tailge/internal/readiness"
+	"github.com/arrokh/tailge/internal/target"
+	"github.com/arrokh/tailge/internal/workspace"
 )
 
 // workspaceState is the deterministic decision state for the Service workspace.
@@ -18,7 +22,7 @@ type workspaceState struct {
 	cfg          config.Config
 	configErr    error
 	view         exposure.View
-	readiness    model.Readiness
+	readiness    readiness.Readiness
 	viewErr      error
 	readyErr     error
 	banner       string
@@ -44,8 +48,8 @@ type workspaceState struct {
 	modal                   modalKind
 	disableRouteIndex       int
 	modalItemID             string
-	modalTarget             model.Target
-	modalProcess            model.Listener
+	modalTarget             target.Target
+	modalProcess            discovery.Listener
 	modalProcessFingerprint string
 	actionSession           exposureActionSession
 	confirmFocus            bool
@@ -79,12 +83,12 @@ func newWorkspaceState() workspaceState {
 	return workspaceState{
 		cfg:  config.Defaults(),
 		view: exposure.View{At: now},
-		readiness: model.Readiness{
+		readiness: readiness.Readiness{
 			At:     now,
-			Status: model.ReadinessUnknown,
-			Modes: []model.ModeReadiness{
-				{Mode: model.ExposureServe, Status: model.ReadinessUnknown},
-				{Mode: model.ExposureFunnel, Status: model.ReadinessUnknown},
+			Status: readiness.ReadinessUnknown,
+			Modes: []readiness.ModeReadiness{
+				{Mode: exposuredata.ExposureServe, Status: readiness.ReadinessUnknown},
+				{Mode: exposuredata.ExposureFunnel, Status: readiness.ReadinessUnknown},
 			},
 		},
 		focus:         focusList,
@@ -94,56 +98,6 @@ func newWorkspaceState() workspaceState {
 		width:         120,
 		height:        30,
 	}
-}
-
-// workspaceEffect is an explicit request from the decision state to the
-// Bubble Tea adapter. State transitions never open browsers, invoke commands,
-// mutate provider state, or terminate processes directly.
-type workspaceEffect struct {
-	kind workspaceEffectKind
-}
-
-type workspaceEffectKind uint8
-
-const (
-	workspaceEffectNone workspaceEffectKind = iota
-	workspaceEffectRefresh
-	workspaceEffectRetry
-	workspaceEffectOpenObservedURL
-	workspaceEffectOpenLocalURL
-	workspaceEffectCopyURL
-	workspaceEffectApplyExposure
-	workspaceEffectCancelOperation
-	workspaceEffectTerminateProcess
-	workspaceEffectStartProcessTermination
-	workspaceEffectConfirmCancellation
-	workspaceEffectConfirmQuit
-	workspaceEffectQuit
-)
-
-func (s workspaceState) effectForKey(key string) (workspaceEffect, bool) {
-	var kind workspaceEffectKind
-	switch key {
-	case "r":
-		kind = workspaceEffectRefresh
-	case "R":
-		kind = workspaceEffectRetry
-	case "o":
-		kind = workspaceEffectOpenObservedURL
-	case "O":
-		kind = workspaceEffectOpenLocalURL
-	case "y":
-		kind = workspaceEffectCopyURL
-	case "c":
-		kind = workspaceEffectCancelOperation
-	case "x":
-		kind = workspaceEffectTerminateProcess
-	case "q", "ctrl+c":
-		kind = workspaceEffectQuit
-	default:
-		return workspaceEffect{}, false
-	}
-	return workspaceEffect{kind: kind}, true
 }
 
 func (s *workspaceState) ensureSelectedItems() {
@@ -388,8 +342,8 @@ func (s *workspaceState) markApplying(key string) {
 	for i := range s.view.Items {
 		itemKey, ok := itemTarget(s.view.Items[i])
 		if ok && itemKey.Key() == key {
-			s.view.Items[i].OperationState = model.ExposureApplying
-			s.view.Items[i].State = model.ExposureApplying
+			s.view.Items[i].OperationState = exposuredata.ExposureApplying
+			s.view.Items[i].State = exposuredata.ExposureApplying
 		}
 	}
 }
@@ -401,11 +355,11 @@ func (s *workspaceState) applyLocalOperationResult(message operationDoneMsg) {
 			continue
 		}
 		if message.err != nil {
-			s.view.Items[i].OperationState = operationStateForError(message.err)
+			s.view.Items[i].OperationState = workspace.OperationStateForError(message.err)
 		} else if message.receipt.Verified {
-			s.view.Items[i].OperationState = model.ExposureSucceeded
+			s.view.Items[i].OperationState = exposuredata.ExposureSucceeded
 		} else {
-			s.view.Items[i].OperationState = model.ExposureUnverified
+			s.view.Items[i].OperationState = exposuredata.ExposureUnverified
 		}
 		copyReceipt := message.receipt
 		s.view.Items[i].LastOperation = &copyReceipt
@@ -416,7 +370,7 @@ func (s *workspaceState) markOperationUnverified(targetKey string) {
 	for i := range s.view.Items {
 		target, ok := itemTarget(s.view.Items[i])
 		if ok && target.Key() == targetKey {
-			s.view.Items[i].OperationState = model.ExposureUnverified
+			s.view.Items[i].OperationState = exposuredata.ExposureUnverified
 		}
 	}
 }

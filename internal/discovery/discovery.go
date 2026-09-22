@@ -15,12 +15,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/arrokh/tailge/internal/model"
+	"github.com/arrokh/tailge/internal/fault"
 	"github.com/arrokh/tailge/internal/runner"
+	"github.com/arrokh/tailge/internal/target"
 )
 
 type ListenerObserver interface {
-	List(context.Context) (model.ListenerSnapshot, error)
+	List(context.Context) (ListenerSnapshot, error)
 }
 
 // Discoverer is retained as a compatibility alias for listener observation.
@@ -28,7 +29,7 @@ type ListenerObserver interface {
 type Discoverer = ListenerObserver
 
 type ProcessTerminator interface {
-	Terminate(context.Context, model.Listener) error
+	Terminate(context.Context, Listener) error
 }
 
 type OSListenerObserver struct {
@@ -46,19 +47,19 @@ func New(r runner.Runner) *OSListenerObserver {
 	return &OSListenerObserver{Runner: r, OS: runtime.GOOS, Now: time.Now}
 }
 
-func (d *OSListenerObserver) List(ctx context.Context) (model.ListenerSnapshot, error) {
+func (d *OSListenerObserver) List(ctx context.Context) (ListenerSnapshot, error) {
 	now := time.Now()
 	if d.Now != nil {
 		now = d.Now()
 	}
-	snapshot := model.ListenerSnapshot{At: now, Source: "lsof", Authoritative: false, Listeners: []model.Listener{}}
+	snapshot := ListenerSnapshot{At: now, Source: "lsof", Authoritative: false, Listeners: []Listener{}}
 	if d.Runner == nil {
-		err := model.NewError(model.ErrDependency, "discovery", "no command runner is configured", true, "unavailable", "Retry the scan.")
+		err := fault.NewError(fault.ErrDependency, "discovery", "no command runner is configured", true, "unavailable", "Retry the scan.")
 		snapshot.Error = ptr(err.Safe())
 		return snapshot, err
 	}
 	if d.OS != "darwin" && d.OS != "linux" {
-		err := model.NewError(model.ErrUnsupported, "discovery", "local listener discovery is unsupported on "+d.OS, false, "unsupported", "Use a supported macOS or Linux build.")
+		err := fault.NewError(fault.ErrUnsupported, "discovery", "local listener discovery is unsupported on "+d.OS, false, "unsupported", "Use a supported macOS or Linux build.")
 		snapshot.Error = ptr(err.Safe())
 		return snapshot, err
 	}
@@ -81,7 +82,7 @@ func (d *OSListenerObserver) List(ctx context.Context) (model.ListenerSnapshot, 
 	for i, command := range commands {
 		result, err := d.Runner.Run(ctx, command.name, command.args...)
 		if err == nil || (result.ExitCode == 1 && strings.TrimSpace(result.Stdout) == "" && strings.TrimSpace(result.Stderr) == "") || strings.TrimSpace(result.Stdout) != "" {
-			var listeners []model.Listener
+			var listeners []Listener
 			var parseErr error
 			if command.name == "lsof" {
 				listeners, parseErr = ParseLsof(result.Stdout, now)
@@ -92,15 +93,15 @@ func (d *OSListenerObserver) List(ctx context.Context) (model.ListenerSnapshot, 
 				snapshot.Listeners = append(snapshot.Listeners, listeners...)
 				snapshot.Listeners = deduplicate(snapshot.Listeners)
 				snapshot.Warnings = append(snapshot.Warnings, parseErr.Error())
-				snapshot.Error = ptr(model.NewError(model.ErrUnknown, "discovery", parseErr.Error(), true, "partial", "Refresh after checking the listener provider.").Safe())
+				snapshot.Error = ptr(fault.NewError(fault.ErrUnknown, "discovery", parseErr.Error(), true, "partial", "Refresh after checking the listener provider.").Safe())
 				d.enrich(ctx, &snapshot)
-				return snapshot, model.NewError(model.ErrUnknown, "discovery", "listener output could not be parsed", true, "partial", "Retry the scan; no exposure changes were made.")
+				return snapshot, fault.NewError(fault.ErrUnknown, "discovery", "listener output could not be parsed", true, "partial", "Retry the scan; no exposure changes were made.")
 			}
 			if result.Truncated {
 				snapshot.Listeners = append(snapshot.Listeners, listeners...)
 				snapshot.Listeners = deduplicate(snapshot.Listeners)
 				d.enrich(ctx, &snapshot)
-				err := model.NewError(model.ErrUnknown, "discovery", "listener output exceeded the capture limit", true, "partial", "Reduce the number of listeners or retry the scan.")
+				err := fault.NewError(fault.ErrUnknown, "discovery", "listener output exceeded the capture limit", true, "partial", "Reduce the number of listeners or retry the scan.")
 				snapshot.Error = ptr(err.Safe())
 				return snapshot, err
 			}
@@ -153,38 +154,38 @@ func (d *OSListenerObserver) List(ctx context.Context) (model.ListenerSnapshot, 
 // Terminate is retained for compatibility with older callers. New callers
 // should receive an explicit ProcessTerminator instead of asserting this
 // capability on the listener observer.
-func (d *OSListenerObserver) Terminate(ctx context.Context, requested model.Listener) error {
+func (d *OSListenerObserver) Terminate(ctx context.Context, requested Listener) error {
 	if d == nil {
-		return model.NewError(model.ErrDependency, "discovery", "process termination is unavailable", true, "unavailable", "Refresh listener discovery and retry.")
+		return fault.NewError(fault.ErrDependency, "discovery", "process termination is unavailable", true, "unavailable", "Refresh listener discovery and retry.")
 	}
 	return NewProcessTerminator(d).Terminate(ctx, requested)
 }
 
-func (d *OSListenerObserver) enrich(ctx context.Context, snapshot *model.ListenerSnapshot) {
+func (d *OSListenerObserver) enrich(ctx context.Context, snapshot *ListenerSnapshot) {
 	for i := range snapshot.Listeners {
 		l := &snapshot.Listeners[i]
 		if l.PID == 0 {
-			l.Metadata = model.MetadataPartial
+			l.Metadata = MetadataPartial
 			continue
 		}
 		if command := processCommand(ctx, d.OS, l.PID); command != "" {
 			l.CommandLine = redactCommandLine(command)
 			if strings.Contains(l.CommandLine, "[truncated]") {
-				l.Metadata = model.MetadataPartial
+				l.Metadata = MetadataPartial
 			}
 		}
 		if start := processStartIdentity(ctx, d.OS, l.PID); start != "" {
 			l.ProcessStart = start
 		} else {
-			l.Metadata = model.MetadataPartial
+			l.Metadata = MetadataPartial
 		}
 		if l.Process == "" || l.Name == "" {
-			l.Metadata = model.MetadataPartial
+			l.Metadata = MetadataPartial
 		}
 		if l.CommandLine == "" {
 			// Process command line is optional and may be hidden by OS policy.
-			if l.Metadata == model.MetadataComplete {
-				l.Metadata = model.MetadataPartial
+			if l.Metadata == MetadataComplete {
+				l.Metadata = MetadataPartial
 			}
 		}
 	}
@@ -327,11 +328,11 @@ func redactCommandQueryValues(query string) string {
 	return result.String()
 }
 
-func ParseLsof(text string, now time.Time) ([]model.Listener, error) {
+func ParseLsof(text string, now time.Time) ([]Listener, error) {
 	type record struct {
 		pid     int
 		process string
-		targets []model.Target
+		targets []target.Target
 	}
 	var records []record
 	var current *record
@@ -340,17 +341,17 @@ func ParseLsof(text string, now time.Time) ([]model.Listener, error) {
 			records = append(records, *current)
 		}
 	}
-	build := func() []model.Listener {
-		var listeners []model.Listener
+	build := func() []Listener {
+		var listeners []Listener
 		for _, record := range records {
-			for _, target := range record.targets {
+			for _, observedTarget := range record.targets {
 				process := record.process
 				name := process
-				metadata := model.MetadataComplete
+				metadata := MetadataComplete
 				if record.pid <= 0 || process == "" {
-					metadata = model.MetadataPartial
+					metadata = MetadataPartial
 				}
-				listeners = append(listeners, model.Listener{ID: model.StableID(target.Key(), strconv.Itoa(record.pid), process), Target: target, Name: name, PID: record.pid, Process: process, Scope: model.ScopeForAddress(target.Address), Metadata: metadata, FirstSeen: now, LastSeen: now})
+				listeners = append(listeners, Listener{ID: target.StableID(observedTarget.Key(), strconv.Itoa(record.pid), process), Target: observedTarget, Name: name, PID: record.pid, Process: process, Scope: target.ScopeForAddress(observedTarget.Address), Metadata: metadata, FirstSeen: now, LastSeen: now})
 			}
 		}
 		return deduplicate(listeners)
@@ -392,8 +393,8 @@ func ParseLsof(text string, now time.Time) ([]model.Listener, error) {
 	return build(), nil
 }
 
-func ParseSS(text string, now time.Time) ([]model.Listener, error) {
-	var listeners []model.Listener
+func ParseSS(text string, now time.Time) ([]Listener, error) {
+	var listeners []Listener
 	for lineNo, line := range strings.Split(text, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 5 {
@@ -417,12 +418,12 @@ func ParseSS(text string, now time.Time) ([]model.Listener, error) {
 			return deduplicate(listeners), fmt.Errorf("unsupported protocol/state %q on line %d", fields[0], lineNo+1)
 		}
 		local := fields[localIndex]
-		target, err := parseEndpoint(local)
+		observedTarget, err := parseEndpoint(local)
 		if err != nil {
 			return deduplicate(listeners), fmt.Errorf("invalid ss endpoint %q on line %d: %w", local, lineNo+1, err)
 		}
 		pid, process := parseSSProcess(strings.Join(fields[5:], " "))
-		listeners = append(listeners, model.Listener{ID: model.StableID(target.Key(), strconv.Itoa(pid), process), Target: target, Name: process, PID: pid, Process: process, Scope: model.ScopeForAddress(target.Address), Metadata: metadata(pid, process), FirstSeen: now, LastSeen: now})
+		listeners = append(listeners, Listener{ID: target.StableID(observedTarget.Key(), strconv.Itoa(pid), process), Target: observedTarget, Name: process, PID: pid, Process: process, Scope: target.ScopeForAddress(observedTarget.Address), Metadata: metadata(pid, process), FirstSeen: now, LastSeen: now})
 	}
 	return deduplicate(listeners), nil
 }
@@ -458,7 +459,7 @@ func sanitizeText(value string) string {
 	}, value)
 }
 
-func parseEndpoint(value string) (model.Target, error) {
+func parseEndpoint(value string) (target.Target, error) {
 	value = strings.TrimSpace(value)
 	if arrow := strings.Index(value, "->"); arrow >= 0 {
 		value = value[:arrow]
@@ -466,45 +467,45 @@ func parseEndpoint(value string) (model.Target, error) {
 	if strings.HasPrefix(value, "[") {
 		end := strings.LastIndex(value, "]:")
 		if end < 0 {
-			return model.Target{}, fmt.Errorf("invalid endpoint %q", value)
+			return target.Target{}, fmt.Errorf("invalid endpoint %q", value)
 		}
 		address, port := value[1:end], value[end+2:]
 		p, err := strconv.Atoi(port)
 		if err != nil {
-			return model.Target{}, fmt.Errorf("invalid endpoint port")
+			return target.Target{}, fmt.Errorf("invalid endpoint port")
 		}
-		t := model.Target{Address: address, Port: p, Protocol: "tcp"}.Normalized()
+		t := target.Target{Address: address, Port: p, Protocol: "tcp"}.Normalized()
 		if err := t.Validate(); err != nil {
-			return model.Target{}, err
+			return target.Target{}, err
 		}
 		return t, nil
 	}
 	colon := strings.LastIndexByte(value, ':')
 	if colon < 1 {
-		return model.Target{}, fmt.Errorf("invalid endpoint %q", value)
+		return target.Target{}, fmt.Errorf("invalid endpoint %q", value)
 	}
 	address := value[:colon]
 	port, err := strconv.Atoi(value[colon+1:])
 	if err != nil {
-		return model.Target{}, fmt.Errorf("invalid endpoint port")
+		return target.Target{}, fmt.Errorf("invalid endpoint port")
 	}
-	t := model.Target{Address: address, Port: port, Protocol: "tcp"}.Normalized()
+	t := target.Target{Address: address, Port: port, Protocol: "tcp"}.Normalized()
 	if err := t.Validate(); err != nil {
-		return model.Target{}, err
+		return target.Target{}, err
 	}
 	return t, nil
 }
 
-func metadata(pid int, process string) model.MetadataQuality {
+func metadata(pid int, process string) MetadataQuality {
 	if pid > 0 && process != "" {
-		return model.MetadataComplete
+		return MetadataComplete
 	}
-	return model.MetadataPartial
+	return MetadataPartial
 }
 
-func deduplicate(listeners []model.Listener) []model.Listener {
+func deduplicate(listeners []Listener) []Listener {
 	seen := map[string]int{}
-	result := make([]model.Listener, 0, len(listeners))
+	result := make([]Listener, 0, len(listeners))
 	for _, listener := range listeners {
 		key := listener.Target.Key() + ":" + strconv.Itoa(listener.PID) + ":" + listener.Process
 		if index, ok := seen[key]; ok {
@@ -531,8 +532,8 @@ func isMissingCommand(err error) bool {
 	return errors.As(err, &execErr) && errors.Is(execErr.Err, exec.ErrNotFound)
 }
 
-func classifyCommandError(source, command string, result runner.Result, cause error) *model.AppError {
-	code := model.ErrDependency
+func classifyCommandError(source, command string, result runner.Result, cause error) *fault.AppError {
+	code := fault.ErrDependency
 	state := "unavailable"
 	message := command + " is unavailable"
 	if cause != nil {
@@ -541,24 +542,24 @@ func classifyCommandError(source, command string, result runner.Result, cause er
 	timedOut := cause != nil && errors.Is(cause, context.DeadlineExceeded)
 	cancelled := cause != nil && errors.Is(cause, context.Canceled)
 	if timedOut {
-		code = model.ErrTimeout
+		code = fault.ErrTimeout
 		state = "unknown"
 	} else if cancelled {
-		code = model.ErrCancelled
+		code = fault.ErrCancelled
 		state = "unknown"
 	} else if (cause != nil && strings.Contains(strings.ToLower(cause.Error()), "permission")) || strings.Contains(strings.ToLower(result.Stderr), "permission") || strings.Contains(strings.ToLower(result.Stderr), "not permitted") {
-		code = model.ErrPermission
+		code = fault.ErrPermission
 		state = "permission_denied"
 	}
 	if result.Truncated && !timedOut && !cancelled {
-		code = model.ErrUnknown
+		code = fault.ErrUnknown
 		state = "partial"
 		message = command + " output was truncated"
 	}
 	if result.Stderr != "" {
 		message += ": " + redactCommandLine(strings.TrimSpace(result.Stderr))
 	}
-	return model.WrapError(code, source, message, true, state, "Check the dependency and retry; no exposure changes were made.", cause)
+	return fault.WrapError(code, source, message, true, state, "Check the dependency and retry; no exposure changes were made.", cause)
 }
 
 func ptr[T any](value T) *T { return &value }

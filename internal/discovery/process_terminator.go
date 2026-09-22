@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/arrokh/tailge/internal/model"
+	"github.com/arrokh/tailge/internal/fault"
 )
 
 const processTerminationWait = 2 * time.Second
@@ -34,40 +34,40 @@ func NewProcessTerminator(observer ListenerObserver) *OSProcessTerminator {
 // Terminate sends SIGTERM to the exact process owning a selected listener. It
 // re-discovers the listener immediately before signalling and never escalates
 // to SIGKILL.
-func (t *OSProcessTerminator) Terminate(ctx context.Context, requested model.Listener) error {
+func (t *OSProcessTerminator) Terminate(ctx context.Context, requested Listener) error {
 	if err := ctx.Err(); err != nil {
-		return model.WrapError(model.ErrCancelled, "discovery", "process termination was cancelled", true, "cancelled", "Retry after reviewing the selected process.", err)
+		return fault.WrapError(fault.ErrCancelled, "discovery", "process termination was cancelled", true, "cancelled", "Retry after reviewing the selected process.", err)
 	}
 	if t == nil || t.Observer == nil {
-		return model.NewError(model.ErrDependency, "discovery", "process termination is unavailable", true, "unavailable", "Refresh listener discovery and retry.")
+		return fault.NewError(fault.ErrDependency, "discovery", "process termination is unavailable", true, "unavailable", "Refresh listener discovery and retry.")
 	}
 	if t.OS != "darwin" && t.OS != "linux" {
-		return model.NewError(model.ErrUnsupported, "discovery", "process termination is unsupported on "+t.OS, false, "unsupported", "Use a supported macOS or Linux build.")
+		return fault.NewError(fault.ErrUnsupported, "discovery", "process termination is unsupported on "+t.OS, false, "unsupported", "Use a supported macOS or Linux build.")
 	}
 	if requested.PID <= 1 || requested.PID == os.Getpid() {
-		return model.NewError(model.ErrUnsafe, "discovery", "refusing to terminate this or a protected process", false, "unsafe", "Select an application listener with a different PID.")
+		return fault.NewError(fault.ErrUnsafe, "discovery", "refusing to terminate this or a protected process", false, "unsafe", "Select an application listener with a different PID.")
 	}
 	if strings.TrimSpace(requested.Process) == "" || strings.TrimSpace(requested.ProcessStart) == "" {
-		return model.NewError(model.ErrUnknown, "discovery", "selected process identity is incomplete", true, "unknown", "Refresh until the process name and start identity are available before terminating it.")
+		return fault.NewError(fault.ErrUnknown, "discovery", "selected process identity is incomplete", true, "unknown", "Refresh until the process name and start identity are available before terminating it.")
 	}
 	current, err := t.Observer.List(ctx)
 	if err != nil {
 		return err
 	}
 	if !current.Authoritative || current.Error != nil {
-		return model.NewError(model.ErrUnknown, "discovery", "current listener state is not authoritative", true, "unknown", "Refresh listener discovery before terminating a process.")
+		return fault.NewError(fault.ErrUnknown, "discovery", "current listener state is not authoritative", true, "unknown", "Refresh listener discovery before terminating a process.")
 	}
 	matches := exactProcessListeners(current.Listeners, requested)
 	if len(matches) != 1 {
-		return model.NewError(model.ErrUnsafe, "discovery", "selected process or listener changed", true, "changed", "Refresh and select the current process before terminating it.")
+		return fault.NewError(fault.ErrUnsafe, "discovery", "selected process or listener changed", true, "changed", "Refresh and select the current process before terminating it.")
 	}
 	// Re-check the stable process-start identity immediately before signalling;
 	// PID equality alone is unsafe because the OS may have reused the PID.
 	if currentStart := processStartIdentity(ctx, t.OS, requested.PID); currentStart == "" || currentStart != requested.ProcessStart {
-		return model.NewError(model.ErrUnsafe, "discovery", "selected process identity changed", true, "changed", "Refresh and select the current process before terminating it.")
+		return fault.NewError(fault.ErrUnsafe, "discovery", "selected process identity changed", true, "changed", "Refresh and select the current process before terminating it.")
 	}
 	if err := syscall.Kill(requested.PID, syscall.SIGTERM); err != nil {
-		return model.WrapError(model.ErrOperation, "discovery", "could not send SIGTERM to "+strconv.Itoa(requested.PID), true, "failed", "Check process permissions and retry; no SIGKILL was attempted.", err)
+		return fault.WrapError(fault.ErrOperation, "discovery", "could not send SIGTERM to "+strconv.Itoa(requested.PID), true, "failed", "Check process permissions and retry; no SIGKILL was attempted.", err)
 	}
 	deadline := time.NewTimer(processTerminationWait)
 	defer deadline.Stop()
@@ -76,23 +76,23 @@ func (t *OSProcessTerminator) Terminate(ctx context.Context, requested model.Lis
 	for {
 		exists, existsErr := processExistsIdentity(ctx, t.OS, requested.PID, requested.ProcessStart)
 		if existsErr != nil {
-			return model.WrapError(model.ErrUnknown, "discovery", "could not verify process termination", true, "unknown", "Inspect the process manually; no SIGKILL was attempted.", existsErr)
+			return fault.WrapError(fault.ErrUnknown, "discovery", "could not verify process termination", true, "unknown", "Inspect the process manually; no SIGKILL was attempted.", existsErr)
 		}
 		if !exists {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
-			return model.WrapError(model.ErrCancelled, "discovery", "process termination verification was cancelled", true, "cancelled", "Inspect the process manually; no SIGKILL was attempted.", ctx.Err())
+			return fault.WrapError(fault.ErrCancelled, "discovery", "process termination verification was cancelled", true, "cancelled", "Inspect the process manually; no SIGKILL was attempted.", ctx.Err())
 		case <-deadline.C:
-			return model.NewError(model.ErrTimeout, "discovery", "process did not exit after SIGTERM", true, "unverified", "The process may ignore SIGTERM; inspect it manually. Tailge did not send SIGKILL.")
+			return fault.NewError(fault.ErrTimeout, "discovery", "process did not exit after SIGTERM", true, "unverified", "The process may ignore SIGTERM; inspect it manually. Tailge did not send SIGKILL.")
 		case <-tick.C:
 		}
 	}
 }
 
-func exactProcessListeners(listeners []model.Listener, requested model.Listener) []model.Listener {
-	matches := make([]model.Listener, 0, 1)
+func exactProcessListeners(listeners []Listener, requested Listener) []Listener {
+	matches := make([]Listener, 0, 1)
 	for _, listener := range listeners {
 		if listener.PID != requested.PID || listener.Target.Normalized().Key() != requested.Target.Normalized().Key() || listener.Process != requested.Process {
 			continue

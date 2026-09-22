@@ -5,13 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"net/url"
+	url "net/url"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/arrokh/tailge/internal/model"
+	"github.com/arrokh/tailge/internal/exposuredata"
+	"github.com/arrokh/tailge/internal/fault"
+	"github.com/arrokh/tailge/internal/target"
 )
 
 func (a *Adapter) Status(ctx context.Context) (status Status, err error) {
@@ -20,16 +22,16 @@ func (a *Adapter) Status(ctx context.Context) (status Status, err error) {
 		return Status{}, a.commandError("status", result, runErr)
 	}
 	if result.Truncated {
-		return Status{}, model.NewError(model.ErrUnknown, "tailscale", "status output was truncated", true, "partial", "Retry with a healthy Tailscale installation.")
+		return Status{}, fault.NewError(fault.ErrUnknown, "tailscale", "status output was truncated", true, "partial", "Retry with a healthy Tailscale installation.")
 	}
 	if strings.TrimSpace(result.Stderr) != "" {
-		return Status{}, model.NewError(model.ErrUnknown, "tailscale", "status emitted diagnostics: "+redact(strings.TrimSpace(result.Stderr)), true, "unknown", "Retry with a healthy Tailscale installation.")
+		return Status{}, fault.NewError(fault.ErrUnknown, "tailscale", "status emitted diagnostics: "+redact(strings.TrimSpace(result.Stderr)), true, "unknown", "Retry with a healthy Tailscale installation.")
 	}
 	if err := json.Unmarshal([]byte(result.Stdout), &status); err != nil {
-		return Status{}, model.WrapError(model.ErrUnknown, "tailscale", "cannot parse status JSON", true, "unknown", "Upgrade or repair Tailscale, then retry.", err)
+		return Status{}, fault.WrapError(fault.ErrUnknown, "tailscale", "cannot parse status JSON", true, "unknown", "Upgrade or repair Tailscale, then retry.", err)
 	}
 	if err := validateStatusIPs(status); err != nil {
-		return Status{}, model.WrapError(model.ErrUnknown, "tailscale", "status JSON contains an invalid node address", true, "unknown", "Retry after checking the Tailscale status output.", err)
+		return Status{}, fault.WrapError(fault.ErrUnknown, "tailscale", "status JSON contains an invalid node address", true, "unknown", "Retry after checking the Tailscale status output.", err)
 	}
 	return status, nil
 }
@@ -66,11 +68,11 @@ func hasValidNodeAddress(status Status) bool {
 	return false
 }
 
-func (a *Adapter) List(ctx context.Context) (model.ExposureSnapshot, error) {
+func (a *Adapter) List(ctx context.Context) (exposuredata.ExposureSnapshot, error) {
 	now := a.now()
-	snapshot := model.ExposureSnapshot{At: now, Source: "tailscale", Authoritative: false, Routes: []model.ExposureRoute{}}
-	serve, serveErr := a.listMode(ctx, model.ExposureServe, now)
-	funnel, funnelErr := a.listMode(ctx, model.ExposureFunnel, now)
+	snapshot := exposuredata.ExposureSnapshot{At: now, Source: "tailscale", Authoritative: false, Routes: []exposuredata.ExposureRoute{}}
+	serve, serveErr := a.listMode(ctx, exposuredata.ExposureServe, now)
+	funnel, funnelErr := a.listMode(ctx, exposuredata.ExposureFunnel, now)
 	if serveErr != nil || funnelErr != nil {
 		if serveErr != nil {
 			snapshot.Warnings = append(snapshot.Warnings, serveErr.Error())
@@ -91,89 +93,89 @@ func (a *Adapter) List(ctx context.Context) (model.ExposureSnapshot, error) {
 	return snapshot, nil
 }
 
-func aggregateReadError(first, second error) *model.AppError {
+func aggregateReadError(first, second error) *fault.AppError {
 	chosen := first
 	if chosen == nil {
 		chosen = second
 	}
 	if chosen == nil {
-		return model.NewError(model.ErrUnknown, "tailscale", "exposure state is incomplete", true, "unknown", "Retry before changing any exposure.")
+		return fault.NewError(fault.ErrUnknown, "tailscale", "exposure state is incomplete", true, "unknown", "Retry before changing any exposure.")
 	}
-	app := model.AsAppError(chosen)
+	app := fault.AsAppError(chosen)
 	code := app.Code
 	for _, candidate := range []error{first, second} {
 		if candidate == nil {
 			continue
 		}
-		next := model.AsAppError(candidate)
+		next := fault.AsAppError(candidate)
 		switch next.Code {
-		case model.ErrPermission:
-			code = model.ErrPermission
-		case model.ErrTimeout, model.ErrCancelled:
-			if code != model.ErrPermission {
+		case fault.ErrPermission:
+			code = fault.ErrPermission
+		case fault.ErrTimeout, fault.ErrCancelled:
+			if code != fault.ErrPermission {
 				code = next.Code
 			}
-		case model.ErrDependency:
-			if code != model.ErrPermission && code != model.ErrTimeout && code != model.ErrCancelled {
-				code = model.ErrDependency
+		case fault.ErrDependency:
+			if code != fault.ErrPermission && code != fault.ErrTimeout && code != fault.ErrCancelled {
+				code = fault.ErrDependency
 			}
-		case model.ErrUnknown:
-			if code == model.ErrOperation {
-				code = model.ErrUnknown
+		case fault.ErrUnknown:
+			if code == fault.ErrOperation {
+				code = fault.ErrUnknown
 			}
 		}
 	}
-	return model.WrapError(code, "tailscale", "exposure state is incomplete", true, "unknown", "Retry before changing any exposure.", chosen)
+	return fault.WrapError(code, "tailscale", "exposure state is incomplete", true, "unknown", "Retry before changing any exposure.", chosen)
 }
 
-func (a *Adapter) listMode(ctx context.Context, mode model.ExposureMode, now time.Time) (model.ExposureSnapshot, error) {
+func (a *Adapter) listMode(ctx context.Context, mode exposuredata.ExposureMode, now time.Time) (exposuredata.ExposureSnapshot, error) {
 	result, err := a.run(ctx, string(mode), "status", "--json")
 	if err != nil {
-		return model.ExposureSnapshot{At: now, Source: "tailscale " + string(mode)}, a.commandError(string(mode)+" status", result, err)
+		return exposuredata.ExposureSnapshot{At: now, Source: "tailscale " + string(mode)}, a.commandError(string(mode)+" status", result, err)
 	}
 	if result.Truncated {
-		return model.ExposureSnapshot{At: now, Source: "tailscale " + string(mode)}, model.NewError(model.ErrUnknown, "tailscale", string(mode)+" status output was truncated", true, "partial", "Retry before changing exposure.")
+		return exposuredata.ExposureSnapshot{At: now, Source: "tailscale " + string(mode)}, fault.NewError(fault.ErrUnknown, "tailscale", string(mode)+" status output was truncated", true, "partial", "Retry before changing exposure.")
 	}
 	if strings.TrimSpace(result.Stderr) != "" {
-		return model.ExposureSnapshot{At: now, Source: "tailscale " + string(mode)}, model.NewError(model.ErrUnknown, "tailscale", string(mode)+" status emitted diagnostics: "+redact(strings.TrimSpace(result.Stderr)), true, "unknown", "Retry with a healthy Tailscale installation.")
+		return exposuredata.ExposureSnapshot{At: now, Source: "tailscale " + string(mode)}, fault.NewError(fault.ErrUnknown, "tailscale", string(mode)+" status emitted diagnostics: "+redact(strings.TrimSpace(result.Stderr)), true, "unknown", "Retry with a healthy Tailscale installation.")
 	}
 	routes, err := parseStatus(mode, []byte(result.Stdout), now)
 	if err != nil {
-		return model.ExposureSnapshot{At: now, Source: "tailscale " + string(mode)}, err
+		return exposuredata.ExposureSnapshot{At: now, Source: "tailscale " + string(mode)}, err
 	}
-	return model.ExposureSnapshot{At: now, Source: "tailscale " + string(mode), Authoritative: true, Routes: routes}, nil
+	return exposuredata.ExposureSnapshot{At: now, Source: "tailscale " + string(mode), Authoritative: true, Routes: routes}, nil
 }
 
-func parseStatus(mode model.ExposureMode, data []byte, now time.Time) ([]model.ExposureRoute, error) {
+func parseStatus(mode exposuredata.ExposureMode, data []byte, now time.Time) ([]exposuredata.ExposureRoute, error) {
 	var value any
 	if strings.TrimSpace(string(data)) == "" {
-		return nil, model.NewError(model.ErrUnknown, "tailscale", string(mode)+" status output was empty", true, "unknown", "Retry the Tailscale status command.")
+		return nil, fault.NewError(fault.ErrUnknown, "tailscale", string(mode)+" status output was empty", true, "unknown", "Retry the Tailscale status command.")
 	}
 	if err := json.Unmarshal(data, &value); err != nil {
-		return nil, model.WrapError(model.ErrUnknown, "tailscale", "cannot parse "+string(mode)+" status JSON", true, "unknown", "Upgrade or repair Tailscale, then retry.", err)
+		return nil, fault.WrapError(fault.ErrUnknown, "tailscale", "cannot parse "+string(mode)+" status JSON", true, "unknown", "Upgrade or repair Tailscale, then retry.", err)
 	}
 	root, ok := value.(map[string]any)
 	if !ok {
-		return nil, model.NewError(model.ErrUnknown, "tailscale", string(mode)+" status JSON has an unsupported root shape", true, "unknown", "Retry after checking the Tailscale version.")
+		return nil, fault.NewError(fault.ErrUnknown, "tailscale", string(mode)+" status JSON has an unsupported root shape", true, "unknown", "Retry after checking the Tailscale version.")
 	}
 	if len(root) > 0 && !recognizedStatusShape(value) {
-		return nil, model.NewError(model.ErrUnknown, "tailscale", string(mode)+" status JSON has no recognized route fields", true, "unknown", "Retry after checking the Tailscale version.")
+		return nil, fault.NewError(fault.ErrUnknown, "tailscale", string(mode)+" status JSON has no recognized route fields", true, "unknown", "Retry after checking the Tailscale version.")
 	}
 	if err := validateStatusTargets(value, nil); err != nil {
-		return nil, model.WrapError(model.ErrUnknown, "tailscale", string(mode)+" status JSON contains an invalid target", true, "unknown", "Retry after checking the Tailscale version.", err)
+		return nil, fault.WrapError(fault.ErrUnknown, "tailscale", string(mode)+" status JSON contains an invalid target", true, "unknown", "Retry after checking the Tailscale version.", err)
 	}
 	if err := validateCompleteHandlers(value, nil); err != nil {
-		return nil, model.WrapError(model.ErrUnknown, "tailscale", string(mode)+" status JSON contains an unsupported or incomplete handler", true, "unknown", "Review the Tailscale configuration manually; tailge will not mutate incomplete state.", err)
+		return nil, fault.WrapError(fault.ErrUnknown, "tailscale", string(mode)+" status JSON contains an unsupported or incomplete handler", true, "unknown", "Review the Tailscale configuration manually; tailge will not mutate incomplete state.", err)
 	}
 	permissions, permissionErr := funnelPermissions(value)
 	if permissionErr != nil {
-		return nil, model.WrapError(model.ErrUnknown, "tailscale", string(mode)+" status JSON contains an invalid AllowFunnel field", true, "unknown", "Retry after checking the Tailscale status output.", permissionErr)
+		return nil, fault.WrapError(fault.ErrUnknown, "tailscale", string(mode)+" status JSON contains an invalid AllowFunnel field", true, "unknown", "Retry after checking the Tailscale status output.", permissionErr)
 	}
-	var routes []model.ExposureRoute
+	var routes []exposuredata.ExposureRoute
 	walkStatus(value, nil, "", "", mode, now, &routes)
 	routes = dedupRoutes(routes)
 	if len(root) > 0 && len(routes) == 0 && !onlyFunnelPermissionStatus(value) {
-		return nil, model.NewError(model.ErrUnknown, "tailscale", string(mode)+" status JSON contains recognized fields but no complete routes", true, "unknown", "Retry after checking the Tailscale status output.")
+		return nil, fault.NewError(fault.ErrUnknown, "tailscale", string(mode)+" status JSON contains recognized fields but no complete routes", true, "unknown", "Retry after checking the Tailscale status output.")
 	}
 	routes = filterFunnelRoutes(routes, permissions)
 	return routes, nil
@@ -280,30 +282,30 @@ func funnelPermissions(value any) (map[string]bool, error) {
 	return permissions, nil
 }
 
-func filterFunnelRoutes(routes []model.ExposureRoute, permissions map[string]bool) []model.ExposureRoute {
+func filterFunnelRoutes(routes []exposuredata.ExposureRoute, permissions map[string]bool) []exposuredata.ExposureRoute {
 	if len(permissions) == 0 {
 		if len(routes) == 0 {
 			return routes
 		}
-		filtered := make([]model.ExposureRoute, 0, len(routes))
+		filtered := make([]exposuredata.ExposureRoute, 0, len(routes))
 		for _, route := range routes {
-			if route.Mode == model.ExposureServe {
+			if route.Mode == exposuredata.ExposureServe {
 				filtered = append(filtered, route)
 			}
 		}
 		return filtered
 	}
-	filtered := make([]model.ExposureRoute, 0, len(routes))
+	filtered := make([]exposuredata.ExposureRoute, 0, len(routes))
 	for _, route := range routes {
 		funnel := funnelEnabledForRoute(route, permissions)
-		if (route.Mode == model.ExposureFunnel && funnel) || (route.Mode == model.ExposureServe && !funnel) {
+		if (route.Mode == exposuredata.ExposureFunnel && funnel) || (route.Mode == exposuredata.ExposureServe && !funnel) {
 			filtered = append(filtered, route)
 		}
 	}
 	return filtered
 }
 
-func funnelEnabledForRoute(route model.ExposureRoute, permissions map[string]bool) bool {
+func funnelEnabledForRoute(route exposuredata.ExposureRoute, permissions map[string]bool) bool {
 	ports := map[string]bool{strconv.Itoa(route.Target.Port): true}
 	if _, selector, ok := strings.Cut(route.ProviderKey, ":"); ok {
 		if _, providerPort, ok := strings.Cut(selector, "="); ok && providerPort != "" {
@@ -409,7 +411,7 @@ func validateStatusTargets(value any, path []string) error {
 					for port, route := range container {
 						switch typedRoute := route.(type) {
 						case string:
-							if _, err := model.ParseTarget(typedRoute, "tcp"); err != nil {
+							if _, err := target.ParseTarget(typedRoute, "tcp"); err != nil {
 								return fmt.Errorf("%s/%s: invalid TCP target: %w", sanitizeText(strings.Join(childPath, "/")), sanitizeText(port), err)
 							}
 						case map[string]any:
@@ -438,7 +440,7 @@ func validateStatusTargets(value any, path []string) error {
 				if !ok {
 					return fmt.Errorf("%s: target field must be a string", sanitizeText(strings.Join(childPath, "/")))
 				}
-				if _, err := model.ParseTarget(targetText, "tcp"); err != nil {
+				if _, err := target.ParseTarget(targetText, "tcp"); err != nil {
 					return fmt.Errorf("%s: %w", sanitizeText(strings.Join(childPath, "/")), err)
 				}
 			}
@@ -456,7 +458,7 @@ func validateStatusTargets(value any, path []string) error {
 	return nil
 }
 
-func walkStatus(value any, path []string, urlHint, serviceHint string, mode model.ExposureMode, now time.Time, routes *[]model.ExposureRoute) {
+func walkStatus(value any, path []string, urlHint, serviceHint string, mode exposuredata.ExposureMode, now time.Time, routes *[]exposuredata.ExposureRoute) {
 	if len(path) > maxStatusDepth {
 		return
 	}
@@ -496,7 +498,7 @@ func walkStatus(value any, path []string, urlHint, serviceHint string, mode mode
 			}
 			if isTargetField(key) {
 				if targetString, ok := child.(string); ok {
-					if target, err := model.ParseTarget(targetString, "tcp"); err == nil {
+					if target, err := target.ParseTarget(targetString, "tcp"); err == nil {
 						transport := ""
 						if containsPath(newPath, "web") {
 							transport = "https"
@@ -509,7 +511,7 @@ func walkStatus(value any, path []string, urlHint, serviceHint string, mode mode
 						// removal and rollback fail closed instead of guessing.
 						pathValue := handlerPath(newPath)
 						id := routeID(mode, target, nextURL, nextService, pathValue, targetString, strings.Join(newPath, "/"))
-						*routes = append(*routes, model.ExposureRoute{ID: id, ProviderKey: providerKey, Service: nextService, Path: pathValue, Backend: targetString, Target: target, Mode: mode, URL: redact(nextURL), Ownership: model.OwnershipUnknown, State: model.ExposureActive, LastSeen: now, Source: "tailscale " + string(mode)})
+						*routes = append(*routes, exposuredata.ExposureRoute{ID: id, ProviderKey: providerKey, Service: nextService, Path: pathValue, Backend: targetString, Target: target, Mode: mode, URL: redact(nextURL), Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive, LastSeen: now, Source: "tailscale " + string(mode)})
 					}
 				}
 			}
@@ -526,7 +528,7 @@ func walkStatus(value any, path []string, urlHint, serviceHint string, mode mode
 	}
 }
 
-func walkTCP(value any, path []string, urlHint, serviceHint string, mode model.ExposureMode, now time.Time, routes *[]model.ExposureRoute) {
+func walkTCP(value any, path []string, urlHint, serviceHint string, mode exposuredata.ExposureMode, now time.Time, routes *[]exposuredata.ExposureRoute) {
 	objects, ok := value.(map[string]any)
 	if !ok {
 		return
@@ -559,7 +561,7 @@ func walkTCP(value any, path []string, urlHint, serviceHint string, mode model.E
 		if targetText == "" {
 			continue
 		}
-		if target, err := model.ParseTarget(targetText, "tcp"); err == nil {
+		if target, err := target.ParseTarget(targetText, "tcp"); err == nil {
 			if target.Port == 0 {
 				if p, e := strconv.Atoi(portText); e == nil {
 					target.Port = p
@@ -569,7 +571,7 @@ func walkTCP(value any, path []string, urlHint, serviceHint string, mode model.E
 			// The TCP map key is the exact public listener selector; do not
 			// replace it with a service name when it is unavailable.
 			id := routeID(mode, target, urlHint, serviceHint, "", targetText, strings.Join(path, "/")+"/"+portText)
-			*routes = append(*routes, model.ExposureRoute{ID: id, ProviderKey: providerKey, Service: serviceHint, Backend: targetText, Target: target, Mode: mode, URL: redact(urlHint), Ownership: model.OwnershipUnknown, State: model.ExposureActive, LastSeen: now, Source: "tailscale " + string(mode)})
+			*routes = append(*routes, exposuredata.ExposureRoute{ID: id, ProviderKey: providerKey, Service: serviceHint, Backend: targetText, Target: target, Mode: mode, URL: redact(urlHint), Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive, LastSeen: now, Source: "tailscale " + string(mode)})
 		}
 	}
 }

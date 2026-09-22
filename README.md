@@ -63,7 +63,7 @@ Exposure mutations require an exact target, explicit confirmation where applicab
 ## Documentation
 
 - [`docs/usage.md`](docs/usage.md) — installation, CLI and TUI usage, configuration, safety, and development checks
-- [`docs/architecture.md`](docs/architecture.md) — system context, internal control flow, and safety invariants
+- [`docs/architecture.md`](docs/architecture.md) — system context, domain-scoped TUI modules, internal control flow, and safety invariants
 - [`docs/adr/0001-full-screen-tui.md`](docs/adr/0001-full-screen-tui.md) — full-screen Bubble Tea decision
 - [`CONTEXT.md`](CONTEXT.md) — domain language and interaction rules
 
