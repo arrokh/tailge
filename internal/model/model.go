@@ -170,6 +170,29 @@ func (t Target) Key() string {
 	return n.Protocol + ":" + n.Address + ":" + strconv.Itoa(n.Port)
 }
 
+// TargetsMatch applies the directional correlation policy used when an
+// observed route is compared with a local listener. Exact addresses match;
+// loopback families correlate; a loopback route may correlate with a wildcard
+// listener; wildcard routes correlate only with wildcard listeners. Callers
+// retain the listener's scope warning and must still reject ambiguity.
+func TargetsMatch(route, listener Target) bool {
+	route, listener = route.Normalized(), listener.Normalized()
+	if route.Protocol != listener.Protocol || route.Port != listener.Port {
+		return false
+	}
+	if route.Address == listener.Address {
+		return true
+	}
+	routeScope, listenerScope := ScopeForAddress(route.Address), ScopeForAddress(listener.Address)
+	if routeScope == ScopeLoopback && listenerScope == ScopeLoopback {
+		return true
+	}
+	if routeScope == ScopeWildcard && listenerScope == ScopeWildcard {
+		return true
+	}
+	return routeScope == ScopeLoopback && listenerScope == ScopeWildcard
+}
+
 func (t Target) String() string {
 	n := t.Normalized()
 	return net.JoinHostPort(n.Address, strconv.Itoa(n.Port))

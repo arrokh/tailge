@@ -9,19 +9,10 @@ import (
 	"github.com/arrokh/tailge/internal/model"
 )
 
+// targetMatches retains the provider-local name while delegating target
+// equivalence to the shared model policy.
 func targetMatches(a, b model.Target) bool {
-	a, b = a.Normalized(), b.Normalized()
-	if a.Protocol != b.Protocol || a.Port != b.Port {
-		return false
-	}
-	if a.Address == b.Address {
-		return true
-	}
-	if model.ScopeForAddress(a.Address) == model.ScopeLoopback && model.ScopeForAddress(b.Address) == model.ScopeLoopback {
-		return true
-	}
-	return (model.ScopeForAddress(a.Address) == model.ScopeLoopback && (b.Address == "0.0.0.0" || b.Address == "::")) ||
-		((a.Address == "0.0.0.0" || a.Address == "::") && (b.Address == "0.0.0.0" || b.Address == "::"))
+	return model.TargetsMatch(a, b)
 }
 
 func RoutesHash(routes []model.ExposureRoute) string {
@@ -30,6 +21,18 @@ func RoutesHash(routes []model.ExposureRoute) string {
 		identities = append(identities, IdentityOf(route).CanonicalKey())
 	}
 	return hashIDs(identities)
+}
+
+// RouteIDsHash fingerprints only the exact route IDs correlated with target.
+// It is shared by exposure preconditions and the provider's final recheck.
+func RouteIDsHash(routes []model.ExposureRoute, target model.Target) string {
+	ids := make([]string, 0, len(routes))
+	for _, route := range routes {
+		if targetMatches(route.Target, target) {
+			ids = append(ids, route.ID)
+		}
+	}
+	return hashIDs(ids)
 }
 
 func hashIDs(ids []string) string {

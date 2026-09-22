@@ -188,6 +188,11 @@ func TestParseListenerSelectorAndRouteFingerprint(t *testing.T) {
 	if RouteFingerprint(first) == RouteFingerprint(second) {
 		t.Fatal("route fingerprint ignored backend identity")
 	}
+	second = first
+	second.URL = "https://other.ts.net:443"
+	if RouteFingerprint(first) == RouteFingerprint(second) {
+		t.Fatal("route fingerprint ignored observed URL identity")
+	}
 }
 
 func TestParseStatusFindsTCPRoute(t *testing.T) {

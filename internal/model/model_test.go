@@ -23,6 +23,33 @@ func TestTargetNormalizationAndScopes(t *testing.T) {
 	}
 }
 
+func TestTargetsMatchPreservesDirectionalListenerCorrelation(t *testing.T) {
+	base := func(address string) Target {
+		return Target{Address: address, Port: 8080, Protocol: "tcp"}
+	}
+	tests := []struct {
+		name     string
+		route    Target
+		listener Target
+		want     bool
+	}{
+		{name: "exact", route: base("127.0.0.1"), listener: base("127.0.0.1"), want: true},
+		{name: "loopback families", route: base("127.0.0.1"), listener: base("::1"), want: true},
+		{name: "loopback route wildcard listener", route: base("127.0.0.1"), listener: base("0.0.0.0"), want: true},
+		{name: "wildcard route wildcard listener", route: base("0.0.0.0"), listener: base("::"), want: true},
+		{name: "wildcard route specific listener", route: base("0.0.0.0"), listener: base("127.0.0.1"), want: false},
+		{name: "port mismatch", route: base("127.0.0.1"), listener: Target{Address: "127.0.0.1", Port: 8081, Protocol: "tcp"}, want: false},
+		{name: "protocol mismatch", route: base("127.0.0.1"), listener: Target{Address: "127.0.0.1", Port: 8080, Protocol: "udp"}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := TargetsMatch(test.route, test.listener); got != test.want {
+				t.Fatalf("TargetsMatch(%#v, %#v) = %t, want %t", test.route, test.listener, got, test.want)
+			}
+		})
+	}
+}
+
 func TestTargetValidationRejectsUnsafeAddressText(t *testing.T) {
 	if err := (Target{Address: "127.0.0.1\n--help", Port: 8080, Protocol: "tcp"}).Validate(); err == nil {
 		t.Fatal("unsafe address text was accepted")
