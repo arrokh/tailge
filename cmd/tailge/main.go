@@ -25,9 +25,10 @@ import (
 const schemaVersion = 1
 
 type app struct {
-	config     config.Manager
-	discoverer *discovery.OSDiscoverer
-	tailscale  *tailscale.Adapter
+	config            config.Manager
+	discoverer        *discovery.OSDiscoverer
+	processTerminator discovery.ProcessTerminator
+	tailscale         *tailscale.Adapter
 }
 
 func newApp() app {
@@ -40,7 +41,7 @@ func newApp() app {
 		// an empty manager so scan can still work and report the failure there.
 		manager = config.Manager{}
 	}
-	return app{config: manager, discoverer: d, tailscale: t}
+	return app{config: manager, discoverer: d, processTerminator: discovery.NewProcessTerminator(d), tailscale: t}
 }
 
 type response struct {
@@ -65,7 +66,7 @@ func (a app) run(args []string, stdout, stderr io.Writer) int {
 			printError(stderr, model.NewError(model.ErrInvalidInput, "cli", "tailge requires a TTY for the interactive interface", false, "non_interactive", "Use `tailge scan`, `tailge exposure status`, or another CLI command."))
 			return 2
 		}
-		return tui.Run(os.Stdin, stdout, stderr, a.discoverer, a.tailscale, a.config)
+		return tui.Run(os.Stdin, stdout, stderr, a.discoverer, a.processTerminator, a.tailscale, a.config)
 	}
 	if args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
 		printUsage(stdout)

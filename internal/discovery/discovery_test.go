@@ -25,6 +25,43 @@ func TestExactProcessListenersRequiresStableIdentity(t *testing.T) {
 	}
 }
 
+type fakeListenerObserver struct {
+	snapshot model.ListenerSnapshot
+	err      error
+	calls    int
+}
+
+func (f *fakeListenerObserver) List(context.Context) (model.ListenerSnapshot, error) {
+	f.calls++
+	return f.snapshot, f.err
+}
+
+func TestProcessTerminatorUsesListenerObserverSeam(t *testing.T) {
+	observer := &fakeListenerObserver{snapshot: model.ListenerSnapshot{Authoritative: false}}
+	terminator := &OSProcessTerminator{Observer: observer, OS: "darwin"}
+	err := terminator.Terminate(context.Background(), model.Listener{PID: 4242, Process: "api", ProcessStart: "darwin:test", Target: model.Target{Address: "127.0.0.1", Port: 8080, Protocol: "tcp"}})
+	if err == nil || model.AsAppError(err).Code != model.ErrUnknown {
+		t.Fatalf("non-authoritative observation was not rejected: %v", err)
+	}
+	if observer.calls != 1 {
+		t.Fatalf("observer calls = %d, want 1", observer.calls)
+	}
+}
+
+func TestProcessTerminatorHonorsCancellationBeforeObservation(t *testing.T) {
+	observer := &fakeListenerObserver{}
+	terminator := &OSProcessTerminator{Observer: observer, OS: "darwin"}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := terminator.Terminate(ctx, model.Listener{PID: 4242, Process: "api", ProcessStart: "darwin:test"})
+	if err == nil || model.AsAppError(err).Code != model.ErrCancelled {
+		t.Fatalf("cancelled termination was not rejected: %v", err)
+	}
+	if observer.calls != 0 {
+		t.Fatalf("observer was called after cancellation: %d", observer.calls)
+	}
+}
+
 func TestProcessTerminationProtectsCurrentProcess(t *testing.T) {
 	d := &OSDiscoverer{OS: "darwin", Runner: runner.FuncRunner(func(context.Context, string, ...string) (runner.Result, error) {
 		t.Fatal("protected process check should run before discovery")

@@ -434,7 +434,7 @@ func TestTUIKeepsDiscoveryAvailableWhenTailscaleIsUnavailable(t *testing.T) {
 		return runner.Result{}, context.DeadlineExceeded
 	}), Now: time.Now}
 	var out, errOut bytes.Buffer
-	code := tui.Run(delayedReader{Reader: strings.NewReader("?\nq\n"), delay: 100 * time.Millisecond}, &out, &errOut, discoverer, provider, manager)
+	code := tui.Run(delayedReader{Reader: strings.NewReader("?\nq\n"), delay: 100 * time.Millisecond}, &out, &errOut, discoverer, discovery.NewProcessTerminator(discoverer), provider, manager)
 	if code != 0 || !strings.Contains(out.String(), "web") || !strings.Contains(out.String(), string(model.ReadinessUnknown)) {
 		t.Fatalf("TUI lost discovery/readiness state: code=%d out=%q err=%q", code, out.String(), errOut.String())
 	}

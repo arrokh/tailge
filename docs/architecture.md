@@ -93,7 +93,8 @@ flowchart TD
     State --> Action
 
     subgraph Sources[Observed system state]
-        Discovery[Local TCP discovery]
+        Discovery[ListenerObserver<br/>lsof / ss observation]
+        Termination[ProcessTerminator<br/>identity revalidation + SIGTERM]
         Controller[exposure.Controller<br/>reconciliation and transaction seam]
         Transaction[exposure transaction<br/>lock, preflight, mutate, verify, rollback]
         Adapter[tailscale.Adapter<br/>readiness and provider calls]
@@ -109,6 +110,8 @@ flowchart TD
     Identity --> Adapter
     Controller --> Transaction
     Transaction --> Adapter
+    Model --> Termination
+    Termination --> Discovery
     Adapter --> Controller
     Controller --> Observations[Reconciled listeners and routes]
     Observations --> Snapshot
@@ -141,6 +144,12 @@ The safety gate is fail-closed: stale, ambiguous, unavailable, unsupported, exte
 `workspaceModel` supplies current observations and readiness through the action-availability seam. The session consumes those choices without reading the refresh lifecycle directly. This keeps `EXPOSURE ACTION` stable while refresh runs and keeps safety checks fail-closed.
 
 The operation start remains in `internal/tui/tui.go` because it must register the target with the workspace's Applying lifecycle. It rechecks the action session's preview, re-evaluates current action availability at the mutation boundary, and refuses to start while refresh is pending or readiness has become unsafe. The transaction implementation now lives in `internal/exposure/transaction.go`, where lock acquisition, preflight, exact mutation, verification, rollback, ownership, and operation events stay together.
+
+## Listener observation and process termination
+
+`internal/discovery` exposes `ListenerObserver` and `ProcessTerminator` as separate consumer-owned seams. `OSListenerObserver` owns lsof/ss command selection, parsing, fallback, partial snapshots, metadata enrichment, bounded output, and redaction. `OSProcessTerminator` consumes only the observer seam: immediately before signalling it requires an authoritative exact listener match, revalidates PID, target, process name, command line when present, and process-start identity, then sends one SIGTERM and verifies without SIGKILL escalation. Cancellation, timeout, permission, and identity uncertainty remain fail-closed and report unknown or unverified state.
+
+The compatibility `OSDiscoverer` name forwards to the observer and is retained for existing CLI callers, but the Service workspace receives the listener observer and process terminator independently. This prevents process termination from depending on a concrete discovery type assertion and keeps observation tests independent from destructive-operation tests.
 
 ## Exposure transaction
 
@@ -209,6 +218,7 @@ The module tests are intentionally close to their seams:
 - `internal/tailscale/route_identity.go` has direct selector and fingerprint tests in `tailscale_test.go`; parser and command tests cover the Adapter's use of the same identity rules.
 - `internal/probe/probe.go` has direct target and route-identity tests in `probe_test.go`, plus full disposable lifecycle tests in `cmd/tailge/main_test.go`.
 - `internal/tui/workspace_policy.go` is exercised by action availability, process identity, batch operation, and Applying lifecycle tests in `tui_test.go`.
+- `internal/discovery` has independent listener-observer parsing/fallback tests and process-terminator identity/cancellation tests in `discovery_test.go`.
 - `internal/tui/action_session.go` has direct choice/fingerprint tests in `action_session_test.go`, plus action preview, refresh, route selection, and confirmation tests in `tui_test.go`.
 - `internal/tui/refresh_coordinator.go` has direct generation, coalescing, retry, and failure tests in `refresh_coordinator_test.go`.
 - `internal/tui/workspace_snapshot.go` has direct target-collapse tests in `workspace_snapshot_test.go`, plus selection, filtering, sorting, port collapse, and batch-target tests in `tui_test.go`.

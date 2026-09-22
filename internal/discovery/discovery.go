@@ -13,28 +13,40 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/arrokh/tailge/internal/model"
 	"github.com/arrokh/tailge/internal/runner"
 )
 
-type Discoverer interface {
+type ListenerObserver interface {
 	List(context.Context) (model.ListenerSnapshot, error)
 }
 
-type OSDiscoverer struct {
+// Discoverer is retained as a compatibility alias for listener observation.
+// New callers should depend on ListenerObserver or ProcessTerminator separately.
+type Discoverer = ListenerObserver
+
+type ProcessTerminator interface {
+	Terminate(context.Context, model.Listener) error
+}
+
+type OSListenerObserver struct {
 	Runner runner.Runner
 	OS     string
 	Now    func() time.Time
 }
 
-func New(r runner.Runner) *OSDiscoverer {
-	return &OSDiscoverer{Runner: r, OS: runtime.GOOS, Now: time.Now}
+// OSDiscoverer is retained as a compatibility name for the listener observer.
+// It also exposes Terminate as a forwarding method for existing callers; new
+// consumers should receive an explicit ProcessTerminator seam instead.
+type OSDiscoverer = OSListenerObserver
+
+func New(r runner.Runner) *OSListenerObserver {
+	return &OSListenerObserver{Runner: r, OS: runtime.GOOS, Now: time.Now}
 }
 
-func (d *OSDiscoverer) List(ctx context.Context) (model.ListenerSnapshot, error) {
+func (d *OSListenerObserver) List(ctx context.Context) (model.ListenerSnapshot, error) {
 	now := time.Now()
 	if d.Now != nil {
 		now = d.Now()
@@ -138,109 +150,17 @@ func (d *OSDiscoverer) List(ctx context.Context) (model.ListenerSnapshot, error)
 	return snapshot, appErr
 }
 
-const processTerminationWait = 2 * time.Second
-
-// Terminate sends SIGTERM to the exact process owning a selected listener. It
-// re-discovers the listener immediately before signalling and never escalates
-// to SIGKILL.
-func (d *OSDiscoverer) Terminate(ctx context.Context, requested model.Listener) error {
-	if err := ctx.Err(); err != nil {
-		return model.WrapError(model.ErrCancelled, "discovery", "process termination was cancelled", true, "cancelled", "Retry after reviewing the selected process.", err)
-	}
-	if d == nil || d.Runner == nil {
+// Terminate is retained for compatibility with older callers. New callers
+// should receive an explicit ProcessTerminator instead of asserting this
+// capability on the listener observer.
+func (d *OSListenerObserver) Terminate(ctx context.Context, requested model.Listener) error {
+	if d == nil {
 		return model.NewError(model.ErrDependency, "discovery", "process termination is unavailable", true, "unavailable", "Refresh listener discovery and retry.")
 	}
-	if d.OS != "darwin" && d.OS != "linux" {
-		return model.NewError(model.ErrUnsupported, "discovery", "process termination is unsupported on "+d.OS, false, "unsupported", "Use a supported macOS or Linux build.")
-	}
-	if requested.PID <= 1 || requested.PID == os.Getpid() {
-		return model.NewError(model.ErrUnsafe, "discovery", "refusing to terminate this or a protected process", false, "unsafe", "Select an application listener with a different PID.")
-	}
-	if strings.TrimSpace(requested.Process) == "" || strings.TrimSpace(requested.ProcessStart) == "" {
-		return model.NewError(model.ErrUnknown, "discovery", "selected process identity is incomplete", true, "unknown", "Refresh until the process name and start identity are available before terminating it.")
-	}
-	current, err := d.List(ctx)
-	if err != nil {
-		return err
-	}
-	if !current.Authoritative || current.Error != nil {
-		return model.NewError(model.ErrUnknown, "discovery", "current listener state is not authoritative", true, "unknown", "Refresh listener discovery before terminating a process.")
-	}
-	matches := exactProcessListeners(current.Listeners, requested)
-	if len(matches) != 1 {
-		return model.NewError(model.ErrUnsafe, "discovery", "selected process or listener changed", true, "changed", "Refresh and select the current process before terminating it.")
-	}
-	// Re-check the stable process-start identity immediately before signalling;
-	// PID equality alone is unsafe because the OS may have reused the PID.
-	if currentStart := processStartIdentity(ctx, d.OS, requested.PID); currentStart == "" || currentStart != requested.ProcessStart {
-		return model.NewError(model.ErrUnsafe, "discovery", "selected process identity changed", true, "changed", "Refresh and select the current process before terminating it.")
-	}
-	if err := syscall.Kill(requested.PID, syscall.SIGTERM); err != nil {
-		return model.WrapError(model.ErrOperation, "discovery", "could not send SIGTERM to "+strconv.Itoa(requested.PID), true, "failed", "Check process permissions and retry; no SIGKILL was attempted.", err)
-	}
-	deadline := time.NewTimer(processTerminationWait)
-	defer deadline.Stop()
-	tick := time.NewTicker(100 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		exists, existsErr := processExistsIdentity(ctx, d.OS, requested.PID, requested.ProcessStart)
-		if existsErr != nil {
-			return model.WrapError(model.ErrUnknown, "discovery", "could not verify process termination", true, "unknown", "Inspect the process manually; no SIGKILL was attempted.", existsErr)
-		}
-		if !exists {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return model.WrapError(model.ErrCancelled, "discovery", "process termination verification was cancelled", true, "cancelled", "Inspect the process manually; no SIGKILL was attempted.", ctx.Err())
-		case <-deadline.C:
-			return model.NewError(model.ErrTimeout, "discovery", "process did not exit after SIGTERM", true, "unverified", "The process may ignore SIGTERM; inspect it manually. Tailge did not send SIGKILL.")
-		case <-tick.C:
-		}
-	}
+	return NewProcessTerminator(d).Terminate(ctx, requested)
 }
 
-func exactProcessListeners(listeners []model.Listener, requested model.Listener) []model.Listener {
-	matches := make([]model.Listener, 0, 1)
-	for _, listener := range listeners {
-		if listener.PID != requested.PID || listener.Target.Normalized().Key() != requested.Target.Normalized().Key() || listener.Process != requested.Process {
-			continue
-		}
-		if requested.CommandLine != "" && listener.CommandLine != requested.CommandLine {
-			continue
-		}
-		if requested.ProcessStart != "" && listener.ProcessStart != requested.ProcessStart {
-			continue
-		}
-		matches = append(matches, listener)
-	}
-	return matches
-}
-
-func processExists(pid int) (bool, error) {
-	err := syscall.Kill(pid, syscall.Signal(0))
-	if err == nil || errors.Is(err, syscall.EPERM) {
-		return true, nil
-	}
-	if errors.Is(err, syscall.ESRCH) {
-		return false, nil
-	}
-	return false, err
-}
-
-func processExistsIdentity(ctx context.Context, goos string, pid int, expectedStart string) (bool, error) {
-	start := processStartIdentity(ctx, goos, pid)
-	if start == "" {
-		exists, err := processExists(pid)
-		if err != nil || !exists {
-			return exists, err
-		}
-		return false, fmt.Errorf("process identity is unavailable for live PID %d", pid)
-	}
-	return start == expectedStart, nil
-}
-
-func (d *OSDiscoverer) enrich(ctx context.Context, snapshot *model.ListenerSnapshot) {
+func (d *OSListenerObserver) enrich(ctx context.Context, snapshot *model.ListenerSnapshot) {
 	for i := range snapshot.Listeners {
 		l := &snapshot.Listeners[i]
 		if l.PID == 0 {
@@ -268,51 +188,6 @@ func (d *OSDiscoverer) enrich(ctx context.Context, snapshot *model.ListenerSnaps
 			}
 		}
 	}
-}
-
-func processStartIdentity(ctx context.Context, goos string, pid int) string {
-	if pid <= 0 {
-		return ""
-	}
-	if goos == "linux" {
-		file, err := os.Open(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
-		if err != nil {
-			return ""
-		}
-		defer file.Close()
-		data, err := io.ReadAll(io.LimitReader(file, 4096))
-		if err != nil {
-			return ""
-		}
-		// The comm field may contain spaces and parentheses. The last closing
-		// parenthesis is the only safe delimiter before the remaining fields.
-		closeParen := strings.LastIndexByte(string(data), ')')
-		if closeParen < 0 {
-			return ""
-		}
-		fields := strings.Fields(string(data)[closeParen+1:])
-		// fields[0] is state (field 3); starttime is field 22.
-		if len(fields) <= 19 || fields[19] == "" {
-			return ""
-		}
-		return "linux:" + fields[19]
-	}
-	if goos == "darwin" {
-		command := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "lstart=")
-		command.WaitDelay = 2 * time.Second
-		var output boundedMetadataBuffer
-		output.max = 256
-		command.Stdout = &output
-		if err := command.Run(); err != nil {
-			return ""
-		}
-		value := strings.TrimSpace(sanitizeText(output.String()))
-		if value == "" {
-			return ""
-		}
-		return "darwin:" + value
-	}
-	return ""
 }
 
 func processCommand(ctx context.Context, goos string, pid int) string {
