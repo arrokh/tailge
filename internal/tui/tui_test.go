@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -174,6 +175,29 @@ func TestSanitizeTUITextRemovesControlCharacters(t *testing.T) {
 func TestSanitizeTUITextRemovesANSIFragments(t *testing.T) {
 	if got := sanitizeTUIText("\x1b[7m  \x1b[0m"); got != "  " {
 		t.Fatalf("sanitizer leaked ANSI fragments: %q", got)
+	}
+}
+
+func TestInterruptedTUIStopIsQuiet(t *testing.T) {
+	var errOut bytes.Buffer
+	wrappedInterrupt := fmt.Errorf("%w: %w", tea.ErrProgramKilled, tea.ErrInterrupted)
+	if code := reportTUIStop(&errOut, wrappedInterrupt); code != fault.ErrInterrupted.ExitCode() || errOut.Len() != 0 {
+		t.Fatalf("user interrupt was reported as an error: code=%d output=%q", code, errOut.String())
+	}
+
+	errOut.Reset()
+	if code := reportTUIStop(&errOut, errors.New("renderer failed")); code != fault.ErrInterrupted.ExitCode() || !strings.Contains(errOut.String(), "renderer failed") {
+		t.Fatalf("real TUI failure was hidden: code=%d output=%q", code, errOut.String())
+	}
+}
+
+func TestInterruptedTUIStopReportsUnverifiedWork(t *testing.T) {
+	m := workspaceFixture()
+	m.processBusy = true
+	var errOut bytes.Buffer
+	reportUnverifiedTUIState(&errOut, m)
+	if !strings.Contains(errOut.String(), "operation state is unverified") {
+		t.Fatalf("interrupted active work lacked safety warning: %q", errOut.String())
 	}
 }
 
@@ -1096,5 +1120,20 @@ func TestWorkspaceQuitRecordsUnverifiedCancellationBeforeExit(t *testing.T) {
 	}
 	if m.view.Items[0].OperationState != exposuredata.ExposureUnverified {
 		t.Fatalf("cancelled operation was not marked unverified: %q", m.view.Items[0].OperationState)
+	}
+}
+
+func TestWorkspaceQuitShortcutConfirmsGuardedQuit(t *testing.T) {
+	for _, key := range []tea.KeyMsg{keyRune('q'), keyType(tea.KeyCtrlC)} {
+		m := workspaceFixture()
+		cancelled := false
+		m.processBusy = true
+		m.processCancel = func() { cancelled = true }
+		m.modal = modalQuit
+
+		_, cmd := m.Update(key)
+		if cmd == nil || !cancelled || !m.quittingAfterCancel || m.modal != modalNone {
+			t.Fatalf("%s did not use guarded quit path: cmd=%t cancelled=%t waiting=%t modal=%v", key.String(), cmd != nil, cancelled, m.quittingAfterCancel, m.modal)
+		}
 	}
 }
