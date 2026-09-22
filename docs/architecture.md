@@ -45,18 +45,23 @@ The exposure paths have different audiences:
 Bubble Tea event loop
         |
         v
-workspaceModel  -- orchestration, focus, selection, effects
-   |       |       |       |
-   |       |       |       +--> workspacePolicy
-   |       |       +----------> workspaceRender / workspaceModal
-   |       +------------------> refreshCoordinator
-   +--------------------------> workspaceSnapshot
+workspaceModel  -- terminal adapter: messages, commands, rendering
+        |
+        v
+workspaceState  -- deterministic decisions: focus, selection, previews, lifecycle
+        |       |       |       |
+        |       |       |       +--> workspacePolicy
+        |       |       +----------> workspaceRender / workspaceModal
+        |       +------------------> refreshCoordinator
+        +--------------------------> workspaceSnapshot
+        |
+        +--> workspaceEffect --> provider, process, browser, clipboard, config effects
         |
         +--> exposure.Controller --> discovery + Tailscale provider
         +--> tailscale.Adapter --> capability/readiness/exact mutations
 ```
 
-`workspaceModel` owns the visible workspace and coordinates focused TUI modules: action session, refresh coordinator, workspace snapshot, workspace policy, and rendering modules. Mutation policy and rendering are kept outside the event-loop implementation so their interfaces remain testable without terminal orchestration.
+`workspaceState` is the decision module for the Service workspace. It owns interaction state and pure selection/lifecycle transitions without Bubble Tea or OS effects. `workspaceModel` is the terminal adapter: it translates Bubble Tea messages, executes typed `workspaceEffect` requests, and projects state through the render modules. This keeps state transitions and safety decisions testable without terminal orchestration, while external effects remain explicit.
 
 ## Internal control flow
 
@@ -72,16 +77,20 @@ flowchart TD
     Operator --> TUI
 
     subgraph Workspace[Workspace orchestration]
-        Model[workspaceModel]
+        Model[workspaceModel<br/>Bubble Tea adapter]
+        State[workspaceState<br/>deterministic decisions]
+        Effects[workspaceEffect<br/>explicit external effects]
         Refresh[refreshCoordinator<br/>refresh generations, retries, source authority]
         Snapshot[workspaceSnapshot<br/>filtering, ordering, port identity]
         Action[exposureActionSession<br/>preview, route choice, fingerprints]
     end
 
     TUI --> Model
-    Model --> Refresh
-    Model --> Snapshot
-    Model --> Action
+    Model --> State
+    State --> Effects
+    State --> Refresh
+    State --> Snapshot
+    State --> Action
 
     subgraph Sources[Observed system state]
         Discovery[Local TCP discovery]

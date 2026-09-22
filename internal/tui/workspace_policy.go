@@ -291,53 +291,6 @@ func (m *workspaceModel) revalidateProcessTarget(target processTarget) (model.Li
 	return model.Listener{}, fmt.Errorf("selected listener is no longer available")
 }
 
-func (m *workspaceModel) hasPendingOperations() bool {
-	return len(m.activeOps) > 0 || m.processBusy
-}
-
-func (m *workspaceModel) markApplying(key string) {
-	for i := range m.view.Items {
-		itemKey, ok := itemTarget(m.view.Items[i])
-		if ok && itemKey.Key() == key {
-			m.view.Items[i].OperationState = model.ExposureApplying
-			m.view.Items[i].State = model.ExposureApplying
-		}
-	}
-}
-
-func (m *workspaceModel) applyLocalOperationResult(message operationDoneMsg) {
-	for i := range m.view.Items {
-		key, ok := itemTarget(m.view.Items[i])
-		if !ok || key.Key() != message.targetKey {
-			continue
-		}
-		if message.err != nil {
-			m.view.Items[i].OperationState = operationStateForError(message.err)
-		} else if message.receipt.Verified {
-			m.view.Items[i].OperationState = model.ExposureSucceeded
-		} else {
-			m.view.Items[i].OperationState = model.ExposureUnverified
-		}
-		copyReceipt := message.receipt
-		m.view.Items[i].LastOperation = &copyReceipt
-	}
-}
-
-func (m *workspaceModel) markOperationUnverified(targetKey string) {
-	for i := range m.view.Items {
-		target, ok := itemTarget(m.view.Items[i])
-		if ok && target.Key() == targetKey {
-			m.view.Items[i].OperationState = model.ExposureUnverified
-		}
-	}
-}
-
-func (m *workspaceModel) markActiveOperationsUnverified() {
-	for targetKey := range m.activeOps {
-		m.markOperationUnverified(targetKey)
-	}
-}
-
 func operationStateForError(err error) model.ExposureState {
 	switch model.AsAppError(err).Code {
 	case model.ErrCancelled:

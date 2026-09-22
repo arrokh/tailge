@@ -194,20 +194,22 @@ func workspaceFixture() *workspaceModel {
 	listener := model.Listener{ID: "listener-app", Name: "web", Process: "node", ProcessStart: "test:4242", PID: 4242, CommandLine: "node dev-server", Target: target, Scope: model.ScopeLoopback, Metadata: model.MetadataComplete, FirstSeen: now, LastSeen: now}
 	route := model.ExposureRoute{ID: "route-app", ProviderKey: "tcp:3000", Target: target, Mode: model.ExposureServe, Ownership: model.OwnershipManaged, State: model.ExposureActive, LastSeen: now, LastVerifiedAt: now}
 	return &workspaceModel{
-		ctx: context.Background(),
-		cfg: config.Defaults(),
-		view: exposure.View{
-			At:        now,
-			Listeners: model.ListenerSnapshot{At: now, Authoritative: true, Listeners: []model.Listener{listener}},
-			Exposures: model.ExposureSnapshot{At: now, Authoritative: true, Routes: []model.ExposureRoute{route}},
-			Items:     []exposure.ReconciledItem{{ID: listener.ID, Listener: &listener, Routes: []model.ExposureRoute{route}, State: model.ExposureActive, Mode: model.ExposureServe}},
+		workspaceState: workspaceState{
+			cfg: config.Defaults(),
+			view: exposure.View{
+				At:        now,
+				Listeners: model.ListenerSnapshot{At: now, Authoritative: true, Listeners: []model.Listener{listener}},
+				Exposures: model.ExposureSnapshot{At: now, Authoritative: true, Routes: []model.ExposureRoute{route}},
+				Items:     []exposure.ReconciledItem{{ID: listener.ID, Listener: &listener, Routes: []model.ExposureRoute{route}, State: model.ExposureActive, Mode: model.ExposureServe}},
+			},
+			readiness: model.Readiness{At: now, Status: model.ReadinessReady, Modes: []model.ModeReadiness{{Mode: model.ExposureServe, Status: model.ReadinessReady}, {Mode: model.ExposureFunnel, Status: model.ReadinessReady}}},
+			hasView:   true, hasReadiness: true, refreshState: refreshCoordinator{seq: 1, viewDone: true, readinessDone: true},
+			focus: focusList, width: 120, height: 30,
+			activeOps: map[string]context.CancelFunc{},
 		},
-		readiness: model.Readiness{At: now, Status: model.ReadinessReady, Modes: []model.ModeReadiness{{Mode: model.ExposureServe, Status: model.ReadinessReady}, {Mode: model.ExposureFunnel, Status: model.ReadinessReady}}},
-		hasView:   true, hasReadiness: true, refreshState: refreshCoordinator{seq: 1, viewDone: true, readinessDone: true},
-		controller: exposure.NewController(nil, nil),
-		focus:      focusList, width: 120, height: 30,
+		ctx:         context.Background(),
+		controller:  exposure.NewController(nil, nil),
 		searchInput: newInput("/ "), paletteInput: newInput(": "),
-		activeOps: map[string]context.CancelFunc{},
 	}
 }
 

@@ -173,6 +173,8 @@ type configValidatedMsg struct {
 }
 
 type workspaceModel struct {
+	workspaceState
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -180,66 +182,9 @@ type workspaceModel struct {
 	clipboard  Clipboard
 	controller *exposure.Controller
 	manager    config.Manager
-	cfg        config.Config
-	configErr  error
 
-	view         exposure.View
-	readiness    model.Readiness
-	viewErr      error
-	readyErr     error
-	banner       string
-	bannerSticky bool
-	transient    string
-
-	width  int
-	height int
-	focus  paneFocus
-
-	query             string
-	searching         bool
-	previousQ         string
-	searchInput       textinput.Model
-	selectedID        string
-	selectedIdx       int
-	selectedItems     map[string]bool
-	visualSelection   bool
-	visualRange       map[string]bool
-	selectionAnchorID string
-	listScroll        int
-	detailOffset      int
-
-	modal                   modalKind
-	disableRouteIndex       int
-	modalItemID             string
-	modalTarget             model.Target
-	modalProcess            model.Listener
-	modalProcessFingerprint string
-	actionSession           exposureActionSession
-	confirmFocus            bool
-	modalChoice             bool
-	helpOffset              int
-	paletteIndex            int
-	paletteInput            textinput.Model
-
-	refreshState        refreshCoordinator
-	hasView             bool
-	hasReadiness        bool
-	gGeneration         uint64
-	activeOps           map[string]context.CancelFunc
-	batchID             string
-	batchTotal          int
-	batchCompleted      int
-	batchFailures       int
-	batchCancel         context.CancelFunc
-	processBusy         bool
-	processCancel       context.CancelFunc
-	processBatch        []processTarget
-	processBatchIndex   int
-	processBatchDone    int
-	processBatchFailed  int
-	processUnverified   bool
-	quittingAfterCancel bool
-	quitGeneration      uint64
+	searchInput  textinput.Model
+	paletteInput textinput.Model
 }
 
 func newInput(prompt string) textinput.Model {
@@ -255,19 +200,18 @@ func newWorkspaceModel(discoverer *discovery.OSDiscoverer, provider *tailscale.A
 	search := newInput("/ ")
 	palette := newInput(": ")
 	return &workspaceModel{
-		ctx: ctx, cancel: cancel,
-		provider: provider,
+		workspaceState: newWorkspaceState(),
+		ctx:            ctx,
+		cancel:         cancel,
+		provider:       provider,
 		controller: func() *exposure.Controller {
 			controller := exposure.NewController(discoverer, provider)
 			controller.MutationLockPath = manager.Path + ".exposure.lock"
 			return controller
-		}(), manager: manager,
-		cfg:       config.Defaults(),
-		view:      exposure.View{At: time.Now()},
-		readiness: model.Readiness{At: time.Now(), Status: model.ReadinessUnknown, Modes: []model.ModeReadiness{{Mode: model.ExposureServe, Status: model.ReadinessUnknown}, {Mode: model.ExposureFunnel, Status: model.ReadinessUnknown}}},
-		focus:     focusList, searchInput: search, paletteInput: palette,
-		selectedItems: map[string]bool{}, visualRange: map[string]bool{}, activeOps: map[string]context.CancelFunc{},
-		width: 120, height: 30,
+		}(),
+		manager:      manager,
+		searchInput:  search,
+		paletteInput: palette,
 	}
 }
 
@@ -551,6 +495,9 @@ func (m *workspaceModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if cmd, handled := m.handleGlobalNavigation(key); handled {
 		return m, cmd
 	}
+	if effect, handled := m.effectForKey(key); handled {
+		return m, m.executeWorkspaceEffect(effect)
+	}
 	switch key {
 	case "/":
 		m.previousQ, m.searching = m.query, true
@@ -571,194 +518,21 @@ func (m *workspaceModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.openAction(ptrMode(model.ExposureFunnel))
 	case "d":
 		m.openAction(ptrMode(model.ExposureDisabled))
-	case "o":
-		return m, m.openSelectedURL()
-	case "O":
-		return m, m.openSelectedLocalURL()
 	case "v":
 		m.toggleCurrentSelection()
 	case "V":
 		m.toggleVisualSelection()
 	case "U":
 		m.clearAllSelection()
-	case "y":
-		return m, m.copyURL()
-	case "c":
-		m.openCancel()
-	case "r":
-		return m, m.startRefresh()
-	case "R":
-		return m, m.startRetry()
 	case "C", "ctrl+l":
 		m.clearFilter()
-	case "x":
-		m.openTerminateProcess()
 	case "X":
 		m.banner, m.bannerSticky, m.transient = "", false, ""
-	case "q", "ctrl+c":
-		return m, m.quitCommand()
 	}
 	return m, nil
 }
 
 func ptrMode(mode model.ExposureMode) *model.ExposureMode { return &mode }
-
-func (m *workspaceModel) ensureSelectedItems() {
-	if m.selectedItems == nil {
-		m.selectedItems = map[string]bool{}
-	}
-}
-
-func (m *workspaceModel) clearAllSelection() {
-	count := len(m.selectedItems)
-	m.selectedItems = map[string]bool{}
-	m.visualSelection = false
-	m.visualRange = map[string]bool{}
-	m.selectionAnchorID = ""
-	if count == 0 {
-		m.transient = "No selected services"
-		return
-	}
-	m.transient = fmt.Sprintf("Cleared %d selected services", count)
-}
-
-func (m *workspaceModel) isMarked(id string) bool {
-	return m.selectedItems != nil && m.selectedItems[id]
-}
-
-func (m *workspaceModel) toggleCurrentSelection() {
-	if m.visualSelection {
-		m.visualSelection = false
-		m.selectionAnchorID = ""
-		m.visualRange = map[string]bool{}
-	}
-	item, ok := m.selectedItem()
-	if !ok {
-		m.setBanner("No service is selected", true)
-		return
-	}
-	m.ensureSelectedItems()
-	if m.selectedItems[item.ID] {
-		delete(m.selectedItems, item.ID)
-		m.transient = "Unselected " + item.ID
-	} else {
-		m.selectedItems[item.ID] = true
-		m.transient = "Selected " + item.ID
-	}
-}
-
-func (m *workspaceModel) toggleVisualSelection() {
-	items := m.items()
-	if len(items) == 0 {
-		m.setBanner("No services are visible", true)
-		return
-	}
-	if m.visualSelection {
-		m.visualSelection = false
-		m.selectionAnchorID = ""
-		m.visualRange = map[string]bool{}
-		m.transient = fmt.Sprintf("Visual selection kept (%d services)", m.selectionCount())
-		return
-	}
-	if m.selectedID == "" {
-		m.reselect("", 0)
-	}
-	m.visualSelection = true
-	m.selectionAnchorID = m.selectedID
-	m.updateVisualSelection()
-	m.transient = "Visual selection: move to extend, V to keep"
-}
-
-func (m *workspaceModel) updateVisualSelection() {
-	if !m.visualSelection {
-		return
-	}
-	items := m.items()
-	anchor, current := -1, -1
-	for index, item := range items {
-		if item.ID == m.selectionAnchorID {
-			anchor = index
-		}
-		if item.ID == m.selectedID {
-			current = index
-		}
-	}
-	if anchor < 0 || current < 0 {
-		m.visualSelection = false
-		m.selectionAnchorID = ""
-		m.visualRange = map[string]bool{}
-		return
-	}
-	if anchor > current {
-		anchor, current = current, anchor
-	}
-	m.ensureSelectedItems()
-	m.visualRange = map[string]bool{}
-	for _, item := range items[anchor : current+1] {
-		m.selectedItems[item.ID] = true
-		m.visualRange[item.ID] = true
-	}
-}
-
-func (m *workspaceModel) selectionCount() int {
-	count := 0
-	for _, item := range m.items() {
-		if m.isMarked(item.ID) {
-			count++
-		}
-	}
-	return count
-}
-
-func (m *workspaceModel) pruneSelection() {
-	if len(m.selectedItems) == 0 {
-		return
-	}
-	valid := map[string]bool{}
-	for _, item := range m.items() {
-		valid[item.ID] = true
-	}
-	for id := range m.selectedItems {
-		if !valid[id] {
-			delete(m.selectedItems, id)
-		}
-	}
-	for id := range m.visualRange {
-		if !valid[id] {
-			delete(m.visualRange, id)
-		}
-	}
-	if m.visualSelection && !valid[m.selectionAnchorID] {
-		m.visualSelection = false
-		m.selectionAnchorID = ""
-		m.visualRange = map[string]bool{}
-	}
-}
-
-func (m *workspaceModel) actionItems() []exposure.ReconciledItem {
-	items := m.items()
-	selected := make([]exposure.ReconciledItem, 0, len(items))
-	for _, item := range items {
-		if m.isMarked(item.ID) {
-			selected = append(selected, item)
-		}
-	}
-	if len(selected) > 0 {
-		return selected
-	}
-	if item, ok := m.selectedItem(); ok {
-		return []exposure.ReconciledItem{item}
-	}
-	return nil
-}
-
-func (m *workspaceModel) actionAnchorItem() (exposure.ReconciledItem, bool) {
-	items := m.actionItems()
-	if len(items) == 0 {
-		return exposure.ReconciledItem{}, false
-	}
-	return items[0], true
-}
 
 func (m *workspaceModel) handleGlobalNavigation(key string) (tea.Cmd, bool) {
 	if key == "esc" {
@@ -1089,7 +863,7 @@ func (m *workspaceModel) updateConfirmModal(_ tea.KeyMsg, key string) (tea.Model
 			return m, nil
 		}
 		m.modal = modalNone
-		return m, m.startOperation()
+		return m, m.executeWorkspaceEffect(workspaceEffect{kind: workspaceEffectApplyExposure})
 	}
 	return m, nil
 }
@@ -1114,7 +888,7 @@ func (m *workspaceModel) updateTerminateProcessModal(_ tea.KeyMsg, key string) (
 		return m, nil
 	}
 	m.modal = modalNone
-	return m, m.startTerminateProcess()
+	return m, m.executeWorkspaceEffect(workspaceEffect{kind: workspaceEffectStartProcessTermination})
 }
 
 func (m *workspaceModel) updateChoiceModal(_ tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
@@ -1134,33 +908,11 @@ func (m *workspaceModel) updateChoiceModal(_ tea.KeyMsg, key string) (tea.Model,
 		return m, nil
 	}
 	if m.modal == modalCancel {
-		if cancel, ok := m.activeOps[m.modalTarget.Key()]; ok {
-			if cancel != nil {
-				cancel()
-			}
-			m.setBanner("Cancellation requested; final state will be verified", false)
-		}
 		m.modal = modalNone
-		return m, nil
-	}
-	// Quitting with an active operation waits briefly for each cancelled
-	// provider command to report its terminal state. This keeps the workspace
-	// alive long enough to record cancellation as Unverified instead of
-	// discarding the operation when Bubble Tea exits immediately.
-	for _, cancel := range m.activeOps {
-		if cancel != nil {
-			cancel()
-		}
-	}
-	if m.processCancel != nil {
-		m.processCancel()
+		return m, m.executeWorkspaceEffect(workspaceEffect{kind: workspaceEffectConfirmCancellation})
 	}
 	m.modal = modalNone
-	m.quittingAfterCancel = true
-	m.quitGeneration++
-	generation := m.quitGeneration
-	m.setBanner("Operation cancelled; verifying final provider state before quit", true)
-	return m, tea.Tick(quitCancelGraceTime, func(time.Time) tea.Msg { return quitAfterCancelMsg{generation: generation} })
+	return m, m.executeWorkspaceEffect(workspaceEffect{kind: workspaceEffectConfirmQuit})
 }
 
 func (m *workspaceModel) openAction(requested *model.ExposureMode) {
@@ -1222,83 +974,6 @@ func observedMode(item exposure.ReconciledItem) model.ExposureMode {
 	}
 	return model.ExposureDisabled
 }
-
-func (m *workspaceModel) selectedItem() (exposure.ReconciledItem, bool) {
-	items := m.items()
-	if len(items) == 0 {
-		return exposure.ReconciledItem{}, false
-	}
-	if m.selectedIdx < 0 || m.selectedIdx >= len(items) || items[m.selectedIdx].ID != m.selectedID {
-		m.reselect(m.selectedID, m.selectedIdx)
-	}
-	if len(items) == 0 || m.selectedIdx >= len(items) {
-		return exposure.ReconciledItem{}, false
-	}
-	return items[m.selectedIdx], true
-}
-
-func (m *workspaceModel) items() []exposure.ReconciledItem {
-	return newWorkspaceSnapshot(m.view, m.query, m.cfg).Items()
-}
-
-func (m *workspaceModel) reselect(previousID string, previousIndex int) {
-	items := m.items()
-	if len(items) == 0 {
-		m.selectedID, m.selectedIdx = "", 0
-		m.detailOffset = 0
-		return
-	}
-	if previousID != "" {
-		for i, item := range items {
-			if item.ID == previousID {
-				m.selectedID, m.selectedIdx = previousID, i
-				return
-			}
-		}
-	}
-	m.selectedIdx = clamp(previousIndex, 0, len(items)-1)
-	m.selectedID = items[m.selectedIdx].ID
-	m.detailOffset = 0
-}
-
-func (m *workspaceModel) moveSelection(delta int) {
-	items := m.items()
-	if len(items) == 0 {
-		return
-	}
-	if m.selectedID == "" {
-		m.reselect("", 0)
-		return
-	}
-	index := m.selectedIdx
-	if index < 0 || index >= len(items) || items[index].ID != m.selectedID {
-		m.reselect(m.selectedID, index)
-		index = m.selectedIdx
-	}
-	index = (index + delta) % len(items)
-	if index < 0 {
-		index += len(items)
-	}
-	m.selectedIdx, m.selectedID, m.detailOffset = index, items[index].ID, 0
-	m.updateVisualSelection()
-}
-
-func (m *workspaceModel) goFirst() {
-	items := m.items()
-	if len(items) > 0 {
-		m.selectedIdx, m.selectedID, m.detailOffset = 0, items[0].ID, 0
-		m.updateVisualSelection()
-	}
-}
-func (m *workspaceModel) goLast() {
-	items := m.items()
-	if len(items) > 0 {
-		m.selectedIdx, m.selectedID, m.detailOffset = len(items)-1, items[len(items)-1].ID, 0
-		m.updateVisualSelection()
-	}
-}
-func (m *workspaceModel) listPage() int   { return maxInt(1, m.height/2) }
-func (m *workspaceModel) detailPage() int { return maxInt(1, m.height-8) }
 
 func (m *workspaceModel) startOperation() tea.Cmd {
 	// Refresh lifecycle belongs to the workspace, not the action modal. If a
