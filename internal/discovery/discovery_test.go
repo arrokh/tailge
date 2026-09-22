@@ -7,13 +7,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arrokh/tailge/internal/model"
+	"github.com/arrokh/tailge/internal/fault"
 	"github.com/arrokh/tailge/internal/runner"
+	"github.com/arrokh/tailge/internal/target"
 )
 
 func TestExactProcessListenersRequiresStableIdentity(t *testing.T) {
-	requested := model.Listener{PID: 42, Process: "node", CommandLine: "node app.js", Target: model.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}}
-	listeners := []model.Listener{
+	requested := Listener{PID: 42, Process: "node", CommandLine: "node app.js", Target: target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}}
+	listeners := []Listener{
 		requested,
 		{PID: 42, Process: "node", CommandLine: "node other.js", Target: requested.Target},
 		{PID: 42, Process: "python", CommandLine: requested.CommandLine, Target: requested.Target},
@@ -26,21 +27,21 @@ func TestExactProcessListenersRequiresStableIdentity(t *testing.T) {
 }
 
 type fakeListenerObserver struct {
-	snapshot model.ListenerSnapshot
+	snapshot ListenerSnapshot
 	err      error
 	calls    int
 }
 
-func (f *fakeListenerObserver) List(context.Context) (model.ListenerSnapshot, error) {
+func (f *fakeListenerObserver) List(context.Context) (ListenerSnapshot, error) {
 	f.calls++
 	return f.snapshot, f.err
 }
 
 func TestProcessTerminatorUsesListenerObserverSeam(t *testing.T) {
-	observer := &fakeListenerObserver{snapshot: model.ListenerSnapshot{Authoritative: false}}
+	observer := &fakeListenerObserver{snapshot: ListenerSnapshot{Authoritative: false}}
 	terminator := &OSProcessTerminator{Observer: observer, OS: "darwin"}
-	err := terminator.Terminate(context.Background(), model.Listener{PID: 4242, Process: "api", ProcessStart: "darwin:test", Target: model.Target{Address: "127.0.0.1", Port: 8080, Protocol: "tcp"}})
-	if err == nil || model.AsAppError(err).Code != model.ErrUnknown {
+	err := terminator.Terminate(context.Background(), Listener{PID: 4242, Process: "api", ProcessStart: "darwin:test", Target: target.Target{Address: "127.0.0.1", Port: 8080, Protocol: "tcp"}})
+	if err == nil || fault.AsAppError(err).Code != fault.ErrUnknown {
 		t.Fatalf("non-authoritative observation was not rejected: %v", err)
 	}
 	if observer.calls != 1 {
@@ -53,8 +54,8 @@ func TestProcessTerminatorHonorsCancellationBeforeObservation(t *testing.T) {
 	terminator := &OSProcessTerminator{Observer: observer, OS: "darwin"}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := terminator.Terminate(ctx, model.Listener{PID: 4242, Process: "api", ProcessStart: "darwin:test"})
-	if err == nil || model.AsAppError(err).Code != model.ErrCancelled {
+	err := terminator.Terminate(ctx, Listener{PID: 4242, Process: "api", ProcessStart: "darwin:test"})
+	if err == nil || fault.AsAppError(err).Code != fault.ErrCancelled {
 		t.Fatalf("cancelled termination was not rejected: %v", err)
 	}
 	if observer.calls != 0 {
@@ -67,8 +68,8 @@ func TestProcessTerminationProtectsCurrentProcess(t *testing.T) {
 		t.Fatal("protected process check should run before discovery")
 		return runner.Result{}, nil
 	})}
-	err := d.Terminate(context.Background(), model.Listener{PID: 1, Process: "launchd", Target: model.Target{Address: "127.0.0.1", Port: 1, Protocol: "tcp"}})
-	if err == nil || model.AsAppError(err).Code != model.ErrUnsafe {
+	err := d.Terminate(context.Background(), Listener{PID: 1, Process: "launchd", Target: target.Target{Address: "127.0.0.1", Port: 1, Protocol: "tcp"}})
+	if err == nil || fault.AsAppError(err).Code != fault.ErrUnsafe {
 		t.Fatalf("protected process was not refused: %v", err)
 	}
 }
@@ -84,10 +85,10 @@ func TestParseLsofNormalizesAndPreservesPartialMetadata(t *testing.T) {
 	if listeners[0].Target.Port != 3000 || listeners[0].Target.Address != "127.0.0.1" {
 		t.Fatalf("unexpected first target: %#v", listeners[0].Target)
 	}
-	if listeners[0].Metadata != model.MetadataPartial {
+	if listeners[0].Metadata != MetadataPartial {
 		t.Fatalf("metadata = %s, want partial", listeners[0].Metadata)
 	}
-	if listeners[1].Target.Address != "::" || listeners[1].Scope != model.ScopeWildcard {
+	if listeners[1].Target.Address != "::" || listeners[1].Scope != target.ScopeWildcard {
 		t.Fatalf("unexpected IPv6 target: %#v", listeners[1])
 	}
 }
@@ -150,7 +151,7 @@ func TestListUsesFakeCommandRunnerAndDoesNotClaimMissingSourceIsEmpty(t *testing
 		return runner.Result{ExitCode: 1, Stderr: "permission denied"}, errors.New("permission denied")
 	})
 	snapshot, err = d.List(context.Background())
-	if err == nil || snapshot.Authoritative || snapshot.Error == nil || snapshot.Error.Code != model.ErrPermission {
+	if err == nil || snapshot.Authoritative || snapshot.Error == nil || snapshot.Error.Code != fault.ErrPermission {
 		t.Fatalf("expected unavailable snapshot, got snapshot=%#v err=%v", snapshot, err)
 	}
 	if strings.Contains(snapshot.Error.Message, "token=") {
@@ -163,7 +164,7 @@ func TestListPreservesPartialListenersWhenProviderReportsPermission(t *testing.T
 		return runner.Result{Stdout: "p42\ncapi\nn127.0.0.1:8080\nP0\nTST=LISTEN\n", Stderr: "Permission denied for another process", ExitCode: 1}, errors.New("exit status 1")
 	})}
 	snapshot, err := d.List(context.Background())
-	if err == nil || snapshot.Authoritative || len(snapshot.Listeners) != 1 || snapshot.Error == nil || snapshot.Error.Code != model.ErrPermission {
+	if err == nil || snapshot.Authoritative || len(snapshot.Listeners) != 1 || snapshot.Error == nil || snapshot.Error.Code != fault.ErrPermission {
 		t.Fatalf("partial permission result was lost: snapshot=%#v err=%v", snapshot, err)
 	}
 }
@@ -197,7 +198,7 @@ func TestRedactCommandLineRemovesSensitiveValuesAndBoundsOutput(t *testing.T) {
 
 func TestClassifyCommandErrorPreservesTimeoutOverDiagnostics(t *testing.T) {
 	err := classifyCommandError("discovery", "lsof", runner.Result{ExitCode: -1, Stderr: "permission denied", Truncated: true}, context.DeadlineExceeded)
-	if err.Code != model.ErrTimeout || err.Exit != model.ErrTimeout.ExitCode() {
+	if err.Code != fault.ErrTimeout || err.Exit != fault.ErrTimeout.ExitCode() {
 		t.Fatalf("timeout was misclassified: %#v", err)
 	}
 }

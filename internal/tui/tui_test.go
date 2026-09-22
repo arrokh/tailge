@@ -11,18 +11,22 @@ import (
 	"github.com/arrokh/tailge/internal/config"
 	"github.com/arrokh/tailge/internal/discovery"
 	"github.com/arrokh/tailge/internal/exposure"
-	"github.com/arrokh/tailge/internal/model"
+	"github.com/arrokh/tailge/internal/exposuredata"
+	"github.com/arrokh/tailge/internal/fault"
+	"github.com/arrokh/tailge/internal/readiness"
 	"github.com/arrokh/tailge/internal/runner"
 	"github.com/arrokh/tailge/internal/tailscale"
+	targetmodel "github.com/arrokh/tailge/internal/target"
+	"github.com/arrokh/tailge/internal/workspace"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
 func TestDisplayedOnlyHidesConfiguredPresentationRows(t *testing.T) {
 	view := exposure.View{Items: []exposure.ReconciledItem{
-		{ID: "system", Listener: &model.Listener{Name: "systemd", Process: "systemd", Target: model.Target{Address: "127.0.0.1", Port: 53, Protocol: "tcp"}}, State: model.ExposureState("disabled")},
-		{ID: "stale", Routes: []model.ExposureRoute{{Target: model.Target{Address: "127.0.0.1", Port: 8080, Protocol: "tcp"}}}, State: model.ExposureInactive},
-		{ID: "app", Listener: &model.Listener{Name: "app", Process: "app", Target: model.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}}, State: model.ExposureState("disabled")},
+		{ID: "system", Listener: &discovery.Listener{Name: "systemd", Process: "systemd", Target: targetmodel.Target{Address: "127.0.0.1", Port: 53, Protocol: "tcp"}}, State: exposuredata.ExposureState("disabled")},
+		{ID: "stale", Routes: []exposuredata.ExposureRoute{{Target: targetmodel.Target{Address: "127.0.0.1", Port: 8080, Protocol: "tcp"}}}, State: exposuredata.ExposureInactive},
+		{ID: "app", Listener: &discovery.Listener{Name: "app", Process: "app", Target: targetmodel.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}}, State: exposuredata.ExposureState("disabled")},
 	}}
 	cfg := config.Defaults()
 	cfg.ShowInactiveConfiguredPorts = false
@@ -37,26 +41,26 @@ func TestServiceListDeduplicatesItemsByPort(t *testing.T) {
 	m := workspaceFixture()
 	m.view.Items = append(m.view.Items, exposure.ReconciledItem{
 		ID: "inactive-route-3000",
-		Routes: []model.ExposureRoute{{
+		Routes: []exposuredata.ExposureRoute{{
 			ID: "route-inactive-3000", ProviderKey: "tcp:3000:inactive",
-			Target: model.Target{Address: "0.0.0.0", Port: 3000, Protocol: "tcp"},
-			Mode:   model.ExposureFunnel, State: model.ExposureInactive,
+			Target: targetmodel.Target{Address: "0.0.0.0", Port: 3000, Protocol: "tcp"},
+			Mode:   exposuredata.ExposureFunnel, State: exposuredata.ExposureInactive,
 		}},
-		State: model.ExposureInactive, Mode: model.ExposureFunnel,
+		State: exposuredata.ExposureInactive, Mode: exposuredata.ExposureFunnel,
 	})
 	items := m.items()
 	if len(items) != 1 || items[0].ID != "listener-app" {
 		t.Fatalf("same-port items were not collapsed: %#v", items)
 	}
-	if items[0].State == model.ExposureAmbiguous || len(items[0].Routes) != 2 {
+	if items[0].State == exposuredata.ExposureAmbiguous || len(items[0].Routes) != 2 {
 		t.Fatalf("collapsed item was incorrectly marked ambiguous or lost routes: %#v", items[0])
 	}
 }
 
 func TestOrderedUsesConfiguredSortKey(t *testing.T) {
 	view := exposure.View{Items: []exposure.ReconciledItem{
-		{ID: "b", Listener: &model.Listener{Name: "zulu", Target: model.Target{Address: "127.0.0.1", Port: 80, Protocol: "tcp"}}, State: model.ExposureState("disabled")},
-		{ID: "a", Listener: &model.Listener{Name: "alpha", Target: model.Target{Address: "127.0.0.1", Port: 8080, Protocol: "tcp"}}, State: model.ExposureState("disabled")},
+		{ID: "b", Listener: &discovery.Listener{Name: "zulu", Target: targetmodel.Target{Address: "127.0.0.1", Port: 80, Protocol: "tcp"}}, State: exposuredata.ExposureState("disabled")},
+		{ID: "a", Listener: &discovery.Listener{Name: "alpha", Target: targetmodel.Target{Address: "127.0.0.1", Port: 8080, Protocol: "tcp"}}, State: exposuredata.ExposureState("disabled")},
 	}}
 	items := ordered(visible(view, ""), "name")
 	if len(items) != 2 || items[0].ID != "a" {
@@ -69,7 +73,7 @@ func TestOrderedUsesConfiguredSortKey(t *testing.T) {
 }
 
 func TestCopySelectedURLKeepsURLVisibleWhenClipboardFails(t *testing.T) {
-	items := []exposure.ReconciledItem{{Routes: []model.ExposureRoute{{URL: "https://dev.example.ts.net"}}}}
+	items := []exposure.ReconciledItem{{Routes: []exposuredata.ExposureRoute{{URL: "https://dev.example.ts.net"}}}}
 	var out, errOut bytes.Buffer
 	copySelectedURL(&out, &errOut, items, 0, ClipboardFunc(func(context.Context, string) error { return errors.New("no clipboard") }))
 	if !strings.Contains(out.String(), "https://dev.example.ts.net") || !strings.Contains(errOut.String(), "normal terminal text selection") {
@@ -78,7 +82,7 @@ func TestCopySelectedURLKeepsURLVisibleWhenClipboardFails(t *testing.T) {
 }
 
 func TestCopySelectedURLHandlesMissingClipboard(t *testing.T) {
-	items := []exposure.ReconciledItem{{Routes: []model.ExposureRoute{{URL: "https://dev.example.ts.net"}}}}
+	items := []exposure.ReconciledItem{{Routes: []exposuredata.ExposureRoute{{URL: "https://dev.example.ts.net"}}}}
 	var out, errOut bytes.Buffer
 	copySelectedURL(&out, &errOut, items, 0, nil)
 	if !strings.Contains(out.String(), "https://dev.example.ts.net") || !strings.Contains(errOut.String(), "no clipboard integration") {
@@ -167,6 +171,50 @@ func TestSanitizeTUITextRemovesControlCharacters(t *testing.T) {
 	}
 }
 
+func TestSanitizeTUITextRemovesANSIFragments(t *testing.T) {
+	if got := sanitizeTUIText("\x1b[7m  \x1b[0m"); got != "  " {
+		t.Fatalf("sanitizer leaked ANSI fragments: %q", got)
+	}
+}
+
+func TestCommandPaletteInputUsesSafeVisibleCursor(t *testing.T) {
+	m := workspaceFixture()
+	m.openPalette()
+	view := m.modalView()
+	if strings.Contains(view, "[7m") || !strings.Contains(view, "▌") {
+		t.Fatalf("command palette leaked cursor control text or lost cursor: %q", view)
+	}
+}
+
+func TestCommandPaletteInputPreservesHorizontalViewport(t *testing.T) {
+	m := workspaceFixture()
+	m.openPalette()
+	m.paletteInput.SetValue(strings.Repeat("x", 100))
+	m.paletteInput.CursorEnd()
+	view := m.paletteInputView()
+	if width := lipgloss.Width(view); width > lipgloss.Width(m.paletteInput.Prompt)+m.paletteInput.Width+1 {
+		t.Fatalf("palette input exceeded its viewport: width=%d view=%q", width, view)
+	}
+	if !strings.HasSuffix(view, "x▌") {
+		t.Fatalf("palette cursor was not kept at the visible end: %q", view)
+	}
+}
+
+func TestConfirmationOptionsUseSemanticStyles(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	cancelFocused := styleConfirmationOptions("dark", "[Cancel] Confirm")
+	if !strings.Contains(cancelFocused, "\x1b[1;33m[Cancel]\x1b[0m") || !strings.Contains(cancelFocused, "\x1b[32mConfirm\x1b[0m") {
+		t.Fatalf("cancel-focused options lack semantic styles: %q", cancelFocused)
+	}
+	confirmFocused := styleConfirmationOptions("dark", "Cancel [Confirm]")
+	if !strings.Contains(confirmFocused, "\x1b[33mCancel\x1b[0m") || !strings.Contains(confirmFocused, "\x1b[1;32m[Confirm]\x1b[0m") {
+		t.Fatalf("confirm-focused options lack semantic styles: %q", confirmFocused)
+	}
+	if width := lipgloss.Width(sanitizeTUIText(styleConfirmationOptions("dark", "[Cancel] Confirm"))); width != 16 {
+		t.Fatalf("compact confirmation option expanded unexpectedly: width=%d", width)
+	}
+}
+
 func TestPaintAutoUsesColor(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
 	if got := paint("auto", "1;36", "title"); !strings.Contains(got, "\x1b[1;36m") {
@@ -182,27 +230,27 @@ func TestPaintHonorsNoColor(t *testing.T) {
 }
 
 func TestModeStatusUnknownWhenProviderOmitsMode(t *testing.T) {
-	status := modeStatus(model.Readiness{At: time.Now()}, model.ExposureServe)
-	if status != model.ReadinessUnknown {
+	status := workspace.ModeStatus(readiness.Readiness{At: time.Now()}, exposuredata.ExposureServe)
+	if status != readiness.ReadinessUnknown {
 		t.Fatalf("status=%s", status)
 	}
 }
 
 func workspaceFixture() *workspaceModel {
-	target := model.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}
+	target := targetmodel.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}
 	now := time.Now()
-	listener := model.Listener{ID: "listener-app", Name: "web", Process: "node", ProcessStart: "test:4242", PID: 4242, CommandLine: "node dev-server", Target: target, Scope: model.ScopeLoopback, Metadata: model.MetadataComplete, FirstSeen: now, LastSeen: now}
-	route := model.ExposureRoute{ID: "route-app", ProviderKey: "tcp:3000", Target: target, Mode: model.ExposureServe, Ownership: model.OwnershipManaged, State: model.ExposureActive, LastSeen: now, LastVerifiedAt: now}
+	listener := discovery.Listener{ID: "listener-app", Name: "web", Process: "node", ProcessStart: "test:4242", PID: 4242, CommandLine: "node dev-server", Target: target, Scope: targetmodel.ScopeLoopback, Metadata: discovery.MetadataComplete, FirstSeen: now, LastSeen: now}
+	route := exposuredata.ExposureRoute{ID: "route-app", ProviderKey: "tcp:3000", Target: target, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipManaged, State: exposuredata.ExposureActive, LastSeen: now, LastVerifiedAt: now}
 	return &workspaceModel{
 		workspaceState: workspaceState{
 			cfg: config.Defaults(),
 			view: exposure.View{
 				At:        now,
-				Listeners: model.ListenerSnapshot{At: now, Authoritative: true, Listeners: []model.Listener{listener}},
-				Exposures: model.ExposureSnapshot{At: now, Authoritative: true, Routes: []model.ExposureRoute{route}},
-				Items:     []exposure.ReconciledItem{{ID: listener.ID, Listener: &listener, Routes: []model.ExposureRoute{route}, State: model.ExposureActive, Mode: model.ExposureServe}},
+				Listeners: discovery.ListenerSnapshot{At: now, Authoritative: true, Listeners: []discovery.Listener{listener}},
+				Exposures: exposuredata.ExposureSnapshot{At: now, Authoritative: true, Routes: []exposuredata.ExposureRoute{route}},
+				Items:     []exposure.ReconciledItem{{ID: listener.ID, Listener: &listener, Routes: []exposuredata.ExposureRoute{route}, State: exposuredata.ExposureActive, Mode: exposuredata.ExposureServe}},
 			},
-			readiness: model.Readiness{At: now, Status: model.ReadinessReady, Modes: []model.ModeReadiness{{Mode: model.ExposureServe, Status: model.ReadinessReady}, {Mode: model.ExposureFunnel, Status: model.ReadinessReady}}},
+			readiness: readiness.Readiness{At: now, Status: readiness.ReadinessReady, Modes: []readiness.ModeReadiness{{Mode: exposuredata.ExposureServe, Status: readiness.ReadinessReady}, {Mode: exposuredata.ExposureFunnel, Status: readiness.ReadinessReady}}},
 			hasView:   true, hasReadiness: true, refreshState: refreshCoordinator{seq: 1, viewDone: true, readinessDone: true},
 			focus: focusList, width: 120, height: 30,
 			activeOps: map[string]context.CancelFunc{},
@@ -222,7 +270,7 @@ func TestRefreshPreservesDiscoveryWhenExposureProviderIsMissing(t *testing.T) {
 	})}
 	controller := exposure.NewController(discoverer, nil)
 	view, err := refresh(context.Background(), controller, time.Second)
-	if err == nil || len(view.Listeners.Listeners) != 1 || len(view.Items) != 1 || view.Items[0].State != model.ExposureUnknown {
+	if err == nil || len(view.Listeners.Listeners) != 1 || len(view.Items) != 1 || view.Items[0].State != exposuredata.ExposureUnknown {
 		t.Fatalf("missing provider erased safe local discovery: view=%#v err=%v", view, err)
 	}
 }
@@ -252,12 +300,12 @@ func TestWrapTextLinesRespectsViewportWidth(t *testing.T) {
 
 func TestDetailsGroupsRoutesAndStatusBadges(t *testing.T) {
 	m := workspaceFixture()
-	funnel := model.ExposureRoute{ID: "funnel-app", ProviderKey: "funnel:https=3000", Target: m.view.Items[0].Routes[0].Target, Mode: model.ExposureFunnel, Ownership: model.OwnershipUnknown, State: model.ExposureActive}
+	funnel := exposuredata.ExposureRoute{ID: "funnel-app", ProviderKey: "funnel:https=3000", Target: m.view.Items[0].Routes[0].Target, Mode: exposuredata.ExposureFunnel, Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive}
 	m.view.Exposures.Routes = append(m.view.Exposures.Routes, funnel)
 	m.view.Items[0].Routes = append(m.view.Items[0].Routes, funnel)
-	m.view.Items[0].State = model.ExposureAmbiguous
+	m.view.Items[0].State = exposuredata.ExposureAmbiguous
 	m.view.Items[0].Warning = "multiple exposure routes match this listener"
-	m.readiness.Modes[1].Status = model.ReadinessReadOnly
+	m.readiness.Modes[1].Status = readiness.ReadinessReadOnly
 	view := m.renderDetails(120, 100)
 	for _, want := range []string{"[! AMBIG]", "── ALERTS ──", "── EXPOSURE ROUTES (2) ──", "[MANAGED]", "[UNKNOWN]", "[! READ-ONLY]"} {
 		if !strings.Contains(view, want) {
@@ -322,10 +370,10 @@ func TestOverlayPreservesBackgroundBesideModal(t *testing.T) {
 
 func TestWorkspaceReadinessReasonIsVisible(t *testing.T) {
 	m := workspaceFixture()
-	m.readiness.Modes = []model.ModeReadiness{{
-		Mode:   model.ExposureServe,
-		Status: model.ReadinessReadOnly,
-		Checks: []model.ReadinessCheck{{Name: "compatibility probe", Status: model.ReadinessReadOnly, Message: "probe evidence is missing", Remediation: "Run the disposable compatibility probe."}},
+	m.readiness.Modes = []readiness.ModeReadiness{{
+		Mode:   exposuredata.ExposureServe,
+		Status: readiness.ReadinessReadOnly,
+		Checks: []readiness.ReadinessCheck{{Name: "compatibility probe", Status: readiness.ReadinessReadOnly, Message: "probe evidence is missing", Remediation: "Run the disposable compatibility probe."}},
 	}}
 	view := m.View()
 	if !strings.Contains(view, "serve: read_only") || !strings.Contains(view, "reason: probe evidence is missing") || !strings.Contains(view, "next: Run the disposable compatibility probe.") {
@@ -337,14 +385,14 @@ func TestDetailLabelsServeAndFunnelReadinessAndOperationOwners(t *testing.T) {
 	m := workspaceFixture()
 	m.height = 80
 	target, _ := itemTarget(m.view.Items[0])
-	m.readiness.Modes = []model.ModeReadiness{
-		{Mode: model.ExposureServe, Status: model.ReadinessReady, Checks: []model.ReadinessCheck{{Status: model.ReadinessReady}}},
-		{Mode: model.ExposureFunnel, Status: model.ReadinessReadOnly, Checks: []model.ReadinessCheck{{Status: model.ReadinessReadOnly, Message: "public probe is missing", Remediation: "Run the Funnel compatibility probe."}}},
+	m.readiness.Modes = []readiness.ModeReadiness{
+		{Mode: exposuredata.ExposureServe, Status: readiness.ReadinessReady, Checks: []readiness.ReadinessCheck{{Status: readiness.ReadinessReady}}},
+		{Mode: exposuredata.ExposureFunnel, Status: readiness.ReadinessReadOnly, Checks: []readiness.ReadinessCheck{{Status: readiness.ReadinessReadOnly, Message: "public probe is missing", Remediation: "Run the Funnel compatibility probe."}}},
 	}
-	m.view.Events = []model.OperationEvent{{Target: target, Mode: model.ExposureFunnel, Phase: "final", State: model.ExposureFailed}}
-	m.view.Items[0].DesiredMode = model.ExposureFunnel
-	m.view.Items[0].OperationState = model.ExposureFailed
-	m.view.Items[0].LastOperation = &model.OperationReceipt{Error: &model.SafeError{Message: "Funnel apply failed", Remediation: "Review Funnel status."}}
+	m.view.Events = []exposuredata.OperationEvent{{Target: target, Mode: exposuredata.ExposureFunnel, Phase: "final", State: exposuredata.ExposureFailed}}
+	m.view.Items[0].DesiredMode = exposuredata.ExposureFunnel
+	m.view.Items[0].OperationState = exposuredata.ExposureFailed
+	m.view.Items[0].LastOperation = &exposuredata.OperationReceipt{Error: &fault.SafeError{Message: "Funnel apply failed", Remediation: "Review Funnel status."}}
 	view := m.View()
 	for _, text := range []string{"serve: ready", "funnel: read_only", "[owner: SERVE]", "[owner: FUNNEL]", "SERVE operation: idle", "FUNNEL operation: failed", "FUNNEL next: press R", "FUNNEL issue: Funnel apply failed"} {
 		if !strings.Contains(view, text) {
@@ -449,14 +497,14 @@ func TestHelpModalSupportsLineAndPageScrolling(t *testing.T) {
 
 func TestWorkspacePreservesStableSelectionAcrossRefresh(t *testing.T) {
 	m := workspaceFixture()
-	second := model.Listener{ID: "listener-two", Name: "api", Target: model.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}, Scope: model.ScopeLoopback, Metadata: model.MetadataComplete}
-	m.view.Items = append(m.view.Items, exposure.ReconciledItem{ID: second.ID, Listener: &second, State: model.ExposureState("disabled"), Mode: model.ExposureDisabled})
+	second := discovery.Listener{ID: "listener-two", Name: "api", Target: targetmodel.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}, Scope: targetmodel.ScopeLoopback, Metadata: discovery.MetadataComplete}
+	m.view.Items = append(m.view.Items, exposure.ReconciledItem{ID: second.ID, Listener: &second, State: exposuredata.ExposureState("disabled"), Mode: exposuredata.ExposureDisabled})
 	m.reselect("listener-two", 1)
 	m.startRefresh()
 	replacement := second
 	replacement.Name = "api-renamed"
 	view := m.view
-	view.Items = []exposure.ReconciledItem{{ID: replacement.ID, Listener: &replacement, State: model.ExposureState("disabled"), Mode: model.ExposureDisabled}, view.Items[0]}
+	view.Items = []exposure.ReconciledItem{{ID: replacement.ID, Listener: &replacement, State: exposuredata.ExposureState("disabled"), Mode: exposuredata.ExposureDisabled}, view.Items[0]}
 	m.Update(viewLoadedMsg{seq: m.refreshState.sequence(), view: view})
 	if m.selectedID != "listener-two" {
 		t.Fatalf("selection was not preserved: %q", m.selectedID)
@@ -495,20 +543,20 @@ func TestWorkspaceRefreshKeepsLastViewVisible(t *testing.T) {
 	if !m.hasView {
 		t.Fatal("failed refresh discarded the cached view")
 	}
-	availability := m.actionAvailabilityForItems(model.ExposureFunnel)
-	if !availability.disabled || (!strings.Contains(availability.reason, "stale") && !strings.Contains(availability.reason, "refresh")) {
+	availability := m.actionAvailability(exposuredata.ExposureFunnel)
+	if !availability.Disabled || (!strings.Contains(availability.Reason, "stale") && !strings.Contains(availability.Reason, "refresh")) {
 		t.Fatalf("stale refresh did not block unsafe mutation: availability=%#v", availability)
 	}
 }
 
 func TestWorkspaceClosesPreviewWhenRouteFingerprintChanges(t *testing.T) {
 	m := workspaceFixture()
-	m.openAction(ptrMode(model.ExposureFunnel))
+	m.openAction(ptrMode(exposuredata.ExposureFunnel))
 	changed := m.view
-	changed.Exposures.Routes = append([]model.ExposureRoute(nil), changed.Exposures.Routes...)
+	changed.Exposures.Routes = append([]exposuredata.ExposureRoute(nil), changed.Exposures.Routes...)
 	changed.Exposures.Routes[0].Target.Port = 3001
 	changed.Items = append([]exposure.ReconciledItem(nil), changed.Items...)
-	changed.Items[0].Routes = append([]model.ExposureRoute(nil), changed.Items[0].Routes...)
+	changed.Items[0].Routes = append([]exposuredata.ExposureRoute(nil), changed.Items[0].Routes...)
 	changed.Items[0].Routes[0].Target.Port = 3001
 	m.startRefresh()
 	m.Update(viewLoadedMsg{seq: m.refreshState.sequence(), view: changed})
@@ -519,7 +567,7 @@ func TestWorkspaceClosesPreviewWhenRouteFingerprintChanges(t *testing.T) {
 
 func TestWorkspaceActionModalKeepsHeightDuringRefreshStateChanges(t *testing.T) {
 	m := workspaceFixture()
-	m.openAction(ptrMode(model.ExposureFunnel))
+	m.openAction(ptrMode(exposuredata.ExposureFunnel))
 	before := lipgloss.Height(m.modalView())
 	m.refreshState.pending = true
 	during := lipgloss.Height(m.modalView())
@@ -534,13 +582,16 @@ func TestWorkspaceActionModalKeepsHeightDuringRefreshStateChanges(t *testing.T) 
 func TestWorkspaceRefreshDoesNotPaintTransientActionWarning(t *testing.T) {
 	m := workspaceFixture()
 	m.refreshState.pending = true
-	m.openAction(ptrMode(model.ExposureFunnel))
+	m.openAction(ptrMode(exposuredata.ExposureFunnel))
 	view := m.View()
 	if strings.Contains(view, "refresh is in progress") {
 		t.Fatalf("refresh warning leaked into action choices: %q", view)
 	}
-	availability := m.actionAvailabilityForItems(model.ExposureFunnel)
-	if !availability.disabled || !strings.Contains(availability.reason, "refresh is in progress") {
+	if strings.Contains(view, "Serve (tailnet only) [unavailable]") || strings.Contains(view, "Funnel (public internet) [unavailable]") {
+		t.Fatalf("refresh-waiting actions were presented as unavailable: %q", view)
+	}
+	availability := m.actionAvailability(exposuredata.ExposureFunnel)
+	if !availability.Disabled || !strings.Contains(availability.Reason, "refresh is in progress") {
 		t.Fatalf("refresh did not continue blocking unsafe action: availability=%#v", availability)
 	}
 	m.Update(keyType(tea.KeyEnter))
@@ -549,9 +600,18 @@ func TestWorkspaceRefreshDoesNotPaintTransientActionWarning(t *testing.T) {
 	}
 }
 
+func TestWorkspaceActionModalLabelsGenuineUnavailableChoice(t *testing.T) {
+	m := workspaceFixture()
+	m.readiness.Modes[1].Status = readiness.ReadinessReadOnly
+	m.openAction(ptrMode(exposuredata.ExposureFunnel))
+	if view := m.View(); !strings.Contains(view, "Funnel (public internet) [unavailable]") {
+		t.Fatalf("genuinely unavailable action lost its label: %q", view)
+	}
+}
+
 func TestExposureActionModalUsesWorkspaceSuppliedAvailability(t *testing.T) {
 	m := workspaceFixture()
-	m.openAction(ptrMode(model.ExposureFunnel))
+	m.openAction(ptrMode(exposuredata.ExposureFunnel))
 	if m.startRefresh() == nil || !m.refreshState.isPending() {
 		t.Fatal("refresh did not start")
 	}
@@ -580,15 +640,15 @@ func TestExposureActionModalUsesWorkspaceSuppliedAvailability(t *testing.T) {
 func TestWorkspaceBlocksMutationWhenListenerSnapshotIsStale(t *testing.T) {
 	m := workspaceFixture()
 	m.view.Listeners.Stale = true
-	availability := m.actionAvailabilityForItems(model.ExposureFunnel)
-	if !availability.disabled || !strings.Contains(availability.reason, "listener/exposure state is stale") {
+	availability := m.actionAvailability(exposuredata.ExposureFunnel)
+	if !availability.Disabled || !strings.Contains(availability.Reason, "listener/exposure state is stale") {
 		t.Fatalf("stale listener snapshot enabled mutation: %#v", availability)
 	}
 }
 
 func TestWorkspaceConfirmationDefersToRefresh(t *testing.T) {
 	m := workspaceFixture()
-	m.openAction(ptrMode(model.ExposureFunnel))
+	m.openAction(ptrMode(exposuredata.ExposureFunnel))
 	m.Update(keyType(tea.KeyEnter))
 	m.Update(keyType(tea.KeyTab))
 	if m.modal != modalConfirm || !m.actionSession.confirm {
@@ -603,15 +663,41 @@ func TestWorkspaceConfirmationDefersToRefresh(t *testing.T) {
 	}
 }
 
-func TestWorkspaceConfirmationRechecksReadinessBeforeMutation(t *testing.T) {
+func TestWorkspaceConfirmationRemainsVisibleUntilOperatorActsDuringRefresh(t *testing.T) {
 	m := workspaceFixture()
-	m.openAction(ptrMode(model.ExposureFunnel))
+	m.openAction(ptrMode(exposuredata.ExposureFunnel))
 	m.Update(keyType(tea.KeyEnter))
 	m.Update(keyType(tea.KeyTab))
 	if m.modal != modalConfirm || !m.actionSession.confirm {
 		t.Fatalf("confirmation was not focused: modal=%v focus=%t", m.modal, m.actionSession.confirm)
 	}
-	m.readiness.Modes[1].Status = model.ReadinessReadOnly
+	if m.startRefresh() == nil || !m.refreshState.isPending() {
+		t.Fatal("refresh did not start")
+	}
+	changed := m.view
+	changed.Exposures.Routes = append([]exposuredata.ExposureRoute(nil), changed.Exposures.Routes...)
+	changed.Exposures.Routes[0].URL = "https://updated.example.ts.net"
+	seq := m.refreshState.sequence()
+	m.Update(viewLoadedMsg{seq: seq, view: changed})
+	m.Update(readinessLoadedMsg{seq: seq, data: m.readiness})
+	if m.modal != modalConfirm || !m.actionSession.confirm {
+		t.Fatalf("refresh closed confirmation without operator input: modal=%v focus=%t", m.modal, m.actionSession.confirm)
+	}
+	m.Update(keyType(tea.KeyEnter))
+	if len(m.activeOps) != 0 || !strings.Contains(m.banner, "Selection changed") {
+		t.Fatalf("stale confirmation bypassed preview recheck: operations=%d banner=%q", len(m.activeOps), m.banner)
+	}
+}
+
+func TestWorkspaceConfirmationRechecksReadinessBeforeMutation(t *testing.T) {
+	m := workspaceFixture()
+	m.openAction(ptrMode(exposuredata.ExposureFunnel))
+	m.Update(keyType(tea.KeyEnter))
+	m.Update(keyType(tea.KeyTab))
+	if m.modal != modalConfirm || !m.actionSession.confirm {
+		t.Fatalf("confirmation was not focused: modal=%v focus=%t", m.modal, m.actionSession.confirm)
+	}
+	m.readiness.Modes[1].Status = readiness.ReadinessReadOnly
 	m.readyErr = errors.New("readiness changed while confirming")
 	m.Update(keyType(tea.KeyEnter))
 	if m.modal != modalAction || len(m.activeOps) != 0 || !strings.Contains(m.banner, "readiness state is stale") {
@@ -622,12 +708,12 @@ func TestWorkspaceConfirmationRechecksReadinessBeforeMutation(t *testing.T) {
 func TestWorkspaceDirectActionKeysOpenPreview(t *testing.T) {
 	for _, test := range []struct {
 		key  rune
-		mode model.ExposureMode
+		mode exposuredata.ExposureMode
 	}{
 
-		{key: 's', mode: model.ExposureServe},
-		{key: 'f', mode: model.ExposureFunnel},
-		{key: 'd', mode: model.ExposureDisabled},
+		{key: 's', mode: exposuredata.ExposureServe},
+		{key: 'f', mode: exposuredata.ExposureFunnel},
+		{key: 'd', mode: exposuredata.ExposureDisabled},
 	} {
 		m := workspaceFixture()
 		m.Update(keyRune(test.key))
@@ -642,10 +728,10 @@ func TestWorkspaceDirectActionKeysOpenPreview(t *testing.T) {
 
 func TestWorkspaceDisableChoosesOneExactRoute(t *testing.T) {
 	m := workspaceFixture()
-	funnel := model.ExposureRoute{ID: "funnel-app", ProviderKey: "funnel:https=3000", Target: m.view.Items[0].Routes[0].Target, Mode: model.ExposureFunnel, Ownership: model.OwnershipUnknown, State: model.ExposureActive}
+	funnel := exposuredata.ExposureRoute{ID: "funnel-app", ProviderKey: "funnel:https=3000", Target: m.view.Items[0].Routes[0].Target, Mode: exposuredata.ExposureFunnel, Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive}
 	m.view.Exposures.Routes = append(m.view.Exposures.Routes, funnel)
 	m.view.Items[0].Routes = append(m.view.Items[0].Routes, funnel)
-	m.view.Items[0].State = model.ExposureAmbiguous
+	m.view.Items[0].State = exposuredata.ExposureAmbiguous
 	m.view.Items[0].Warning = "multiple exposure routes match this listener; choose an exact route before changing it"
 	if view := m.View(); !strings.Contains(view, "mode: multiple (choose exact route)") {
 		t.Fatalf("ambiguous route state was presented as a single mode: %q", view)
@@ -667,9 +753,9 @@ func TestWorkspaceDisableChoosesOneExactRoute(t *testing.T) {
 
 func TestWorkspaceDisableUnknownRouteUsesFocusedConfirmWithoutYES(t *testing.T) {
 	m := workspaceFixture()
-	m.view.Items[0].Routes[0].Ownership = model.OwnershipUnknown
-	m.view.Exposures.Routes[0].Ownership = model.OwnershipUnknown
-	m.openAction(ptrMode(model.ExposureDisabled))
+	m.view.Items[0].Routes[0].Ownership = exposuredata.OwnershipUnknown
+	m.view.Exposures.Routes[0].Ownership = exposuredata.OwnershipUnknown
+	m.openAction(ptrMode(exposuredata.ExposureDisabled))
 	m.Update(keyType(tea.KeyEnter))
 	if m.modal != modalConfirm || m.actionSession.confirm {
 		t.Fatalf("disable confirmation did not start with Cancel focused: modal=%v focus=%t", m.modal, m.actionSession.confirm)
@@ -735,7 +821,7 @@ func TestCopyURLResolvesServeTCPPreview(t *testing.T) {
 func TestOpenSelectedURLExplainsTCPOnlyRoute(t *testing.T) {
 	m := workspaceFixture()
 	m.view.Items[0].Routes[0].ProviderKey = "funnel:tcp=10000"
-	m.view.Items[0].Routes[0].Mode = model.ExposureFunnel
+	m.view.Items[0].Routes[0].Mode = exposuredata.ExposureFunnel
 	m.selectedID = m.view.Items[0].ID
 	m.openSelectedURL()
 	if !strings.Contains(m.banner, "TCP-only") || !strings.Contains(m.banner, "funnel:tcp=10000") {
@@ -744,8 +830,8 @@ func TestOpenSelectedURLExplainsTCPOnlyRoute(t *testing.T) {
 }
 
 func TestObservedURLWinsWhenTCPSelectorHasExplicitURL(t *testing.T) {
-	route := model.ExposureRoute{ProviderKey: "serve:tcp=4321", URL: "https://dev.example.ts.net:4321"}
-	if got, ok := observedRouteURL(route); !ok || got != route.URL {
+	route := exposuredata.ExposureRoute{ProviderKey: "serve:tcp=4321", URL: "https://dev.example.ts.net:4321"}
+	if got, ok := workspace.ObservedRouteURL(route); !ok || got != route.URL {
 		t.Fatalf("explicit URL was rejected for TCP selector: got=%q ok=%t", got, ok)
 	}
 	if got := formatURLShortcutStatus(false, false, true, true, true, false); got != "o observed[ok]  O localhost[ok]  y copy[URL-only]" {
@@ -756,8 +842,8 @@ func TestObservedURLWinsWhenTCPSelectorHasExplicitURL(t *testing.T) {
 func TestServeTCPBrowserURLUsesReportedDNSName(t *testing.T) {
 	status := tailscale.Status{}
 	status.Self.DNSName = "noors-macbook-pro.tail85727d.ts.net."
-	route := model.ExposureRoute{ProviderKey: "serve:tcp=4321", Mode: model.ExposureServe}
-	if got, err := serveTCPBrowserURL(status, route); err != nil || got != "http://noors-macbook-pro.tail85727d.ts.net:4321/" {
+	route := exposuredata.ExposureRoute{ProviderKey: "serve:tcp=4321", Mode: exposuredata.ExposureServe}
+	if got, err := workspace.ServeTCPBrowserURL(status, route); err != nil || got != "http://noors-macbook-pro.tail85727d.ts.net:4321/" {
 		t.Fatalf("Serve TCP browser URL=%q err=%v", got, err)
 	}
 }
@@ -774,8 +860,8 @@ func TestTerminateInactiveRouteExplainsNoProcess(t *testing.T) {
 func TestServeTCPBrowserURLRejectsUnsafeDNSName(t *testing.T) {
 	status := tailscale.Status{}
 	status.Self.DNSName = "bad/host"
-	route := model.ExposureRoute{ProviderKey: "serve:tcp=4321", Mode: model.ExposureServe}
-	if _, err := serveTCPBrowserURL(status, route); err == nil {
+	route := exposuredata.ExposureRoute{ProviderKey: "serve:tcp=4321", Mode: exposuredata.ExposureServe}
+	if _, err := workspace.ServeTCPBrowserURL(status, route); err == nil {
 		t.Fatal("unsafe Tailscale DNS name was accepted")
 	}
 }
@@ -794,8 +880,8 @@ func TestLocalURLUsesSelectedListenerPort(t *testing.T) {
 
 func TestWorkspaceVAndShiftVSelection(t *testing.T) {
 	m := workspaceFixture()
-	second := model.Listener{ID: "listener-two", Name: "api", Process: "node", PID: 4343, Target: model.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}, Scope: model.ScopeLoopback, Metadata: model.MetadataComplete}
-	m.view.Items = append(m.view.Items, exposure.ReconciledItem{ID: second.ID, Listener: &second, State: model.ExposureState("disabled"), Mode: model.ExposureDisabled})
+	second := discovery.Listener{ID: "listener-two", Name: "api", Process: "node", PID: 4343, Target: targetmodel.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}, Scope: targetmodel.ScopeLoopback, Metadata: discovery.MetadataComplete}
+	m.view.Items = append(m.view.Items, exposure.ReconciledItem{ID: second.ID, Listener: &second, State: exposuredata.ExposureState("disabled"), Mode: exposuredata.ExposureDisabled})
 	m.Update(keyRune('v'))
 	if m.selectionCount() != 1 || !m.isMarked("listener-app") {
 		t.Fatalf("v did not select current item: selected=%d marks=%#v", m.selectionCount(), m.selectedItems)
@@ -844,15 +930,15 @@ func TestVisualSelectionMarkerUsesColorWithoutDependingOnIt(t *testing.T) {
 
 func TestWorkspaceBatchActionStartsForSelectedItems(t *testing.T) {
 	m := workspaceFixture()
-	m.view.Items[0].State = model.ExposureState("disabled")
-	m.view.Items[0].Mode = model.ExposureDisabled
+	m.view.Items[0].State = exposuredata.ExposureState("disabled")
+	m.view.Items[0].Mode = exposuredata.ExposureDisabled
 	m.view.Items[0].Routes = nil
-	second := model.Listener{ID: "listener-two", Name: "api", Process: "node", PID: 4343, Target: model.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}, Scope: model.ScopeLoopback, Metadata: model.MetadataComplete}
-	m.view.Items = append(m.view.Items, exposure.ReconciledItem{ID: second.ID, Listener: &second, State: model.ExposureState("disabled"), Mode: model.ExposureDisabled})
+	second := discovery.Listener{ID: "listener-two", Name: "api", Process: "node", PID: 4343, Target: targetmodel.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}, Scope: targetmodel.ScopeLoopback, Metadata: discovery.MetadataComplete}
+	m.view.Items = append(m.view.Items, exposure.ReconciledItem{ID: second.ID, Listener: &second, State: exposuredata.ExposureState("disabled"), Mode: exposuredata.ExposureDisabled})
 	m.Update(keyRune('V'))
 	m.Update(keyRune('j'))
 	m.Update(keyRune('V'))
-	m.openAction(ptrMode(model.ExposureServe))
+	m.openAction(ptrMode(exposuredata.ExposureServe))
 	m.Update(keyType(tea.KeyEnter))
 	if m.modal != modalConfirm {
 		t.Fatalf("batch action did not open confirmation: modal=%v banner=%q", m.modal, m.banner)
@@ -869,7 +955,7 @@ func TestWorkspaceWildcardBackendIsNotVerifiedNoOp(t *testing.T) {
 	m.view.Items[0].Routes[0].Target.Address = "0.0.0.0"
 	m.view.Exposures.Routes[0].Target.Address = "0.0.0.0"
 	item, ok := m.selectedItem()
-	if !ok || m.sameStateForItem(item, model.ExposureServe) {
+	if !ok || workspace.SameStateForItem(m.view, item, exposuredata.ExposureServe) {
 		t.Fatal("wildcard provider backend was treated as a verified no-op")
 	}
 }
@@ -877,16 +963,16 @@ func TestWorkspaceWildcardBackendIsNotVerifiedNoOp(t *testing.T) {
 func TestWorkspaceActionSafetyAndVerifiedNoOp(t *testing.T) {
 	m := workspaceFixture()
 	m.Update(keyRune(' '))
-	if m.modal != modalAction || m.actionSession.index != modeIndex(model.ExposureServe) {
+	if m.modal != modalAction || m.actionSession.index != modeIndex(exposuredata.ExposureServe) {
 		t.Fatalf("space did not open selector at current mode: modal=%v index=%d", m.modal, m.actionSession.index)
 	}
 	m.modal = modalNone
-	m.openAction(ptrMode(model.ExposureServe))
+	m.openAction(ptrMode(exposuredata.ExposureServe))
 	m.Update(keyType(tea.KeyEnter))
 	if m.modal != modalNone || m.transient != "Already active: serve" {
 		t.Fatalf("verified same-state action was not a no-op: modal=%v status=%q", m.modal, m.transient)
 	}
-	m.openAction(ptrMode(model.ExposureFunnel))
+	m.openAction(ptrMode(exposuredata.ExposureFunnel))
 	m.Update(keyType(tea.KeyEnter))
 	if m.modal != modalConfirm || m.actionSession.confirm {
 		t.Fatalf("Funnel did not open ordinary focused confirmation: modal=%v focus=%t", m.modal, m.actionSession.confirm)
@@ -900,7 +986,7 @@ func TestWorkspaceActionSafetyAndVerifiedNoOp(t *testing.T) {
 
 func TestWorkspaceFocusedConfirmationCanBeCancelledWithoutStickyError(t *testing.T) {
 	m := workspaceFixture()
-	m.openAction(ptrMode(model.ExposureFunnel))
+	m.openAction(ptrMode(exposuredata.ExposureFunnel))
 	m.Update(keyType(tea.KeyEnter))
 	m.Update(keyRune('n'))
 	if m.modal != modalConfirm {
@@ -914,13 +1000,13 @@ func TestWorkspaceFocusedConfirmationCanBeCancelledWithoutStickyError(t *testing
 
 type fakeProcessObserver struct{}
 
-func (fakeProcessObserver) List(context.Context) (model.ListenerSnapshot, error) {
-	return model.ListenerSnapshot{Authoritative: true}, nil
+func (fakeProcessObserver) List(context.Context) (discovery.ListenerSnapshot, error) {
+	return discovery.ListenerSnapshot{Authoritative: true}, nil
 }
 
 type fakeProcessTerminator struct{}
 
-func (fakeProcessTerminator) Terminate(context.Context, model.Listener) error { return nil }
+func (fakeProcessTerminator) Terminate(context.Context, discovery.Listener) error { return nil }
 
 func TestWorkspaceProcessTerminationUsesFocusedConfirmation(t *testing.T) {
 	m := workspaceFixture()
@@ -943,8 +1029,8 @@ func TestWorkspaceProcessTerminationUsesFocusedConfirmation(t *testing.T) {
 
 func TestWorkspaceProcessTerminationSupportsSelectedBatch(t *testing.T) {
 	m := workspaceFixture()
-	second := model.Listener{ID: "listener-two", Name: "api", Process: "python", ProcessStart: "test:4343", PID: 4343, Target: model.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}, Scope: model.ScopeLoopback, Metadata: model.MetadataComplete}
-	m.view.Items = append(m.view.Items, exposure.ReconciledItem{ID: second.ID, Listener: &second, State: model.ExposureState("disabled"), Mode: model.ExposureDisabled})
+	second := discovery.Listener{ID: "listener-two", Name: "api", Process: "python", ProcessStart: "test:4343", PID: 4343, Target: targetmodel.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}, Scope: targetmodel.ScopeLoopback, Metadata: discovery.MetadataComplete}
+	m.view.Items = append(m.view.Items, exposure.ReconciledItem{ID: second.ID, Listener: &second, State: exposuredata.ExposureState("disabled"), Mode: exposuredata.ExposureDisabled})
 	m.controller.Discoverer = fakeProcessObserver{}
 	m.processTerminator = fakeProcessTerminator{}
 	m.Update(keyRune('v'))
@@ -980,7 +1066,7 @@ func TestWorkspaceGuardsQuitAndDuplicateOperations(t *testing.T) {
 		t.Fatal("quit bypassed Applying guard")
 	}
 	m.modal = modalNone
-	m.openAction(ptrMode(model.ExposureFunnel))
+	m.openAction(ptrMode(exposuredata.ExposureFunnel))
 	m.Update(keyType(tea.KeyEnter))
 	for _, r := range "YES" {
 		m.Update(keyRune(r))
@@ -1008,7 +1094,7 @@ func TestWorkspaceQuitRecordsUnverifiedCancellationBeforeExit(t *testing.T) {
 	if m.quittingAfterCancel {
 		t.Fatal("quit remained blocked after cancellation grace period")
 	}
-	if m.view.Items[0].OperationState != model.ExposureUnverified {
+	if m.view.Items[0].OperationState != exposuredata.ExposureUnverified {
 		t.Fatalf("cancelled operation was not marked unverified: %q", m.view.Items[0].OperationState)
 	}
 }

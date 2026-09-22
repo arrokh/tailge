@@ -3,17 +3,19 @@ package tui
 import (
 	"testing"
 
-	"github.com/arrokh/tailge/internal/model"
+	"github.com/arrokh/tailge/internal/exposuredata"
+	"github.com/arrokh/tailge/internal/target"
+	"github.com/arrokh/tailge/internal/workspace"
 )
 
 func TestExposureActionSessionChoiceStateIsSuppliedByWorkspace(t *testing.T) {
 	var session exposureActionSession
-	session.open("listener", model.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}, model.ExposureFunnel)
-	session.refreshChoices(func(mode model.ExposureMode) exposureActionAvailability {
-		return exposureActionAvailability{disabled: mode == model.ExposureFunnel, reason: "waiting", wait: mode == model.ExposureFunnel}
+	session.open("listener", target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}, exposuredata.ExposureFunnel)
+	session.refreshChoices(func(mode exposuredata.ExposureMode) exposureActionAvailability {
+		return workspace.ActionAvailability{Disabled: mode == exposuredata.ExposureFunnel, Reason: "waiting", Wait: mode == exposuredata.ExposureFunnel}
 	})
 	choice, ok := session.selectedChoice()
-	if !ok || choice.mode != model.ExposureFunnel || !choice.disabled || !choice.wait || choice.reason != "waiting" {
+	if !ok || choice.mode != exposuredata.ExposureFunnel || !choice.disabled || !choice.wait || choice.reason != "waiting" {
 		t.Fatalf("unexpected supplied choice: %#v, ok=%t", choice, ok)
 	}
 }

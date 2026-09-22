@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/arrokh/tailge/internal/model"
+	"github.com/arrokh/tailge/internal/fault"
 )
 
 const (
@@ -85,12 +85,12 @@ func NewManager(home string) (Manager, error) {
 		var err error
 		home, err = os.UserHomeDir()
 		if err != nil {
-			return Manager{}, model.WrapError(model.ErrConfig, "config", "cannot determine the home directory", false, "unavailable", "Set a valid home directory and retry.", err)
+			return Manager{}, fault.WrapError(fault.ErrConfig, "config", "cannot determine the home directory", false, "unavailable", "Set a valid home directory and retry.", err)
 		}
 	}
 	home, err := filepath.Abs(home)
 	if err != nil {
-		return Manager{}, model.WrapError(model.ErrConfig, "config", "cannot resolve the home directory", false, "unavailable", "Use a valid home directory and retry.", err)
+		return Manager{}, fault.WrapError(fault.ErrConfig, "config", "cannot resolve the home directory", false, "unavailable", "Use a valid home directory and retry.", err)
 	}
 	dir := filepath.Join(home, DirName)
 	return Manager{HomeDir: home, Dir: dir, Path: filepath.Join(dir, FileName)}, nil
@@ -98,7 +98,7 @@ func NewManager(home string) (Manager, error) {
 
 func (m Manager) Load(ctx context.Context) (Config, []string, bool, error) {
 	if err := ctx.Err(); err != nil {
-		return Config{}, nil, false, model.WrapError(model.ErrCancelled, "config", "config load cancelled", true, "cancelled", "Retry the command.", err)
+		return Config{}, nil, false, fault.WrapError(fault.ErrCancelled, "config", "config load cancelled", true, "cancelled", "Retry the command.", err)
 	}
 	if err := m.validateParent(); err != nil {
 		return Config{}, nil, false, err
@@ -108,24 +108,24 @@ func (m Manager) Load(ctx context.Context) (Config, []string, bool, error) {
 		return Defaults(), []string{"config file is missing; defaults are in use"}, true, nil
 	}
 	if err != nil {
-		return Config{}, nil, false, model.WrapError(model.ErrConfig, "config", "cannot inspect "+m.Path, false, "unavailable", "Check the path permissions and retry.", err)
+		return Config{}, nil, false, fault.WrapError(fault.ErrConfig, "config", "cannot inspect "+m.Path, false, "unavailable", "Check the path permissions and retry.", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return Config{}, nil, false, model.NewError(model.ErrConfig, "config", "config file is an unexpected symlink: "+m.Path, false, "unsafe", "Replace the symlink with a regular file and retry.")
+		return Config{}, nil, false, fault.NewError(fault.ErrConfig, "config", "config file is an unexpected symlink: "+m.Path, false, "unsafe", "Replace the symlink with a regular file and retry.")
 	}
 	if !info.Mode().IsRegular() {
-		return Config{}, nil, false, model.NewError(model.ErrConfig, "config", "config path is not a regular file: "+m.Path, false, "unsafe", "Replace it with a regular file and retry.")
+		return Config{}, nil, false, fault.NewError(fault.ErrConfig, "config", "config path is not a regular file: "+m.Path, false, "unsafe", "Replace it with a regular file and retry.")
 	}
 	if info.Mode().Perm()&0o077 != 0 {
-		return Config{}, nil, false, model.NewError(model.ErrConfig, "config", "config file permissions are too broad: "+m.Path, false, "unsafe", "Restrict the file to owner read/write permissions (0600) and retry.")
+		return Config{}, nil, false, fault.NewError(fault.ErrConfig, "config", "config file permissions are too broad: "+m.Path, false, "unsafe", "Restrict the file to owner read/write permissions (0600) and retry.")
 	}
 	data, err := readBounded(m.Path)
 	if err != nil {
-		return Config{}, nil, false, model.WrapError(model.ErrConfig, "config", "cannot read "+m.Path, false, "unavailable", "Check the file permissions and retry.", err)
+		return Config{}, nil, false, fault.WrapError(fault.ErrConfig, "config", "cannot read "+m.Path, false, "unavailable", "Check the file permissions and retry.", err)
 	}
 	cfg, warnings, err := Parse(string(data))
 	if err != nil {
-		return Config{}, warnings, false, model.WrapError(model.ErrConfig, "config", "invalid "+m.Path+": "+err.Error(), false, "invalid", "Fix the reported field and run `tailge config validate`; the file was not changed.", err)
+		return Config{}, warnings, false, fault.WrapError(fault.ErrConfig, "config", "invalid "+m.Path+": "+err.Error(), false, "invalid", "Fix the reported field and run `tailge config validate`; the file was not changed.", err)
 	}
 	return cfg, warnings, false, nil
 }
@@ -147,10 +147,10 @@ func (m Manager) Ensure(ctx context.Context) (Config, []string, error) {
 
 func (m Manager) Save(ctx context.Context, cfg Config) error {
 	if err := ctx.Err(); err != nil {
-		return model.WrapError(model.ErrCancelled, "config", "config write cancelled", true, "cancelled", "Retry the command.", err)
+		return fault.WrapError(fault.ErrCancelled, "config", "config write cancelled", true, "cancelled", "Retry the command.", err)
 	}
 	if err := cfg.Validate(); err != nil {
-		return model.WrapError(model.ErrConfig, "config", err.Error(), false, "invalid", "Correct the value and retry.", err)
+		return fault.WrapError(fault.ErrConfig, "config", err.Error(), false, "invalid", "Correct the value and retry.", err)
 	}
 	if err := m.ensureDir(); err != nil {
 		return err
@@ -166,53 +166,53 @@ func (m Manager) Save(ctx context.Context, cfg Config) error {
 
 func (m Manager) saveLocked(ctx context.Context, cfg Config) error {
 	if err := ctx.Err(); err != nil {
-		return model.WrapError(model.ErrCancelled, "config", "config write cancelled", true, "cancelled", "Retry the command.", err)
+		return fault.WrapError(fault.ErrCancelled, "config", "config write cancelled", true, "cancelled", "Retry the command.", err)
 	}
 	if info, statErr := os.Lstat(m.Path); statErr == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return model.NewError(model.ErrConfig, "config", "refusing to replace unsafe config path "+m.Path, false, "unsafe", "Replace the path with a regular file and retry.")
+			return fault.NewError(fault.ErrConfig, "config", "refusing to replace unsafe config path "+m.Path, false, "unsafe", "Replace the path with a regular file and retry.")
 		}
 		if info.Mode().Perm()&0o077 != 0 {
-			return model.NewError(model.ErrConfig, "config", "config file permissions are too broad: "+m.Path, false, "unsafe", "Restrict the file to owner read/write permissions (0600) and retry.")
+			return fault.NewError(fault.ErrConfig, "config", "config file permissions are too broad: "+m.Path, false, "unsafe", "Restrict the file to owner read/write permissions (0600) and retry.")
 		}
 		backup := m.Path + ".bak"
 		if backupInfo, backupErr := os.Lstat(backup); backupErr == nil {
 			if backupInfo.Mode()&os.ModeSymlink != 0 || !backupInfo.Mode().IsRegular() {
-				return model.NewError(model.ErrConfig, "config", "refusing unsafe config backup path "+backup, false, "unsafe", "Replace the backup path with a regular file and retry.")
+				return fault.NewError(fault.ErrConfig, "config", "refusing unsafe config backup path "+backup, false, "unsafe", "Replace the backup path with a regular file and retry.")
 			}
 		} else if !errors.Is(backupErr, os.ErrNotExist) {
-			return model.WrapError(model.ErrConfig, "config", "cannot inspect config backup", true, "unavailable", "Check permissions and retry.", backupErr)
+			return fault.WrapError(fault.ErrConfig, "config", "cannot inspect config backup", true, "unavailable", "Check permissions and retry.", backupErr)
 		}
 		if err := copyFile(backup, m.Path, 0o600); err != nil {
-			return model.WrapError(model.ErrConfig, "config", "cannot create config backup", true, "unavailable", "Free disk space or fix permissions, then retry.", err)
+			return fault.WrapError(fault.ErrConfig, "config", "cannot create config backup", true, "unavailable", "Free disk space or fix permissions, then retry.", err)
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return model.WrapError(model.ErrConfig, "config", "cannot inspect config before writing", true, "unavailable", "Check permissions and retry.", statErr)
+		return fault.WrapError(fault.ErrConfig, "config", "cannot inspect config before writing", true, "unavailable", "Check permissions and retry.", statErr)
 	}
 
 	tmp, err := os.CreateTemp(m.Dir, ".config.tailge.tmp-")
 	if err != nil {
-		return model.WrapError(model.ErrConfig, "config", "cannot create temporary config", true, "unavailable", "Check directory permissions and disk space, then retry.", err)
+		return fault.WrapError(fault.ErrConfig, "config", "cannot create temporary config", true, "unavailable", "Check directory permissions and disk space, then retry.", err)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 	if err := tmp.Chmod(0o600); err != nil {
 		tmp.Close()
-		return model.WrapError(model.ErrConfig, "config", "cannot restrict temporary config permissions", false, "unsafe", "Fix directory permissions and retry.", err)
+		return fault.WrapError(fault.ErrConfig, "config", "cannot restrict temporary config permissions", false, "unsafe", "Fix directory permissions and retry.", err)
 	}
 	if _, err := io.WriteString(tmp, cfg.YAML()); err != nil {
 		tmp.Close()
-		return model.WrapError(model.ErrConfig, "config", "cannot write config", true, "unavailable", "Free disk space and retry.", err)
+		return fault.WrapError(fault.ErrConfig, "config", "cannot write config", true, "unavailable", "Free disk space and retry.", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
-		return model.WrapError(model.ErrConfig, "config", "cannot sync config", true, "unavailable", "Check storage health and retry.", err)
+		return fault.WrapError(fault.ErrConfig, "config", "cannot sync config", true, "unavailable", "Check storage health and retry.", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return model.WrapError(model.ErrConfig, "config", "cannot close temporary config", true, "unavailable", "Retry after checking the filesystem.", err)
+		return fault.WrapError(fault.ErrConfig, "config", "cannot close temporary config", true, "unavailable", "Retry after checking the filesystem.", err)
 	}
 	if err := os.Rename(tmpName, m.Path); err != nil {
-		return model.WrapError(model.ErrConfig, "config", "cannot atomically replace config", true, "unavailable", "Check directory permissions and retry.", err)
+		return fault.WrapError(fault.ErrConfig, "config", "cannot atomically replace config", true, "unavailable", "Check directory permissions and retry.", err)
 	}
 	if dir, err := os.Open(m.Dir); err == nil {
 		_ = dir.Sync()
@@ -220,11 +220,11 @@ func (m Manager) saveLocked(ctx context.Context, cfg Config) error {
 	}
 	written, warnings, _, err := m.Load(ctx)
 	if err != nil {
-		return model.WrapError(model.ErrConfig, "config", "config write could not be verified", true, "unknown", "Inspect the file and retry; the previous backup is at "+m.Path+".bak.", err)
+		return fault.WrapError(fault.ErrConfig, "config", "config write could not be verified", true, "unknown", "Inspect the file and retry; the previous backup is at "+m.Path+".bak.", err)
 	}
 	_ = warnings
 	if written != cfg {
-		return model.NewError(model.ErrConfig, "config", "config write verification did not match requested values", true, "unknown", "Inspect the file and retry; the previous backup is at "+m.Path+".bak.")
+		return fault.NewError(fault.ErrConfig, "config", "config write verification did not match requested values", true, "unknown", "Inspect the file and retry; the previous backup is at "+m.Path+".bak.")
 	}
 	return nil
 }
@@ -244,7 +244,7 @@ func (m Manager) Set(ctx context.Context, key, value string) (Config, error) {
 		return Config{}, err
 	}
 	if err := SetValue(&cfg, key, value); err != nil {
-		return Config{}, model.WrapError(model.ErrInvalidInput, "config", err.Error(), false, "invalid", "Use `tailge config show` to inspect valid settings.", err)
+		return Config{}, fault.WrapError(fault.ErrInvalidInput, "config", err.Error(), false, "invalid", "Use `tailge config show` to inspect valid settings.", err)
 	}
 	if err := m.saveLocked(ctx, cfg); err != nil {
 		return Config{}, err
@@ -381,13 +381,13 @@ func (m Manager) validateParent() error {
 		return nil
 	}
 	if err != nil {
-		return model.WrapError(model.ErrConfig, "config", "cannot inspect "+m.Dir, false, "unavailable", "Check the path permissions and retry.", err)
+		return fault.WrapError(fault.ErrConfig, "config", "cannot inspect "+m.Dir, false, "unavailable", "Check the path permissions and retry.", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return model.NewError(model.ErrConfig, "config", m.Dir+" is not a regular directory", false, "unsafe", "Replace the path with a directory and retry.")
+		return fault.NewError(fault.ErrConfig, "config", m.Dir+" is not a regular directory", false, "unsafe", "Replace the path with a directory and retry.")
 	}
 	if info.Mode().Perm()&0o077 != 0 {
-		return model.NewError(model.ErrConfig, "config", m.Dir+" permissions are too broad", false, "unsafe", "Restrict the directory to owner-only permissions (0700) and retry.")
+		return fault.NewError(fault.ErrConfig, "config", m.Dir+" permissions are too broad", false, "unsafe", "Restrict the directory to owner-only permissions (0700) and retry.")
 	}
 	return nil
 }
@@ -397,11 +397,11 @@ func (m Manager) ensureDir() error {
 		return err
 	}
 	if err := os.Mkdir(m.Dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return model.WrapError(model.ErrConfig, "config", "cannot create "+m.Dir, true, "unavailable", "Check home-directory permissions and disk space, then retry.", err)
+		return fault.WrapError(fault.ErrConfig, "config", "cannot create "+m.Dir, true, "unavailable", "Check home-directory permissions and disk space, then retry.", err)
 	}
 	fd, err := syscall.Open(m.Dir, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
-		return model.WrapError(model.ErrConfig, "config", "cannot open "+m.Dir+" without following links", false, "unsafe", "Replace the config directory with a real owner-only directory and retry.", err)
+		return fault.WrapError(fault.ErrConfig, "config", "cannot open "+m.Dir+" without following links", false, "unsafe", "Replace the config directory with a real owner-only directory and retry.", err)
 	}
 	dir := os.NewFile(uintptr(fd), m.Dir)
 	defer dir.Close()
@@ -410,13 +410,13 @@ func (m Manager) ensureDir() error {
 		if err == nil {
 			err = fmt.Errorf("path is not a directory")
 		}
-		return model.WrapError(model.ErrConfig, "config", "config directory validation failed", false, "unsafe", "Replace the config directory with a real owner-only directory and retry.", err)
+		return fault.WrapError(fault.ErrConfig, "config", "config directory validation failed", false, "unsafe", "Replace the config directory with a real owner-only directory and retry.", err)
 	}
 	if info.Mode().Perm()&0o077 != 0 {
-		return model.NewError(model.ErrConfig, "config", m.Dir+" permissions are too broad", false, "unsafe", "Restrict the directory to owner-only permissions (0700) and retry.")
+		return fault.NewError(fault.ErrConfig, "config", m.Dir+" permissions are too broad", false, "unsafe", "Restrict the directory to owner-only permissions (0700) and retry.")
 	}
 	if err := dir.Chmod(0o700); err != nil {
-		return model.WrapError(model.ErrConfig, "config", "cannot restrict "+m.Dir+" permissions", false, "unsafe", "Fix directory permissions and retry.", err)
+		return fault.WrapError(fault.ErrConfig, "config", "cannot restrict "+m.Dir+" permissions", false, "unsafe", "Fix directory permissions and retry.", err)
 	}
 	return nil
 }
@@ -425,18 +425,18 @@ func (m Manager) openWriteLock(ctx context.Context) (*os.File, func(), error) {
 	lockPath := m.Path + ".lock"
 	if info, statErr := os.Lstat(lockPath); statErr == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
-			return nil, nil, model.NewError(model.ErrConfig, "config", "refusing unsafe config lock path "+lockPath, false, "unsafe", "Replace the lock path with a regular file restricted to owner permissions and retry.")
+			return nil, nil, fault.NewError(fault.ErrConfig, "config", "refusing unsafe config lock path "+lockPath, false, "unsafe", "Replace the lock path with a regular file restricted to owner permissions and retry.")
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return nil, nil, model.WrapError(model.ErrConfig, "config", "cannot inspect config lock", true, "unavailable", "Check directory permissions and retry.", statErr)
+		return nil, nil, fault.WrapError(fault.ErrConfig, "config", "cannot inspect config lock", true, "unavailable", "Check directory permissions and retry.", statErr)
 	}
 	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
-		return nil, nil, model.WrapError(model.ErrConfig, "config", "cannot open config lock", true, "unavailable", "Check directory permissions and retry.", err)
+		return nil, nil, fault.WrapError(fault.ErrConfig, "config", "cannot open config lock", true, "unavailable", "Check directory permissions and retry.", err)
 	}
 	if err := lock.Chmod(0o600); err != nil {
 		_ = lock.Close()
-		return nil, nil, model.WrapError(model.ErrConfig, "config", "cannot restrict config lock permissions", false, "unsafe", "Fix the lock permissions and retry.", err)
+		return nil, nil, fault.WrapError(fault.ErrConfig, "config", "cannot restrict config lock permissions", false, "unsafe", "Fix the lock permissions and retry.", err)
 	}
 	if err := lockConfig(ctx, lock); err != nil {
 		_ = lock.Close()
@@ -455,7 +455,7 @@ func lockConfig(ctx context.Context, file *os.File) error {
 			return nil
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
-			return model.WrapError(model.ErrConfig, "config", "cannot lock config for writing", true, "busy", "Retry after another tailge process finishes.", err)
+			return fault.WrapError(fault.ErrConfig, "config", "cannot lock config for writing", true, "busy", "Retry after another tailge process finishes.", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -467,9 +467,9 @@ func lockConfig(ctx context.Context, file *os.File) error {
 
 func configContextError(err error) error {
 	if errors.Is(err, context.DeadlineExceeded) {
-		return model.WrapError(model.ErrTimeout, "config", "config lock acquisition timed out", true, "timeout", "Retry after another tailge process finishes.", err)
+		return fault.WrapError(fault.ErrTimeout, "config", "config lock acquisition timed out", true, "timeout", "Retry after another tailge process finishes.", err)
 	}
-	return model.WrapError(model.ErrCancelled, "config", "config lock acquisition cancelled", true, "cancelled", "Retry the command.", err)
+	return fault.WrapError(fault.ErrCancelled, "config", "config lock acquisition cancelled", true, "cancelled", "Retry the command.", err)
 }
 
 func copyFile(dst, src string, mode os.FileMode) error {

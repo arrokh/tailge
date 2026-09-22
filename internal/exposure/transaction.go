@@ -4,13 +4,15 @@ import (
 	"context"
 	"time"
 
-	"github.com/arrokh/tailge/internal/model"
+	"github.com/arrokh/tailge/internal/exposuredata"
+	"github.com/arrokh/tailge/internal/fault"
+	targetmodel "github.com/arrokh/tailge/internal/target"
 )
 
 // apply is the Controller lifecycle adapter around exactExposureOperation.
 // Controller reserves the target, publishes lifecycle events, and records the
 // final receipt; the operation owns the ordered provider mutation protocol.
-func (c *Controller) apply(ctx context.Context, target model.Target, mode model.ExposureMode, selectedProviderKey string, selectedRouteMode model.ExposureMode, confirmFunnel, confirmExternal bool, timeout time.Duration, approval *MutationApproval) (receipt model.OperationReceipt, applyErr error) {
+func (c *Controller) apply(ctx context.Context, target targetmodel.Target, mode exposuredata.ExposureMode, selectedProviderKey string, selectedRouteMode exposuredata.ExposureMode, confirmFunnel, confirmExternal bool, timeout time.Duration, approval *MutationApproval) (receipt exposuredata.OperationReceipt, applyErr error) {
 	op := exactExposureOperation{
 		target:              target,
 		mode:                mode,
@@ -34,7 +36,7 @@ func (c *Controller) apply(ctx context.Context, target model.Target, mode model.
 		recordVerification: c.recordVerificationEvent,
 	}
 	if err := op.validate(); err != nil {
-		return model.OperationReceipt{}, err
+		return exposuredata.OperationReceipt{}, err
 	}
 
 	c.mu.Lock()
@@ -42,13 +44,13 @@ func (c *Controller) apply(ctx context.Context, target model.Target, mode model.
 		c.busy = map[string]bool{}
 	}
 	if c.desired == nil {
-		c.desired = map[string]model.ExposureMode{}
+		c.desired = map[string]exposuredata.ExposureMode{}
 	}
 	if c.operations == nil {
-		c.operations = map[string]model.OperationReceipt{}
+		c.operations = map[string]exposuredata.OperationReceipt{}
 	}
 	if c.operationStates == nil {
-		c.operationStates = map[string]model.ExposureState{}
+		c.operationStates = map[string]exposuredata.ExposureState{}
 	}
 	if c.operationStarted == nil {
 		c.operationStarted = map[string]time.Time{}
@@ -56,18 +58,18 @@ func (c *Controller) apply(ctx context.Context, target model.Target, mode model.
 	operationKey := op.target.Key()
 	if c.busy[operationKey] {
 		c.mu.Unlock()
-		return model.OperationReceipt{}, model.NewError(model.ErrOperation, "exposure", "another operation is already applying to this target", true, "applying", "Wait for the current operation to finish.")
+		return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrOperation, "exposure", "another operation is already applying to this target", true, "applying", "Wait for the current operation to finish.")
 	}
 	operationStarted := c.now()
-	operationID := model.StableID("apply", operationKey, string(op.mode), operationStarted.UTC().Format(time.RFC3339Nano))
+	operationID := targetmodel.StableID("apply", operationKey, string(op.mode), operationStarted.UTC().Format(time.RFC3339Nano))
 	op.operationID = operationID
 	op.operationStarted = operationStarted
-	receipt = model.OperationReceipt{ID: operationID, StartedAt: operationStarted}
+	receipt = exposuredata.OperationReceipt{ID: operationID, StartedAt: operationStarted}
 	c.busy[operationKey] = true
 	c.desired[operationKey] = op.mode
-	c.operationStates[operationKey] = model.ExposureApplying
+	c.operationStates[operationKey] = exposuredata.ExposureApplying
 	c.operationStarted[operationID] = operationStarted
-	c.recordEventLocked(model.OperationEvent{OperationID: operationID, Phase: "start", At: operationStarted, Target: op.target, Mode: op.mode, Capability: operationCapability(op.mode), State: model.ExposureApplying})
+	c.recordEventLocked(exposuredata.OperationEvent{OperationID: operationID, Phase: "start", At: operationStarted, Target: op.target, Mode: op.mode, Capability: operationCapability(op.mode), State: exposuredata.ExposureApplying})
 	c.mu.Unlock()
 	defer func() {
 		if receipt.ID == "" {
@@ -81,7 +83,7 @@ func (c *Controller) apply(ctx context.Context, target model.Target, mode model.
 		}
 		if applyErr != nil {
 			receipt.Verified = false
-			appErr := model.AsAppError(applyErr)
+			appErr := fault.AsAppError(applyErr)
 			if receipt.Error == nil {
 				receipt.Error = ptr(appErr.Safe())
 			}
@@ -89,9 +91,9 @@ func (c *Controller) apply(ctx context.Context, target model.Target, mode model.
 				receipt.ExitCode = appErr.Exit
 			}
 		}
-		state := model.ExposureUnverified
+		state := exposuredata.ExposureUnverified
 		if applyErr == nil && receipt.Verified {
-			state = model.ExposureSucceeded
+			state = exposuredata.ExposureSucceeded
 		} else if applyErr != nil {
 			state = operationStateForError(applyErr)
 		}
@@ -100,7 +102,7 @@ func (c *Controller) apply(ctx context.Context, target model.Target, mode model.
 		c.operations[operationKey] = receipt
 		started := c.operationStarted[operationID]
 		delete(c.operationStarted, operationID)
-		c.recordEventLocked(model.OperationEvent{OperationID: operationID, Phase: "final", At: receipt.FinishedAt, Duration: eventDuration(started, receipt.FinishedAt), Target: op.target, Mode: op.mode, Capability: operationCapability(op.mode), State: state, ErrorCode: operationErrorCode(applyErr)})
+		c.recordEventLocked(exposuredata.OperationEvent{OperationID: operationID, Phase: "final", At: receipt.FinishedAt, Duration: eventDuration(started, receipt.FinishedAt), Target: op.target, Mode: op.mode, Capability: operationCapability(op.mode), State: state, ErrorCode: operationErrorCode(applyErr)})
 		delete(c.busy, operationKey)
 		c.mu.Unlock()
 	}()

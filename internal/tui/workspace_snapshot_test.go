@@ -5,19 +5,21 @@ import (
 	"time"
 
 	"github.com/arrokh/tailge/internal/config"
+	"github.com/arrokh/tailge/internal/discovery"
 	"github.com/arrokh/tailge/internal/exposure"
-	"github.com/arrokh/tailge/internal/model"
+	"github.com/arrokh/tailge/internal/exposuredata"
+	"github.com/arrokh/tailge/internal/target"
 )
 
 func TestWorkspaceSnapshotSharesPortIdentityAcrossPresentationFlows(t *testing.T) {
-	target := model.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}
+	target := target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}
 	now := time.Now()
-	listener := model.Listener{ID: "listener", Name: "web", Target: target, LastSeen: now}
-	route := model.ExposureRoute{ID: "route", ProviderKey: "tcp:3000", Target: target, Mode: model.ExposureServe, State: model.ExposureActive}
+	listener := discovery.Listener{ID: "listener", Name: "web", Target: target, LastSeen: now}
+	route := exposuredata.ExposureRoute{ID: "route", ProviderKey: "tcp:3000", Target: target, Mode: exposuredata.ExposureServe, State: exposuredata.ExposureActive}
 	view := exposure.View{
 		Items: []exposure.ReconciledItem{
-			{ID: listener.ID, Listener: &listener, State: model.ExposureActive, Routes: []model.ExposureRoute{route}},
-			{ID: "inactive", Routes: []model.ExposureRoute{{ID: "inactive-route", ProviderKey: "funnel:3000", Target: target, Mode: model.ExposureFunnel}}, State: model.ExposureInactive},
+			{ID: listener.ID, Listener: &listener, State: exposuredata.ExposureActive, Routes: []exposuredata.ExposureRoute{route}},
+			{ID: "inactive", Routes: []exposuredata.ExposureRoute{{ID: "inactive-route", ProviderKey: "funnel:3000", Target: target, Mode: exposuredata.ExposureFunnel}}, State: exposuredata.ExposureInactive},
 		},
 	}
 	snapshot := newWorkspaceSnapshot(view, "", config.Defaults())
@@ -31,26 +33,26 @@ func TestWorkspaceSnapshotSharesPortIdentityAcrossPresentationFlows(t *testing.T
 }
 
 func TestWorkspaceSnapshotInheritsRouteStateWhenListenerHasNoRoute(t *testing.T) {
-	target := model.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}
-	listener := model.Listener{ID: "listener", Name: "web", Target: target}
-	route := model.ExposureRoute{ID: "route", ProviderKey: "tcp:3000", Target: target, Mode: model.ExposureServe, State: model.ExposureActive}
+	target := target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}
+	listener := discovery.Listener{ID: "listener", Name: "web", Target: target}
+	route := exposuredata.ExposureRoute{ID: "route", ProviderKey: "tcp:3000", Target: target, Mode: exposuredata.ExposureServe, State: exposuredata.ExposureActive}
 	view := exposure.View{Items: []exposure.ReconciledItem{
-		{ID: listener.ID, Listener: &listener, State: model.ExposureState("disabled"), Mode: model.ExposureDisabled},
-		{ID: "route-only", Routes: []model.ExposureRoute{route}, State: model.ExposureActive, Mode: model.ExposureServe},
+		{ID: listener.ID, Listener: &listener, State: exposuredata.ExposureState("disabled"), Mode: exposuredata.ExposureDisabled},
+		{ID: "route-only", Routes: []exposuredata.ExposureRoute{route}, State: exposuredata.ExposureActive, Mode: exposuredata.ExposureServe},
 	}}
 	items := newWorkspaceSnapshot(view, "", config.Defaults()).Items()
-	if len(items) != 1 || items[0].State != model.ExposureActive || items[0].Mode != model.ExposureServe {
+	if len(items) != 1 || items[0].State != exposuredata.ExposureActive || items[0].Mode != exposuredata.ExposureServe {
 		t.Fatalf("collapsed listener did not inherit route state: %#v", items)
 	}
 }
 
 func TestWorkspaceSnapshotFiltersAfterPortIdentityCollapse(t *testing.T) {
-	target := model.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}
-	listener := model.Listener{ID: "listener", Name: "web", Target: target}
-	route := model.ExposureRoute{ID: "route", ProviderKey: "funnel:https=3000", Target: target, Mode: model.ExposureFunnel, State: model.ExposureActive}
+	target := target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}
+	listener := discovery.Listener{ID: "listener", Name: "web", Target: target}
+	route := exposuredata.ExposureRoute{ID: "route", ProviderKey: "funnel:https=3000", Target: target, Mode: exposuredata.ExposureFunnel, State: exposuredata.ExposureActive}
 	view := exposure.View{Items: []exposure.ReconciledItem{
-		{ID: "listener", Listener: &listener, State: model.ExposureState("disabled"), Mode: model.ExposureDisabled},
-		{ID: "route-only", Routes: []model.ExposureRoute{route}, State: model.ExposureActive, Mode: model.ExposureFunnel},
+		{ID: "listener", Listener: &listener, State: exposuredata.ExposureState("disabled"), Mode: exposuredata.ExposureDisabled},
+		{ID: "route-only", Routes: []exposuredata.ExposureRoute{route}, State: exposuredata.ExposureActive, Mode: exposuredata.ExposureFunnel},
 	}}
 	items := newWorkspaceSnapshot(view, "funnel:https=3000", config.Defaults()).Items()
 	if len(items) != 1 || items[0].ID != "listener" || len(items[0].Routes) != 1 {
@@ -59,14 +61,14 @@ func TestWorkspaceSnapshotFiltersAfterPortIdentityCollapse(t *testing.T) {
 }
 
 func TestWorkspaceSnapshotDoesNotMutateViewRoutes(t *testing.T) {
-	target := model.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}
-	listener := model.Listener{ID: "listener", Target: target}
-	primaryRoutes := make([]model.ExposureRoute, 1, 2)
-	primaryRoutes[0] = model.ExposureRoute{ID: "primary", Target: target, Mode: model.ExposureServe}
-	duplicateRoute := model.ExposureRoute{ID: "duplicate", Target: target, Mode: model.ExposureFunnel}
+	target := target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}
+	listener := discovery.Listener{ID: "listener", Target: target}
+	primaryRoutes := make([]exposuredata.ExposureRoute, 1, 2)
+	primaryRoutes[0] = exposuredata.ExposureRoute{ID: "primary", Target: target, Mode: exposuredata.ExposureServe}
+	duplicateRoute := exposuredata.ExposureRoute{ID: "duplicate", Target: target, Mode: exposuredata.ExposureFunnel}
 	view := exposure.View{Items: []exposure.ReconciledItem{
-		{ID: "listener", Listener: &listener, Routes: primaryRoutes, State: model.ExposureActive},
-		{ID: "duplicate", Routes: []model.ExposureRoute{duplicateRoute}, State: model.ExposureActive},
+		{ID: "listener", Listener: &listener, Routes: primaryRoutes, State: exposuredata.ExposureActive},
+		{ID: "duplicate", Routes: []exposuredata.ExposureRoute{duplicateRoute}, State: exposuredata.ExposureActive},
 	}}
 	items := newWorkspaceSnapshot(view, "", config.Defaults()).Items()
 	if len(items) != 1 || len(items[0].Routes) != 2 {

@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/arrokh/tailge/internal/model"
+	"github.com/arrokh/tailge/internal/fault"
 	"github.com/arrokh/tailge/internal/runner"
 )
 
@@ -33,7 +33,7 @@ func (a *Adapter) binaryPath() string {
 
 func (a *Adapter) run(ctx context.Context, args ...string) (runner.Result, error) {
 	if a.Runner == nil {
-		return runner.Result{}, model.NewError(model.ErrDependency, "tailscale", "no command runner is configured", true, "unavailable", "Retry the command.")
+		return runner.Result{}, fault.NewError(fault.ErrDependency, "tailscale", "no command runner is configured", true, "unavailable", "Retry the command.")
 	}
 	name := a.binaryPath()
 	if name == "" {
@@ -42,34 +42,34 @@ func (a *Adapter) run(ctx context.Context, args ...string) (runner.Result, error
 	return a.Runner.Run(ctx, name, args...)
 }
 
-func (a *Adapter) commandError(command string, result runner.Result, cause error) *model.AppError {
-	code := model.ErrOperation
+func (a *Adapter) commandError(command string, result runner.Result, cause error) *fault.AppError {
+	code := fault.ErrOperation
 	state := "failed"
 	retry := true
 	message := command + " failed"
-	var existing *model.AppError
+	var existing *fault.AppError
 	if errors.As(cause, &existing) && existing != nil {
 		code, state, retry = existing.Code, existing.State, existing.Retryable
 	}
 	if result.ExitCode == -1 && errors.Is(cause, exec.ErrNotFound) {
-		code, state, message = model.ErrDependency, "unavailable", "tailscale executable was not found"
+		code, state, message = fault.ErrDependency, "unavailable", "tailscale executable was not found"
 	}
 	timedOut := errors.Is(cause, context.DeadlineExceeded)
 	cancelled := errors.Is(cause, context.Canceled)
 	if timedOut {
-		code, state, message = model.ErrTimeout, "unknown", command+" timed out"
+		code, state, message = fault.ErrTimeout, "unknown", command+" timed out"
 	} else if cancelled {
-		code, state, message = model.ErrCancelled, "unknown", command+" was cancelled"
+		code, state, message = fault.ErrCancelled, "unknown", command+" was cancelled"
 	} else if strings.Contains(strings.ToLower(result.Stderr), "permission denied") || strings.Contains(strings.ToLower(result.Stderr), "not permitted") {
-		code, state, message = model.ErrPermission, "permission_denied", command+" was denied by Tailscale"
+		code, state, message = fault.ErrPermission, "permission_denied", command+" was denied by Tailscale"
 	}
 	if result.Stderr != "" {
 		message += ": " + redact(strings.TrimSpace(result.Stderr))
 	}
 	if result.Truncated && !timedOut && !cancelled {
-		code, state, message = model.ErrUnknown, "partial", command+" output was truncated"
+		code, state, message = fault.ErrUnknown, "partial", command+" output was truncated"
 	}
-	return model.WrapError(code, "tailscale", message, retry, state, "Review Tailscale status and retry; final exposure state must be verified.", cause)
+	return fault.WrapError(code, "tailscale", message, retry, state, "Review Tailscale status and retry; final exposure state must be verified.", cause)
 }
 
 var urlWithQuery = regexp.MustCompile(`(?i)https?://[^\s]+`)

@@ -6,16 +6,17 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/arrokh/tailge/internal/model"
+	"github.com/arrokh/tailge/internal/exposuredata"
+	"github.com/arrokh/tailge/internal/target"
 )
 
 // targetMatches retains the provider-local name while delegating target
-// equivalence to the shared model policy.
-func targetMatches(a, b model.Target) bool {
-	return model.TargetsMatch(a, b)
+// equivalence to the shared target policy.
+func targetMatches(a, b target.Target) bool {
+	return target.TargetsMatch(a, b)
 }
 
-func RoutesHash(routes []model.ExposureRoute) string {
+func RoutesHash(routes []exposuredata.ExposureRoute) string {
 	identities := make([]string, 0, len(routes))
 	for _, route := range routes {
 		identities = append(identities, IdentityOf(route).CanonicalKey())
@@ -25,7 +26,7 @@ func RoutesHash(routes []model.ExposureRoute) string {
 
 // RouteIDsHash fingerprints only the exact route IDs correlated with target.
 // It is shared by exposure preconditions and the provider's final recheck.
-func RouteIDsHash(routes []model.ExposureRoute, target model.Target) string {
+func RouteIDsHash(routes []exposuredata.ExposureRoute, target target.Target) string {
 	ids := make([]string, 0, len(routes))
 	for _, route := range routes {
 		if targetMatches(route.Target, target) {

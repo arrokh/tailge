@@ -5,11 +5,64 @@ import (
 	"os"
 	"strings"
 
+	"github.com/arrokh/tailge/internal/exposuredata"
+	"github.com/arrokh/tailge/internal/workspace"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
-
-	"github.com/arrokh/tailge/internal/model"
+	ansi "github.com/charmbracelet/x/ansi"
 )
+
+func (m *workspaceModel) paletteInputView() string {
+	value := []rune(sanitizeTUIText(m.paletteInput.Value()))
+	position := clamp(m.paletteInput.Position(), 0, len(value))
+	width := m.paletteInput.Width
+	if width > 0 && lipgloss.Width(string(value)) > width {
+		if m.paletteInput.Focused() {
+			// Reserve one cell for the visible cursor, then keep the cursor in
+			// the horizontally scrolling input viewport.
+			available := maxInt(0, width-1)
+			start, end, used := position, position, 0
+			for end < len(value) {
+				charWidth := lipgloss.Width(string(value[end]))
+				if used+charWidth > available {
+					break
+				}
+				used += charWidth
+				end++
+			}
+			for start > 0 {
+				charWidth := lipgloss.Width(string(value[start-1]))
+				if used+charWidth > available {
+					break
+				}
+				used += charWidth
+				start--
+			}
+			value = value[start:end]
+			position -= start
+		} else {
+			used := 0
+			end := 0
+			for end < len(value) {
+				charWidth := lipgloss.Width(string(value[end]))
+				if used+charWidth > width {
+					break
+				}
+				used += charWidth
+				end++
+			}
+			value = value[:end]
+			position = clamp(position, 0, len(value))
+		}
+	}
+	if m.paletteInput.Focused() {
+		display := make([]rune, 0, len(value)+1)
+		display = append(display, value[:position]...)
+		display = append(display, '▌')
+		display = append(display, value[position:]...)
+		value = display
+	}
+	return sanitizeTUIText(m.paletteInput.Prompt) + string(value)
+}
 
 func (m *workspaceModel) modalView() string {
 	modalWidth := maxInt(20, minInt(m.width-8, 86))
@@ -26,7 +79,7 @@ func (m *workspaceModel) modalView() string {
 		lines = append(lines, "", fmt.Sprintf("Lines %d-%d/%d · ↑/↓ or j/k scroll · PgUp/PgDn · Home/End · Esc or ? close", start+1, end, len(all)))
 	case modalPalette:
 		title = "COMMAND PALETTE"
-		lines = append(lines, "Type a command or select one:", "", "  "+m.paletteInput.View())
+		lines = append(lines, "Type a command or select one:", "", "  "+m.paletteInputView())
 		for i, command := range m.filteredPalette() {
 			marker := "  "
 			if i == m.paletteIndex {
@@ -68,15 +121,16 @@ func (m *workspaceModel) modalView() string {
 				marker = "> "
 			}
 			label := choice.label
-			if choice.mode == model.ExposureDisabled {
+			if choice.mode == exposuredata.ExposureDisabled {
 				if item, ok := m.actionAnchorItem(); ok && len(item.Routes) > 1 {
 					label += " (choose exact route)"
 				}
 			}
-			if choice.disabled {
+			if choice.disabled && !choice.wait {
 				// Detailed reasons are reported when the choice is activated. A
-				// fixed-width marker here prevents refresh/readiness changes from
-				// resizing and recentering the modal.
+				// fixed-width marker here prevents readiness changes from resizing
+				// and recentering the modal. A refresh-blocked choice is waiting,
+				// not unavailable, so leave its normal label visible.
 				label += " [unavailable]"
 			}
 			lines = append(lines, marker+label)
@@ -109,11 +163,11 @@ func (m *workspaceModel) modalView() string {
 			if item.Warning != "" {
 				lines = append(lines, "Warning: "+sanitizeTUIText(item.Warning))
 			}
-			if route := m.previewRoute(item); route != nil {
+			if route := workspace.PreviewRoute(item, m.actionSession.routeKey); route != nil {
 				lines = append(lines, "Current route: "+string(route.Mode)+" "+route.Target.String()+" selector="+valueOr(route.ProviderKey, "unavailable"))
 			}
 		}
-		if m.actionSession.mode == model.ExposureFunnel {
+		if m.actionSession.mode == exposuredata.ExposureFunnel {
 			lines = append(lines, "WARNING: public internet exposure")
 		}
 		if m.externalPreview() {
@@ -170,6 +224,7 @@ func (m *workspaceModel) modalView() string {
 	cleanLines := make([]string, 0, len(lines))
 	for _, raw := range lines {
 		line := sanitizeTUIText(raw)
+		line = styleConfirmationOptions(m.cfg.ColorTheme, line)
 		trimmed := strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(trimmed, "WARNING:") || strings.HasPrefix(trimmed, "Warning:"):
@@ -195,6 +250,22 @@ func (m *workspaceModel) modalView() string {
 	}
 	return modalStyle.Render(modalTitle + "\n" + strings.Join(cleanLines, "\n"))
 }
+
+func styleConfirmationOptions(theme, line string) string {
+	separator := " "
+	if strings.Contains(line, "    ") {
+		separator = "    "
+	}
+	switch strings.Join(strings.Fields(line), " ") {
+	case "[Cancel] Confirm":
+		return paint(theme, "1;33", "[Cancel]") + separator + paint(theme, "32", "Confirm")
+	case "Cancel [Confirm]":
+		return paint(theme, "33", "Cancel") + separator + paint(theme, "1;32", "[Confirm]")
+	default:
+		return line
+	}
+}
+
 func choiceLabels(choice bool) string {
 	if choice {
 		return "Stay    [Cancel operation and quit]"

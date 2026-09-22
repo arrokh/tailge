@@ -3,39 +3,42 @@ package tui
 import (
 	"time"
 
+	"github.com/arrokh/tailge/internal/workspace"
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+const quitCancelGraceTime = 2 * time.Second
 
 // executeWorkspaceEffect is the only adapter from pure workspace decisions to
 // Bubble Tea commands. Keeping this mapping explicit makes it possible to test
 // key decisions without starting a terminal or invoking the OS.
-func (m *workspaceModel) executeWorkspaceEffect(effect workspaceEffect) tea.Cmd {
-	switch effect.kind {
-	case workspaceEffectRefresh:
+func (m *workspaceModel) executeWorkspaceEffect(effect workspace.Effect) tea.Cmd {
+	switch effect.Kind {
+	case workspace.EffectRefresh:
 		return m.startRefresh()
-	case workspaceEffectRetry:
+	case workspace.EffectRetry:
 		return m.startRetry()
-	case workspaceEffectOpenObservedURL:
+	case workspace.EffectOpenObservedURL:
 		return m.openSelectedURL()
-	case workspaceEffectOpenLocalURL:
+	case workspace.EffectOpenLocalURL:
 		return m.openSelectedLocalURL()
-	case workspaceEffectCopyURL:
+	case workspace.EffectCopyURL:
 		return m.copyURL()
-	case workspaceEffectApplyExposure:
+	case workspace.EffectApplyExposure:
 		return m.startOperation()
-	case workspaceEffectCancelOperation:
+	case workspace.EffectCancelOperation:
 		m.openCancel()
 		return nil
-	case workspaceEffectTerminateProcess:
+	case workspace.EffectTerminateProcess:
 		m.openTerminateProcess()
 		return nil
-	case workspaceEffectStartProcessTermination:
+	case workspace.EffectStartProcessTermination:
 		return m.startTerminateProcess()
-	case workspaceEffectConfirmCancellation:
+	case workspace.EffectConfirmCancellation:
 		return m.confirmOperationCancellation()
-	case workspaceEffectConfirmQuit:
+	case workspace.EffectConfirmQuit:
 		return m.confirmQuit()
-	case workspaceEffectQuit:
+	case workspace.EffectQuit:
 		return m.quitCommand()
 	default:
 		return nil

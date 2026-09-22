@@ -7,10 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
-
 	"github.com/arrokh/tailge/internal/exposure"
-	"github.com/arrokh/tailge/internal/model"
+	"github.com/arrokh/tailge/internal/exposuredata"
+	readinessmodel "github.com/arrokh/tailge/internal/readiness"
+	"github.com/arrokh/tailge/internal/workspace"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func (m *workspaceModel) View() string {
@@ -74,15 +75,15 @@ func viewAvailable(view exposure.View) bool {
 	return !view.At.IsZero() || !view.Listeners.At.IsZero() || !view.Exposures.At.IsZero() || len(view.Items) > 0
 }
 
-func readinessAvailable(readiness model.Readiness) bool {
-	return !readiness.At.IsZero() || readiness.Status != model.ReadinessUnknown || len(readiness.Modes) > 0
+func readinessAvailable(readiness readinessmodel.Readiness) bool {
+	return !readiness.At.IsZero() || readiness.Status != readinessmodel.ReadinessUnknown || len(readiness.Modes) > 0
 }
 
-func readinessStatus(m *workspaceModel, mode model.ExposureMode) model.ReadinessStatus {
+func readinessStatus(m *workspaceModel, mode exposuredata.ExposureMode) readinessmodel.ReadinessStatus {
 	if !m.hasReadiness || m.readyErr != nil {
-		return model.ReadinessUnknown
+		return readinessmodel.ReadinessUnknown
 	}
-	return modeStatus(m.readiness, mode)
+	return workspace.ModeStatus(m.readiness, mode)
 }
 
 func (m *workspaceModel) renderTop() string {
@@ -112,7 +113,7 @@ func (m *workspaceModel) renderTop() string {
 			}
 		}
 	}
-	lines := []string{fmt.Sprintf("TAILGE  %s   listeners:%s  exposure:%s  Serve:%s  Funnel:%s", sanitizeTUIText(host), listenerState, exposureState, readinessStatus(m, model.ExposureServe), readinessStatus(m, model.ExposureFunnel))}
+	lines := []string{fmt.Sprintf("TAILGE  %s   listeners:%s  exposure:%s  Serve:%s  Funnel:%s", sanitizeTUIText(host), listenerState, exposureState, readinessStatus(m, exposuredata.ExposureServe), readinessStatus(m, exposuredata.ExposureFunnel))}
 	if m.banner != "" {
 		lines = append(lines, "! "+sanitizeTUIText(m.banner))
 	} else {
@@ -267,7 +268,7 @@ func listenerTableRowWithStatus(item exposure.ReconciledItem, width int, active,
 	statusState := item.State
 	status := stateBadgeText(item.State)
 	if statusOverride != "" {
-		statusState = model.ExposureApplying
+		statusState = exposuredata.ExposureApplying
 		status = stateGlyph(statusState) + " " + statusOverride
 	}
 	status = truncate(status, stateWidth)
@@ -337,54 +338,54 @@ func displayModeLabel(item exposure.ReconciledItem) string {
 	if len(item.Routes) == 1 {
 		return strings.ToUpper(string(item.Routes[0].Mode))
 	}
-	if item.Mode == model.ExposureDisabled {
+	if item.Mode == exposuredata.ExposureDisabled {
 		return "OFF"
 	}
 	return strings.ToUpper(string(item.Mode))
 }
 
-func stateGlyph(state model.ExposureState) string {
+func stateGlyph(state exposuredata.ExposureState) string {
 	switch state {
-	case model.ExposureActive, model.ExposureSucceeded:
+	case exposuredata.ExposureActive, exposuredata.ExposureSucceeded:
 		return "●"
-	case model.ExposureApplying:
+	case exposuredata.ExposureApplying:
 		return "◌"
-	case model.ExposureUnknown, model.ExposureUnavailable, model.ExposureUnverified:
+	case exposuredata.ExposureUnknown, exposuredata.ExposureUnavailable, exposuredata.ExposureUnverified:
 		return "?"
-	case model.ExposureFailed, model.ExposureAmbiguous:
+	case exposuredata.ExposureFailed, exposuredata.ExposureAmbiguous:
 		return "!"
 	default:
 		return "–"
 	}
 }
 
-func stateColor(state model.ExposureState) string {
+func stateColor(state exposuredata.ExposureState) string {
 	switch state {
-	case model.ExposureActive, model.ExposureSucceeded:
+	case exposuredata.ExposureActive, exposuredata.ExposureSucceeded:
 		return "32"
-	case model.ExposureApplying:
+	case exposuredata.ExposureApplying:
 		return "33"
-	case model.ExposureUnknown, model.ExposureUnavailable, model.ExposureUnverified, model.ExposureFailed, model.ExposureAmbiguous:
+	case exposuredata.ExposureUnknown, exposuredata.ExposureUnavailable, exposuredata.ExposureUnverified, exposuredata.ExposureFailed, exposuredata.ExposureAmbiguous:
 		return "31"
 	default:
 		return "2;37"
 	}
 }
 
-func stateBadgeText(state model.ExposureState) string {
-	labels := map[model.ExposureState]string{
-		model.ExposureActive:            "ACTIVE",
-		model.ExposureInactive:          "INACTIVE",
-		model.ExposureUnsupported:       "UNSUP",
-		model.ExposureAmbiguous:         "AMBIG",
-		model.ExposureUnknown:           "UNKNOWN",
-		model.ExposureUnavailable:       "UNAVAIL",
-		model.ExposureApplying:          "APPLYING",
-		model.ExposureSucceeded:         "DONE",
-		model.ExposureFailed:            "FAILED",
-		model.ExposureCancelled:         "CANCEL",
-		model.ExposureUnverified:        "VERIFY",
-		model.ExposureState("disabled"): "OFF",
+func stateBadgeText(state exposuredata.ExposureState) string {
+	labels := map[exposuredata.ExposureState]string{
+		exposuredata.ExposureActive:            "ACTIVE",
+		exposuredata.ExposureInactive:          "INACTIVE",
+		exposuredata.ExposureUnsupported:       "UNSUP",
+		exposuredata.ExposureAmbiguous:         "AMBIG",
+		exposuredata.ExposureUnknown:           "UNKNOWN",
+		exposuredata.ExposureUnavailable:       "UNAVAIL",
+		exposuredata.ExposureApplying:          "APPLYING",
+		exposuredata.ExposureSucceeded:         "DONE",
+		exposuredata.ExposureFailed:            "FAILED",
+		exposuredata.ExposureCancelled:         "CANCEL",
+		exposuredata.ExposureUnverified:        "VERIFY",
+		exposuredata.ExposureState("disabled"): "OFF",
 	}
 	label, ok := labels[state]
 	if !ok {
@@ -393,24 +394,24 @@ func stateBadgeText(state model.ExposureState) string {
 	return stateGlyph(state) + " " + label
 }
 
-func readinessBadgeText(status model.ReadinessStatus) string {
+func readinessBadgeText(status readinessmodel.ReadinessStatus) string {
 	label := strings.ToUpper(strings.ReplaceAll(string(status), "_", "-"))
 	glyph := "?"
-	if status == model.ReadinessReady {
+	if status == readinessmodel.ReadinessReady {
 		glyph = "●"
-	} else if status == model.ReadinessReadOnly || status == model.ReadinessNotReady {
+	} else if status == readinessmodel.ReadinessReadOnly || status == readinessmodel.ReadinessNotReady {
 		glyph = "!"
 	}
 	return glyph + " " + label
 }
 
-func ownershipBadgeText(ownership model.Ownership) string {
+func ownershipBadgeText(ownership exposuredata.Ownership) string {
 	switch ownership {
-	case model.OwnershipManaged:
+	case exposuredata.OwnershipManaged:
 		return "MANAGED"
-	case model.OwnershipExternal:
+	case exposuredata.OwnershipExternal:
 		return "EXTERNAL"
-	case model.OwnershipUnknown:
+	case exposuredata.OwnershipUnknown:
 		return "UNKNOWN"
 	default:
 		return strings.ToUpper(string(ownership))
@@ -513,7 +514,7 @@ func (m *workspaceModel) renderDetails(width, height int) string {
 			lines = append(lines, fmt.Sprintf("  %s: %s  [%s]  [owner: %s]", mode.Mode, mode.Status, readinessBadgeText(mode.Status), owner))
 			hasIssue := false
 			for _, check := range mode.Checks {
-				if check.Status == model.ReadinessReady {
+				if check.Status == readinessmodel.ReadinessReady {
 					continue
 				}
 				hasIssue = true
@@ -530,14 +531,14 @@ func (m *workspaceModel) renderDetails(width, height int) string {
 
 	lines = append(lines, "", detailGroup("OPERATION"))
 	operationMode := detailOperationMode(m.view, item)
-	for _, mode := range []model.ExposureMode{model.ExposureServe, model.ExposureFunnel} {
+	for _, mode := range []exposuredata.ExposureMode{exposuredata.ExposureServe, exposuredata.ExposureFunnel} {
 		state := "idle"
 		if item.OperationState != "" && operationMode == mode {
 			state = string(item.OperationState) + " [" + stateBadgeText(item.OperationState) + "]"
 		}
 		lines = append(lines, "  "+strings.ToUpper(string(mode))+" operation: "+state)
 	}
-	if operationMode == model.ExposureDisabled && item.OperationState != "" {
+	if operationMode == exposuredata.ExposureDisabled && item.OperationState != "" {
 		lines = append(lines, "  DISABLE operation: "+string(item.OperationState)+" ["+stateBadgeText(item.OperationState)+"]")
 	}
 	if item.DesiredMode != "" {
@@ -550,7 +551,7 @@ func (m *workspaceModel) renderDetails(width, height int) string {
 			lines = append(lines, "  "+owner+" issue: "+item.LastOperation.Error.Message, "  "+owner+" next: "+item.LastOperation.Error.Remediation)
 		}
 	}
-	if item.OperationState == model.ExposureFailed || item.OperationState == model.ExposureUnverified || item.OperationState == model.ExposureCancelled {
+	if item.OperationState == exposuredata.ExposureFailed || item.OperationState == exposuredata.ExposureUnverified || item.OperationState == exposuredata.ExposureCancelled {
 		lines = append(lines, "  "+strings.ToUpper(string(operationMode))+" next: press R for a fresh refresh and preview")
 	}
 
@@ -657,7 +658,7 @@ func detailActionItems(item exposure.ReconciledItem) []string {
 	return items
 }
 
-func detailOperationMode(view exposure.View, item exposure.ReconciledItem) model.ExposureMode {
+func detailOperationMode(view exposure.View, item exposure.ReconciledItem) exposuredata.ExposureMode {
 	target, ok := itemTarget(item)
 	if ok {
 		for index := len(view.Events) - 1; index >= 0; index-- {
@@ -673,5 +674,5 @@ func detailOperationMode(view exposure.View, item exposure.ReconciledItem) model
 	if len(item.Routes) == 1 && item.Routes[0].Mode.Valid() {
 		return item.Routes[0].Mode
 	}
-	return model.ExposureDisabled
+	return exposuredata.ExposureDisabled
 }
