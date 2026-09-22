@@ -2,8 +2,6 @@ package exposure
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"os"
 	"sort"
@@ -181,50 +179,15 @@ func applyOwnership(route model.ExposureRoute, managed map[string]bool) model.Ex
 	return route
 }
 
+// Matches delegates target correlation to the shared model policy. The
+// exposure package keeps this name for compatibility with reconciliation and
+// probe callers, but does not maintain a second matching implementation.
 func Matches(route, listener model.Target) bool {
-	route, listener = route.Normalized(), listener.Normalized()
-	if route.Protocol != listener.Protocol || route.Port != listener.Port {
-		return false
-	}
-	if route.Address == listener.Address {
-		return true
-	}
-	// A route normally targets loopback while a process may listen on the
-	// wildcard address. This is a valid correlation but callers must retain the
-	// listener's wildcard/network-reachable warning.
-	if isLoopback(route.Address) && isLoopback(listener.Address) {
-		// A provider hostname such as localhost may resolve to either loopback
-		// family. Treat it as a logical loopback match; Reconcile still marks
-		// multiple matching listeners ambiguous instead of guessing.
-		return true
-	}
-	if isLoopback(route.Address) && isWildcard(listener.Address) {
-		return true
-	}
-	if isWildcard(route.Address) && isWildcard(listener.Address) {
-		return true
-	}
-	return false
-}
-
-func isLoopback(address string) bool {
-	return model.ScopeForAddress(address) == model.ScopeLoopback
-}
-func isWildcard(address string) bool {
-	a := model.NormalizeAddress(address)
-	return a == "0.0.0.0" || a == "::"
+	return model.TargetsMatch(route, listener)
 }
 
 func RouteIDsHash(routes []model.ExposureRoute, target model.Target) string {
-	ids := make([]string, 0)
-	for _, route := range routes {
-		if Matches(route.Target, target) {
-			ids = append(ids, route.ID)
-		}
-	}
-	sort.Strings(ids)
-	h := sha256.Sum256([]byte(strings.Join(ids, "\x00")))
-	return hex.EncodeToString(h[:])
+	return tailscale.RouteIDsHash(routes, target)
 }
 
 func RouteIDs(routes []model.ExposureRoute, target model.Target) []string {

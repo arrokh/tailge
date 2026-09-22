@@ -43,17 +43,13 @@ func (a *Adapter) checkRemovalPrecondition(ctx context.Context, target model.Tar
 	if !snapshot.Authoritative || snapshot.Error != nil {
 		return model.NewError(model.ErrUnknown, "tailscale", "current exposure state is not authoritative", true, "unknown", "Refresh before changing exposure.")
 	}
-	ids := []string{}
 	found := false
 	for _, route := range snapshot.Routes {
-		if targetMatches(route.Target, target) {
-			ids = append(ids, route.ID)
-			if route.ProviderKey == selector.ID && (selector.Mode == "" || selector.Mode == model.ExposureDisabled || route.Mode == selector.Mode) && route.Service == selector.Service && route.Path == selector.Path && route.Backend == selector.Backend {
-				found = true
-			}
+		if targetMatches(route.Target, target) && route.ProviderKey == selector.ID && (selector.Mode == "" || selector.Mode == model.ExposureDisabled || route.Mode == selector.Mode) && route.Service == selector.Service && route.Path == selector.Path && route.Backend == selector.Backend {
+			found = true
 		}
 	}
-	if actual := hashIDs(ids); actual != expectedHash {
+	if actual := RouteIDsHash(snapshot.Routes, target); actual != expectedHash {
 		return model.NewError(model.ErrUnsafe, "tailscale", "exposure changed since preflight", true, "changed", "Refresh, review the new route set, and retry.")
 	}
 	if selector.AllRoutesHash != "" && RoutesHash(snapshot.Routes) != selector.AllRoutesHash {
@@ -77,13 +73,7 @@ func (a *Adapter) checkPreconditionSnapshot(ctx context.Context, target model.Ta
 		return model.ExposureSnapshot{}, model.NewError(model.ErrUnknown, "tailscale", "current exposure state is not authoritative", true, "unknown", "Refresh before changing exposure.")
 	}
 	if precondition.RouteIDsHash != "" {
-		ids := []string{}
-		for _, route := range snapshot.Routes {
-			if targetMatches(route.Target, target) {
-				ids = append(ids, route.ID)
-			}
-		}
-		if actual := hashIDs(ids); actual != precondition.RouteIDsHash {
+		if actual := RouteIDsHash(snapshot.Routes, target); actual != precondition.RouteIDsHash {
 			return model.ExposureSnapshot{}, model.NewError(model.ErrUnsafe, "tailscale", "exposure changed since preflight", true, "changed", "Refresh, review the new route set, and retry.")
 		}
 	}

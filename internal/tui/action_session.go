@@ -1,13 +1,12 @@
 package tui
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"sort"
 	"strings"
 
 	"github.com/arrokh/tailge/internal/exposure"
 	"github.com/arrokh/tailge/internal/model"
+	"github.com/arrokh/tailge/internal/tailscale"
 )
 
 type exposureActionAvailability struct {
@@ -113,17 +112,18 @@ func selectionFingerprint(items []exposure.ReconciledItem) string {
 	return strings.Join(parts, "\x00")
 }
 
+// routeFingerprint delegates provider-independent route identity to the
+// canonical Tailscale identity module. Ownership/state availability is checked
+// separately by the workspace safety gate.
 func routeFingerprint(routes []model.ExposureRoute, target *model.Target) string {
-	parts := make([]string, 0, len(routes))
+	matched := make([]model.ExposureRoute, 0, len(routes))
 	for _, route := range routes {
-		if target != nil && !exposure.Matches(route.Target, *target) {
+		if target != nil && !model.TargetsMatch(route.Target, *target) {
 			continue
 		}
-		parts = append(parts, strings.Join([]string{route.ID, route.ProviderKey, route.Service, route.Path, route.Target.Key(), string(route.Mode), route.URL, route.Backend, string(route.Ownership), string(route.State)}, "\x00"))
+		matched = append(matched, route)
 	}
-	sort.Strings(parts)
-	hash := sha256.Sum256([]byte(strings.Join(parts, "\x01")))
-	return hex.EncodeToString(hash[:])
+	return tailscale.RoutesHash(matched)
 }
 
 func listenerFingerprint(snapshot model.ListenerSnapshot, target model.Target) string {
