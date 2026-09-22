@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -328,22 +329,38 @@ func Run(in io.Reader, out, errOut io.Writer, discoverer discovery.ListenerObser
 	finalModel, err := program.Run()
 	m.cancel()
 	if err != nil {
-		fmt.Fprintf(errOut, "error: TUI stopped: %s\n", sanitizeTUIText(err.Error()))
-		return fault.ErrInterrupted.ExitCode()
+		if errors.Is(err, tea.ErrInterrupted) {
+			reportUnverifiedTUIState(errOut, finalModel)
+			return fault.ErrInterrupted.ExitCode()
+		}
+		return reportTUIStop(errOut, err)
 	}
-	if final, ok := finalModel.(*workspaceModel); ok {
-		unverified := len(final.activeOps) > 0 || final.processBusy || final.processUnverified
-		if !unverified {
-			for _, item := range final.view.Items {
-				if item.OperationState == exposuredata.ExposureUnverified {
-					unverified = true
-					break
-				}
+	reportUnverifiedTUIState(errOut, finalModel)
+	return 0
+}
+
+func reportUnverifiedTUIState(errOut io.Writer, finalModel tea.Model) {
+	final, ok := finalModel.(*workspaceModel)
+	if !ok {
+		return
+	}
+	unverified := len(final.activeOps) > 0 || final.processBusy || final.processUnverified
+	if !unverified {
+		for _, item := range final.view.Items {
+			if item.OperationState == exposuredata.ExposureUnverified {
+				unverified = true
+				break
 			}
 		}
-		if unverified {
-			fmt.Fprintln(errOut, "warning: operation state is unverified; inspect Tailscale after shutdown")
-		}
 	}
-	return 0
+	if unverified {
+		fmt.Fprintln(errOut, "warning: operation state is unverified; inspect Tailscale after shutdown")
+	}
+}
+
+func reportTUIStop(errOut io.Writer, err error) int {
+	if !errors.Is(err, tea.ErrInterrupted) {
+		fmt.Fprintf(errOut, "error: TUI stopped: %s\n", sanitizeTUIText(err.Error()))
+	}
+	return fault.ErrInterrupted.ExitCode()
 }

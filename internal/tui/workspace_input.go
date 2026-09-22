@@ -444,6 +444,15 @@ func (m *workspaceModel) updateTerminateProcessModal(_ tea.KeyMsg, key string) (
 }
 
 func (m *workspaceModel) updateChoiceModal(_ tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
+	// Repeating quit (or pressing Ctrl-C while the guarded quit choice is
+	// visible) is an explicit request to cancel the in-flight work and leave.
+	// This keeps the emergency quit path inside Bubble Tea so the terminal is
+	// restored normally instead of falling through to the process signal
+	// handler and reporting an interrupted-program error.
+	if m.modal == modalQuit && (key == "q" || key == "ctrl+c") {
+		m.modal = modalNone
+		return m, m.executeWorkspaceEffect(workspace.Effect{Kind: workspace.EffectConfirmQuit})
+	}
 	if key == "esc" {
 		m.modal = modalNone
 		return m, nil
