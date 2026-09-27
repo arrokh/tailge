@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/arrokh/tailge/internal/bootstrap"
+	"github.com/arrokh/tailge/internal/buildinfo"
 	"github.com/arrokh/tailge/internal/config"
 	"github.com/arrokh/tailge/internal/discovery"
 	"github.com/arrokh/tailge/internal/exposure"
@@ -72,7 +73,7 @@ func (a app) run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 	}
 	switch args[0] {
 	case "version", "--version":
-		fmt.Fprintln(stdout, "tailge dev")
+		fmt.Fprintf(stdout, "tailge %s  %s\n", buildinfo.ShortCommit(), buildinfo.RepositoryURL)
 		return 0
 	case "scan":
 		return a.scan(args[1:], stdout, stderr)

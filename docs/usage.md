@@ -39,6 +39,14 @@ make help
 
 ## CLI
 
+### Build identity
+
+```sh
+tailge version
+```
+
+This prints the short commit SHA for checked-out `HEAD` and the Tailge repository URL. Builds without injected commit metadata report `dev`.
+
 ### Discover listeners
 
 Discovery does not require Tailscale:
@@ -224,7 +232,7 @@ Action previews default to Cancel. Funnel displays a public-internet warning and
 
 `x` only terminates a currently discovered, identity-revalidated local process. It sends SIGTERM once and never escalates to SIGKILL. An inactive configured route has no process to terminate; use `d` to disable the route.
 
-The bottom bar shows whether `p` named HTTP paths are ready and shows `ok`, `off`, `TCP-only`, or `URL-only` for `o`, `O`, and `y`. `NO_COLOR=1` keeps written state indicators while disabling color.
+The bottom bar shows whether `p` named HTTP paths are ready and shows `ok`, `off`, `TCP-only`, or `URL-only` for `o`, `O`, and `y`. It also displays the running build's short SHA for checked-out `HEAD` and a link to the Tailge repository; builds without injected commit metadata show `dev`. The commit is highlighted and the repository link is underlined according to the selected TUI theme; with `NO_COLOR=1`, written indicators remain visible without color and the hyperlink target is retained. The link label may compact to `GitHub` when space is limited; OSC 8-capable terminals make it clickable. On very narrow terminals, the footer prioritizes active progress or compact focus/path status. The SHA does not indicate whether local uncommitted changes were present when building.
 
 ### Refresh and operation state
 

@@ -5,6 +5,8 @@ PACKAGE := ./cmd/tailge
 BINARY ?= tailge
 OUT_DIR ?= dist
 FUZZTIME ?= 3s
+COMMIT ?= $(shell git rev-parse --short=7 HEAD 2>/dev/null || printf 'dev')
+BUILD_LDFLAGS := -X github.com/arrokh/tailge/internal/buildinfo.Commit=$(COMMIT)
 GO_FILES := $(shell find cmd internal -type f -name '*.go' -print)
 
 .PHONY: help format format-check tidy setup build run tui scan status doctor test race vet lint security fuzz check quality cross-build clean
@@ -43,7 +45,7 @@ tidy:
 
 setup:
 	@mkdir -p "$(HOME)/.local/bin"
-	$(GO) build -o "$(HOME)/.local/bin/$(BINARY)" $(PACKAGE)
+	$(GO) build -ldflags "$(BUILD_LDFLAGS)" -o "$(HOME)/.local/bin/$(BINARY)" $(PACKAGE)
 	@case ":$${PATH}:" in \
 		*":$(HOME)/.local/bin:"*) ;; \
 		*) printf 'Add %s to PATH to run tailge directly.\n' "$(HOME)/.local/bin" ;; \
@@ -51,11 +53,15 @@ setup:
 
 build: $(BINARY)
 
-$(BINARY): $(GO_FILES) go.mod go.sum
-	$(GO) build -o "$@" $(PACKAGE)
+$(BINARY): $(GO_FILES) go.mod go.sum FORCE
+	$(GO) build -ldflags "$(BUILD_LDFLAGS)" -o "$@" $(PACKAGE)
+
+# Rebuild even when only HEAD changes; the commit is part of the binary output.
+.PHONY: FORCE
+FORCE:
 
 run:
-	$(GO) run $(PACKAGE) $(ARGS)
+	$(GO) run -ldflags "$(BUILD_LDFLAGS)" $(PACKAGE) $(ARGS)
 
 tui: build
 	./$(BINARY)
@@ -101,8 +107,8 @@ quality: check lint security fuzz
 
 cross-build:
 	@mkdir -p "$(OUT_DIR)"
-	GOOS=linux GOARCH=amd64 $(GO) build -o "$(OUT_DIR)/tailge-linux-amd64" $(PACKAGE)
-	GOOS=darwin GOARCH=arm64 $(GO) build -o "$(OUT_DIR)/tailge-darwin-arm64" $(PACKAGE)
+	GOOS=linux GOARCH=amd64 $(GO) build -ldflags "$(BUILD_LDFLAGS)" -o "$(OUT_DIR)/tailge-linux-amd64" $(PACKAGE)
+	GOOS=darwin GOARCH=arm64 $(GO) build -ldflags "$(BUILD_LDFLAGS)" -o "$(OUT_DIR)/tailge-darwin-arm64" $(PACKAGE)
 
 clean:
 	rm -f "$(BINARY)"

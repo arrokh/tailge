@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arrokh/tailge/internal/buildinfo"
 	"github.com/arrokh/tailge/internal/config"
 	"github.com/arrokh/tailge/internal/discovery"
 	"github.com/arrokh/tailge/internal/exposure"
@@ -23,6 +24,7 @@ import (
 	"github.com/arrokh/tailge/internal/workspace"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestDisplayedOnlyHidesConfiguredPresentationRows(t *testing.T) {
@@ -420,6 +422,139 @@ func TestDetailsGroupsRoutesAndStatusBadges(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Fatalf("details missing %q: %s", want, view)
 		}
+	}
+}
+
+func TestFooterShowsBuildCommitAndLinkedRepository(t *testing.T) {
+	originalCommit := buildinfo.Commit
+	buildinfo.Commit = "3d16efb"
+	t.Cleanup(func() { buildinfo.Commit = originalCommit })
+
+	m := workspaceFixture()
+	m.cfg.ColorTheme = "dark"
+	m.width = 120
+	lines := strings.Split(m.renderBottom(), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("footer has %d lines, want 2: %q", len(lines), lines)
+	}
+	if !strings.Contains(lines[0], "3d16efb") || !strings.Contains(lines[0], repositoryLabel) {
+		t.Fatalf("wide footer omitted build or repository identity: %q", lines[0])
+	}
+	if !strings.Contains(lines[0], ansi.SetHyperlink(repositoryURL)) || !strings.Contains(lines[0], ansi.ResetHyperlink()) {
+		t.Fatalf("repository label is not wrapped in an OSC 8 hyperlink: %q", lines[0])
+	}
+	if !strings.Contains(lines[0], "\x1b[1;36m3d16efb\x1b[0m") || !strings.Contains(lines[0], "\x1b[4;34m"+repositoryLabel+"\x1b[0m") {
+		t.Fatalf("build identity is missing its theme-aware TUI styling: %q", lines[0])
+	}
+	if width := lipgloss.Width(lines[0]); width > m.width {
+		t.Fatalf("footer identity line exceeds width: got %d, want <= %d: %q", width, m.width, lines[0])
+	}
+	if !strings.Contains(lines[1], "j/k or ↑/↓ navigate") {
+		t.Fatalf("build identity displaced shortcut hints: %q", lines[1])
+	}
+}
+
+func TestFooterLinkAndBuildStyleRespectNoColor(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	originalCommit := buildinfo.Commit
+	buildinfo.Commit = "3d16efb"
+	t.Cleanup(func() { buildinfo.Commit = originalCommit })
+
+	m := workspaceFixture()
+	m.cfg.ColorTheme = "dark"
+	line := strings.Split(m.renderBottom(), "\n")[0]
+	visible := ansi.Strip(line)
+	if !strings.Contains(visible, "3d16efb") || !strings.Contains(visible, repositoryLabel) {
+		t.Fatalf("NO_COLOR hid build identity: visible=%q", visible)
+	}
+	if strings.Contains(line, "\x1b[") {
+		t.Fatalf("NO_COLOR did not disable TUI styling: %q", line)
+	}
+	if !strings.Contains(line, ansi.SetHyperlink(repositoryURL)) || !strings.Contains(line, ansi.ResetHyperlink()) {
+		t.Fatalf("NO_COLOR disabled repository hyperlink: %q", line)
+	}
+}
+
+func TestFooterPrefersCompactLinkWhenFullURLWouldClipStatus(t *testing.T) {
+	originalCommit := buildinfo.Commit
+	buildinfo.Commit = "3d16efb"
+	t.Cleanup(func() { buildinfo.Commit = originalCommit })
+
+	m := workspaceFixture()
+	m.width = 80
+	m.transient = strings.Repeat("status", 4)
+	lines := strings.Split(m.renderBottom(), "\n")
+	visible := ansi.Strip(lines[0])
+	if !strings.Contains(visible, m.transient) || !strings.Contains(visible, "3d16efb GitHub") {
+		t.Fatalf("footer clipped status instead of compacting repository label: %q", visible)
+	}
+	if strings.Contains(visible, repositoryLabel) || !strings.Contains(lines[0], ansi.SetHyperlink(repositoryURL)) {
+		t.Fatalf("compact repository label lost its hyperlink: %q", lines[0])
+	}
+	if width := lipgloss.Width(lines[0]); width > m.width {
+		t.Fatalf("footer identity line exceeds width: got %d, want <= %d: %q", width, m.width, lines[0])
+	}
+}
+
+func TestFooterUsesDevelopmentFallbackAndCompactRepositoryLink(t *testing.T) {
+	originalCommit := buildinfo.Commit
+	buildinfo.Commit = ""
+	t.Cleanup(func() { buildinfo.Commit = originalCommit })
+
+	m := workspaceFixture()
+	m.width = 30
+	lines := strings.Split(m.renderBottom(), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("footer has %d lines, want 2: %q", len(lines), lines)
+	}
+	visible := ansi.Strip(lines[0])
+	if !strings.Contains(visible, "List p[ok]") {
+		t.Fatalf("narrow footer lost compact focus/path status: %q", visible)
+	}
+	if !strings.Contains(visible, "dev GitHub") {
+		t.Fatalf("narrow footer omitted development fallback or compact link label: %q", visible)
+	}
+	if strings.Contains(visible, repositoryLabel) || !strings.Contains(lines[0], ansi.SetHyperlink(repositoryURL)) || !strings.Contains(lines[0], ansi.ResetHyperlink()) {
+		t.Fatalf("narrow repository link was not compactly hyperlinked: %q", lines[0])
+	}
+	if width := lipgloss.Width(lines[0]); width > m.width {
+		t.Fatalf("narrow footer identity line exceeds width: got %d, want <= %d: %q", width, m.width, lines[0])
+	}
+	if !strings.Contains(lines[1], "j/k or ↑/↓ navigate") {
+		t.Fatalf("narrow build identity displaced shortcut hints: %q", lines[1])
+	}
+}
+
+func TestFooterShortensCommitToPreserveNarrowStatus(t *testing.T) {
+	originalCommit := buildinfo.Commit
+	buildinfo.Commit = "3d16efbb9058b146749de0d81aa7dd5eede3e9da"
+	t.Cleanup(func() { buildinfo.Commit = originalCommit })
+
+	m := workspaceFixture()
+	m.width = 30
+	line := ansi.Strip(strings.Split(m.renderBottom(), "\n")[0])
+	if !strings.Contains(line, "3d16efb GitHub") || !strings.Contains(line, "List p[ok]") {
+		t.Fatalf("long commit obscured narrow footer status: %q", line)
+	}
+	if width := lipgloss.Width(line); width > m.width {
+		t.Fatalf("narrow footer exceeds width: got %d, want <= %d: %q", width, m.width, line)
+	}
+}
+
+func TestFooterKeepsApplyingStatusAtMinimumWidth(t *testing.T) {
+	originalCommit := buildinfo.Commit
+	buildinfo.Commit = "3d16efb"
+	t.Cleanup(func() { buildinfo.Commit = originalCommit })
+
+	m := workspaceFixture()
+	m.width = 30
+	m.transient = "Applying batch (2/4)"
+	line := ansi.Strip(strings.Split(m.renderBottom(), "\n")[0])
+	if !strings.Contains(line, "Applying") || !strings.Contains(line, "3d16efb GitHub") {
+		t.Fatalf("minimum-width footer hid active operation or build identity: %q", line)
+	}
+	if width := lipgloss.Width(line); width > m.width {
+		t.Fatalf("minimum-width footer exceeds width: got %d, want <= %d: %q", width, m.width, line)
 	}
 }
 
