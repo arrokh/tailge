@@ -27,6 +27,7 @@ type workspaceModel struct {
 
 	searchInput  textinput.Model
 	paletteInput textinput.Model
+	pathInput    textinput.Model
 }
 
 func newInput(prompt string) textinput.Model {
@@ -41,6 +42,8 @@ func newWorkspaceModel(discoverer discovery.ListenerObserver, processTerminator 
 	ctx, cancel := context.WithCancel(context.Background())
 	search := newInput("/ ")
 	palette := newInput(": ")
+	pathInput := newInput("Path slug: ")
+	pathInput.CharLimit = 64 // One optional leading slash plus the 63-character slug limit.
 	return &workspaceModel{
 		workspaceState: newWorkspaceState(),
 		ctx:            ctx,
@@ -55,5 +58,6 @@ func newWorkspaceModel(discoverer discovery.ListenerObserver, processTerminator 
 		manager:           manager,
 		searchInput:       search,
 		paletteInput:      palette,
+		pathInput:         pathInput,
 	}
 }

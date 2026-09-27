@@ -101,7 +101,7 @@ func mergePortItem(primary *exposure.ReconciledItem, duplicate exposure.Reconcil
 	for _, route := range duplicate.Routes {
 		duplicateRoute := false
 		for _, existing := range primary.Routes {
-			if route.ID != "" && route.ID == existing.ID || route.ProviderKey != "" && route.ProviderKey == existing.ProviderKey {
+			if sameDisplayedRoute(route, existing) {
 				duplicateRoute = true
 				break
 			}
@@ -117,6 +117,13 @@ func mergePortItem(primary *exposure.ReconciledItem, duplicate exposure.Reconcil
 	if primary.Recommendation == "" {
 		primary.Recommendation = duplicate.Recommendation
 	}
+}
+
+func sameDisplayedRoute(left, right exposuredata.ExposureRoute) bool {
+	if left.ID != "" || right.ID != "" {
+		return left.ID != "" && left.ID == right.ID
+	}
+	return left.ProviderKey == right.ProviderKey && left.Kind == right.Kind && left.Service == right.Service && left.Path == right.Path && left.Target.Normalized().Key() == right.Target.Normalized().Key() && left.Mode == right.Mode && left.URL == right.URL && left.Backend == right.Backend
 }
 
 func ordered(items []exposure.ReconciledItem, key string) []exposure.ReconciledItem {

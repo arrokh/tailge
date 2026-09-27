@@ -306,51 +306,60 @@ func filterFunnelRoutes(routes []exposuredata.ExposureRoute, permissions map[str
 }
 
 func funnelEnabledForRoute(route exposuredata.ExposureRoute, permissions map[string]bool) bool {
-	ports := map[string]bool{strconv.Itoa(route.Target.Port): true}
-	if _, selector, ok := strings.Cut(route.ProviderKey, ":"); ok {
-		if _, providerPort, ok := strings.Cut(selector, "="); ok && providerPort != "" {
-			ports[providerPort] = true
+	ports := map[string]bool{}
+	if selector, err := ParseListenerSelector(route.ProviderKey, route.Mode); err == nil {
+		ports[strconv.Itoa(selector.Port)] = true
+	} else if parsed, err := url.Parse(route.URL); err == nil && parsed.Hostname() != "" {
+		if port := parsed.Port(); port != "" {
+			ports[port] = true
+		} else if strings.EqualFold(parsed.Scheme, "https") {
+			ports["443"] = true
+		} else if strings.EqualFold(parsed.Scheme, "http") {
+			ports["80"] = true
 		}
+	} else if route.Target.Port > 0 {
+		// Legacy status forms can omit both a selector and a browser URL. The
+		// backend port is only a last-resort hint; it must never override an
+		// exact provider or observed public endpoint.
+		ports[strconv.Itoa(route.Target.Port)] = true
 	}
-	endpoint := ""
+	endpointHost := ""
 	if route.URL != "" {
 		if parsed, err := url.Parse(route.URL); err == nil && parsed.Host != "" {
-			endpoint = normalizeEndpoint(parsed.Host)
+			endpointHost = strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
 		}
 	}
 	for rawEndpoint, enabled := range permissions {
 		if !enabled {
 			continue
 		}
-		if endpoint != "" {
-			if endpoint == normalizeEndpoint(rawEndpoint) {
+		host, port := splitEndpoint(rawEndpoint)
+		if endpointHost != "" {
+			if endpointHost == strings.ToLower(strings.TrimSuffix(host, ".")) && ports[port] {
 				return true
 			}
 			continue
 		}
-		if ports[endpointPort(rawEndpoint)] {
+		if ports[port] {
 			return true
 		}
 	}
 	return false
 }
 
-func normalizeEndpoint(value string) string {
-	host, port, err := net.SplitHostPort(value)
-	if err != nil {
-		return strings.ToLower(strings.TrimSpace(value))
-	}
-	return strings.ToLower(net.JoinHostPort(strings.TrimSuffix(host, "."), port))
+func endpointPort(value string) string {
+	_, port := splitEndpoint(value)
+	return port
 }
 
-func endpointPort(value string) string {
-	if _, port, err := net.SplitHostPort(value); err == nil {
-		return port
+func splitEndpoint(value string) (string, string) {
+	if host, port, err := net.SplitHostPort(value); err == nil {
+		return host, port
 	}
 	if index := strings.LastIndexByte(value, ':'); index >= 0 && index+1 < len(value) {
-		return value[index+1:]
+		return strings.Trim(value[:index], "[]"), value[index+1:]
 	}
-	return ""
+	return value, ""
 }
 
 func onlyFunnelPermissionStatus(value any) bool {
@@ -500,7 +509,7 @@ func walkStatus(value any, path []string, urlHint, serviceHint string, mode expo
 				if targetString, ok := child.(string); ok {
 					if target, err := target.ParseTarget(targetString, "tcp"); err == nil {
 						transport := ""
-						if containsPath(newPath, "web") {
+						if containsPath(newPath, "web") || strings.HasPrefix(strings.ToLower(nextURL), "https://") {
 							transport = "https"
 						} else if containsPath(newPath, "tcp") {
 							transport = "tcp"
@@ -510,8 +519,25 @@ func walkStatus(value any, path []string, urlHint, serviceHint string, mode expo
 						// public port from the status path, keep ProviderKey empty so
 						// removal and rollback fail closed instead of guessing.
 						pathValue := handlerPath(newPath)
-						id := routeID(mode, target, nextURL, nextService, pathValue, targetString, strings.Join(newPath, "/"))
-						*routes = append(*routes, exposuredata.ExposureRoute{ID: id, ProviderKey: providerKey, Service: nextService, Path: pathValue, Backend: targetString, Target: target, Mode: mode, URL: redact(nextURL), Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive, LastSeen: now, Source: "tailscale " + string(mode)})
+						if pathValue == "" && transport == "https" {
+							if parsedURL, parseErr := url.Parse(nextURL); parseErr == nil && parsedURL.Path != "" {
+								pathValue = parsedURL.Path
+							}
+							if pathValue == "" {
+								pathValue = "/"
+							}
+						}
+						kind := exposuredata.RouteKindRawTCP
+						observedURL := nextURL
+						if containsPath(newPath, "web") || transport == "https" {
+							kind = exposuredata.RouteKindHTTPPath
+							if pathValue == "/" {
+								kind = exposuredata.RouteKindHTTPSRoot
+							}
+							observedURL = observedHTTPHandlerURL(nextURL, pathValue)
+						}
+						id := routeID(mode, target, observedURL, nextService, pathValue, targetString, strings.Join(newPath, "/"))
+						*routes = append(*routes, exposuredata.ExposureRoute{ID: id, ProviderKey: providerKey, Kind: kind, Service: nextService, Path: pathValue, Backend: targetString, Target: target, Mode: mode, URL: redact(observedURL), Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive, LastSeen: now, Source: "tailscale " + string(mode)})
 					}
 				}
 			}
@@ -571,12 +597,17 @@ func walkTCP(value any, path []string, urlHint, serviceHint string, mode exposur
 			// The TCP map key is the exact public listener selector; do not
 			// replace it with a service name when it is unavailable.
 			id := routeID(mode, target, urlHint, serviceHint, "", targetText, strings.Join(path, "/")+"/"+portText)
-			*routes = append(*routes, exposuredata.ExposureRoute{ID: id, ProviderKey: providerKey, Service: serviceHint, Backend: targetText, Target: target, Mode: mode, URL: redact(urlHint), Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive, LastSeen: now, Source: "tailscale " + string(mode)})
+			*routes = append(*routes, exposuredata.ExposureRoute{ID: id, ProviderKey: providerKey, Kind: exposuredata.RouteKindRawTCP, Service: serviceHint, Backend: targetText, Target: target, Mode: mode, URL: redact(urlHint), Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive, LastSeen: now, Source: "tailscale " + string(mode)})
 		}
 	}
 }
 
 func publicPort(value string) int {
+	// Status handler paths may contain a colon followed by digits; that suffix
+	// is never the public HTTPS endpoint selector.
+	if strings.Contains(value, "/") {
+		return 0
+	}
 	colon := strings.LastIndexByte(value, ':')
 	if colon < 1 || colon == len(value)-1 {
 		return 0
@@ -595,6 +626,13 @@ func containsPath(path []string, wanted string) bool {
 
 func pathPort(path []string) int {
 	for i := len(path) - 1; i >= 0; i-- {
+		if strings.HasPrefix(strings.ToLower(path[i]), "http://") || strings.HasPrefix(strings.ToLower(path[i]), "https://") {
+			if parsed, err := url.Parse(path[i]); err == nil {
+				if port := portNumber(parsed.Port()); port > 0 {
+					return port
+				}
+			}
+		}
 		if port := publicPort(path[i]); port > 0 {
 			return port
 		}

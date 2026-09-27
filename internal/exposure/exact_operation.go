@@ -3,6 +3,7 @@ package exposure
 import (
 	"context"
 	"errors"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -68,17 +69,38 @@ func (d exactOperationDependencies) recordVerificationEvent(operationID string, 
 }
 
 type exactExposureOperation struct {
-	dependencies        exactOperationDependencies
-	target              targetmodel.Target
-	mode                exposuredata.ExposureMode
-	selectedProviderKey string
-	selectedRouteMode   exposuredata.ExposureMode
-	confirmFunnel       bool
-	confirmExternal     bool
-	timeout             time.Duration
-	approval            *MutationApproval
-	operationID         string
-	operationStarted    time.Time
+	dependencies          exactOperationDependencies
+	target                targetmodel.Target
+	mode                  exposuredata.ExposureMode
+	selectedProviderKey   string
+	selectedRouteID       string
+	selectedRouteMode     exposuredata.ExposureMode
+	httpPath              string
+	httpPathIntent        bool
+	httpsPort             int
+	httpsRootIntent       bool
+	localhostBackendAlias bool
+	confirmFunnel         bool
+	confirmExternal       bool
+	timeout               time.Duration
+	approval              *MutationApproval
+	operationID           string
+	operationStarted      time.Time
+}
+
+func isHTTPHandlerRoute(route exposuredata.ExposureRoute) bool {
+	if route.Kind == exposuredata.RouteKindHTTPPath ||
+		route.Kind == exposuredata.RouteKindHTTPSRoot ||
+		route.Path != "" ||
+		strings.HasPrefix(strings.ToLower(route.URL), "https://") {
+		return true
+	}
+	_, selector, ok := strings.Cut(route.ProviderKey, ":")
+	return ok && strings.HasPrefix(selector, "https=")
+}
+
+func routeRemovalSelectorIdentity(route exposuredata.ExposureRoute) string {
+	return strings.Join([]string{string(route.Mode), route.ProviderKey, route.Service, route.Path}, "\x00")
 }
 
 func (op *exactExposureOperation) validate() error {
@@ -91,6 +113,33 @@ func (op *exactExposureOperation) validate() error {
 	}
 	if op.mode == exposuredata.ExposureFunnel && !op.confirmFunnel {
 		return fault.NewError(fault.ErrUnsafe, "exposure", "Funnel requires explicit public-internet confirmation", false, "not_confirmed", "Confirm the exact target with `--confirm-public` or the TUI confirmation screen.")
+	}
+	if op.httpPathIntent && op.httpsRootIntent {
+		return fault.NewError(fault.ErrInvalidInput, "exposure", "an HTTPS route cannot be both a named path and a root handler", false, "invalid", "Choose a named service path or an explicit HTTPS root route.")
+	}
+	if op.httpPathIntent {
+		if op.httpPath == "" {
+			return fault.NewError(fault.ErrInvalidInput, "exposure", "named HTTP path requires a non-root service path", false, "invalid", "Choose one named path; the root endpoint has no implicit handler.")
+		}
+		if op.mode != exposuredata.ExposureServe && op.mode != exposuredata.ExposureFunnel {
+			return fault.NewError(fault.ErrInvalidInput, "exposure", "named HTTP paths require Serve or Funnel mode", false, "invalid", "Choose private Serve or explicitly confirmed public Funnel.")
+		}
+		if op.httpsPort < 1 || op.httpsPort > 65535 {
+			return fault.NewError(fault.ErrInvalidInput, "exposure", "HTTPS listener port is invalid", false, "invalid", "Use a valid HTTPS port from 1 through 65535.")
+		}
+		path, err := exposuredata.NormalizeHTTPPath(op.httpPath)
+		if err != nil || path != op.httpPath {
+			return fault.NewError(fault.ErrInvalidInput, "exposure", "named HTTP path is not a canonical service slug", false, "invalid", "Use one lowercase slug such as `api` or leave it blank to generate a stable name.")
+		}
+	}
+	if op.localhostBackendAlias && !op.httpPathIntent && !op.httpsRootIntent {
+		return fault.NewError(fault.ErrInvalidInput, "exposure", "localhost backend alias requires an explicit HTTPS handler", false, "invalid", "Use the exact listener backend or explicitly select a named HTTPS path or root route.")
+	}
+	if op.localhostBackendAlias && op.target.Address != "::1" && op.target.Address != "::" {
+		return fault.NewError(fault.ErrInvalidInput, "exposure", "localhost backend alias is only supported for IPv6 listeners", false, "invalid", "Omit `--localhost-backend` to preserve the selected address exactly.")
+	}
+	if op.httpsRootIntent && (op.mode != exposuredata.ExposureServe || op.httpPath != "/" || op.httpsPort < 1 || op.httpsPort > 65535) {
+		return fault.NewError(fault.ErrInvalidInput, "exposure", "explicit HTTPS root route requires private Serve mode, path `/`, and a valid HTTPS port", false, "invalid", "Use a valid HTTPS port and Serve; custom root routes are currently tailnet-private.")
 	}
 	if op.dependencies.provider == nil || op.dependencies.discoverer == nil {
 		return fault.NewError(fault.ErrDependency, "exposure", "exposure providers are unavailable", true, "unavailable", "Run the readiness check and retry.")
@@ -166,15 +215,32 @@ func (op exactExposureOperation) run(ctx context.Context) (receipt exposuredata.
 		}
 		return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrAmbiguous, "exposure", "target matches multiple listeners", false, "ambiguous", "Select an address-specific listener before applying exposure.")
 	}
+	if op.httpPathIntent || op.httpsRootIntent {
+		path := op.httpPath
+		if op.httpsRootIntent {
+			path = "/"
+		}
+		return c.applyHTTPPathRoute(operationCtx, target, path, op.httpsPort, op.httpsRootIntent, op.localhostBackendAlias, mode, candidates[0], exposures.Routes, operationID, operationStarted)
+	}
+	if mode != exposuredata.ExposureDisabled {
+		for _, route := range exposures.Routes {
+			if Matches(route.Target, target) && isHTTPHandlerRoute(route) {
+				return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "named HTTPS path routes require explicit HTTP-path intent", false, "conflict", "Use `exposure http` to manage this handler; raw-TCP Serve/Funnel actions do not replace HTTP paths.")
+			}
+		}
+	}
 	allRouteIDs := RouteIDs(exposures.Routes, target)
 	routeIDs := allRouteIDs
-	if mode == exposuredata.ExposureDisabled && (selectedProviderKey != "" || selectedRouteMode != exposuredata.ExposureDisabled) {
+	if mode == exposuredata.ExposureDisabled && (selectedProviderKey != "" || op.selectedRouteID != "" || selectedRouteMode != exposuredata.ExposureDisabled) {
 		selected := make([]string, 0, 1)
 		for _, route := range exposures.Routes {
 			if !Matches(route.Target, target) {
 				continue
 			}
 			if selectedProviderKey != "" && route.ProviderKey != selectedProviderKey {
+				continue
+			}
+			if op.selectedRouteID != "" && route.ID != op.selectedRouteID {
 				continue
 			}
 			if selectedRouteMode != exposuredata.ExposureDisabled && route.Mode != selectedRouteMode {
@@ -196,6 +262,22 @@ func (op exactExposureOperation) run(ctx context.Context) (receipt exposuredata.
 			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrAmbiguous, "exposure", "multiple routes match the target", false, "ambiguous", "Select one exact route before disabling.")
 		}
 		route := findRoute(exposures.Routes, routeIDs[0])
+		if op.selectedRouteID != "" {
+			for _, candidate := range exposures.Routes {
+				if candidate.ID == route.ID {
+					continue
+				}
+				if sameProviderHandlerSlot(route, candidate) {
+					return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrAmbiguous, "exposure", "ambiguous route identities share one exact removal selector", false, "ambiguous", "Refresh and resolve the duplicate provider route before removing it.")
+				}
+			}
+		}
+		if isHTTPHandlerRoute(route) && op.selectedRouteID == "" {
+			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "HTTP handler removal requires explicit route identity", false, "intent_required", "Use `exposure http disable` with the exact path or root selection; a raw exposure disable does not imply HTTP intent.")
+		}
+		if isHTTPHandlerRoute(route) && route.Path == "" {
+			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "the observed HTTPS handler has no exact named path identity", false, "unsafe", "Tailge will not remove a potentially shared root handler without an exact path selector.")
+		}
 		if route.Ownership != exposuredata.OwnershipManaged && !confirmExternal {
 			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "the selected route has unknown/external ownership", false, "external", "Review the route and pass `--confirm-external` to remove it.")
 		}
@@ -210,7 +292,7 @@ func (op exactExposureOperation) run(ctx context.Context) (receipt exposuredata.
 		if removeErr != nil {
 			return receipt, removeErr
 		}
-		verified, _, verifyErr := c.verifyAbsent(operationCtx, target, route.ID)
+		verified, _, verifyErr := c.verifyAbsent(operationCtx, route)
 		c.recordVerificationEvent(operationID, target, route.Mode, verifyErr)
 		receipt.Verified = verifyErr == nil && verified
 		if verifyErr != nil {
@@ -284,7 +366,7 @@ func (op exactExposureOperation) run(ctx context.Context) (receipt exposuredata.
 			if removeErr != nil {
 				return removed, removeErr
 			}
-			verified, afterRemove, verifyErr := c.verifyAbsent(operationCtx, target, route.ID)
+			verified, afterRemove, verifyErr := c.verifyAbsent(operationCtx, route)
 			c.recordVerificationEvent(operationID, target, route.Mode, verifyErr)
 			if verifyErr != nil || !verified {
 				if verifyErr == nil {
@@ -306,7 +388,7 @@ func (op exactExposureOperation) run(ctx context.Context) (receipt exposuredata.
 		}
 		return receipt, err
 	}
-	receipt, setErr := c.provider.Set(operationCtx, tailscale.ExposureChange{Target: target, Mode: mode, Service: replacementService, Path: replacementPath, Backend: replacementBackend, Preconditions: precondition})
+	receipt, setErr := c.provider.Set(operationCtx, tailscale.ExposureChange{Target: target, Mode: mode, Service: replacementService, Path: replacementPath, Backend: replacementBackend, HTTPPath: previous != nil && previous.Kind == exposuredata.RouteKindHTTPPath, Preconditions: precondition})
 	c.recordReceiptEvent(operationID, "set", target, mode, setErr)
 	if setErr != nil {
 		if replaceExisting {
@@ -383,7 +465,7 @@ func (c exactOperationDependencies) rollbackReplacement(_ context.Context, reque
 			expectedProviderKey = ""
 		}
 	}
-	if _, err := c.provider.Set(ctx, tailscale.ExposureChange{Target: previous.Target, Mode: previous.Mode, ProviderKey: previous.ProviderKey, Service: previous.Service, Path: previous.Path, Backend: previous.Backend, Preconditions: precondition}); err != nil {
+	if _, err := c.provider.Set(ctx, tailscale.ExposureChange{Target: previous.Target, Mode: previous.Mode, ProviderKey: previous.ProviderKey, Service: previous.Service, Path: previous.Path, Backend: previous.Backend, HTTPPath: previous.Kind == exposuredata.RouteKindHTTPPath, Preconditions: precondition}); err != nil {
 		return err
 	}
 	verified, err := c.verifyMode(ctx, previous.Target, previous.Mode, expectedProviderKey, previous.Service, previous.Path, previous.Backend)
@@ -471,7 +553,7 @@ func (c exactOperationDependencies) verifyMode(ctx context.Context, target targe
 	}
 }
 
-func (c exactOperationDependencies) verifyAbsent(ctx context.Context, target targetmodel.Target, routeID string) (bool, exposuredata.ExposureSnapshot, error) {
+func (c exactOperationDependencies) verifyAbsent(ctx context.Context, selected exposuredata.ExposureRoute) (bool, exposuredata.ExposureSnapshot, error) {
 	deadline := time.NewTimer(2 * time.Second)
 	defer deadline.Stop()
 	for {
@@ -479,10 +561,11 @@ func (c exactOperationDependencies) verifyAbsent(ctx context.Context, target tar
 		if err == nil && snapshot.Authoritative && snapshot.Error == nil {
 			present := false
 			for _, route := range snapshot.Routes {
-				// The target may legitimately retain another exposure route (for
-				// example Serve after removing Funnel). Verification must therefore
-				// follow the exact route identity, not the broad target match.
-				if route.ID == routeID {
+				// A route ID includes observed URL and visibility mode, both of
+				// which can change while the provider handler remains configured.
+				// Match the exact provider selector scope across Serve/Funnel instead
+				// of claiming removal from a changed route ID alone.
+				if route.ID == selected.ID || sameProviderHandlerSlot(selected, route) {
 					present = true
 					break
 				}
@@ -499,6 +582,13 @@ func (c exactOperationDependencies) verifyAbsent(ctx context.Context, target tar
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+func sameProviderHandlerSlot(left, right exposuredata.ExposureRoute) bool {
+	leftSelector, leftErr := tailscale.ParseListenerSelector(left.ProviderKey, left.Mode)
+	rightSelector, rightErr := tailscale.ParseListenerSelector(right.ProviderKey, right.Mode)
+	return leftErr == nil && rightErr == nil && leftSelector.Transport == rightSelector.Transport && leftSelector.Port == rightSelector.Port &&
+		left.Service == right.Service && left.Path == right.Path
 }
 
 func exactModeSupported(caps tailscale.Capabilities, mode exposuredata.ExposureMode) bool {
@@ -554,6 +644,154 @@ func matchingListeners(listeners []discovery.Listener, target targetmodel.Target
 	}
 	return result
 }
+
+func (c exactOperationDependencies) applyHTTPPathRoute(ctx context.Context, target targetmodel.Target, path string, httpsPort int, root, localhostBackendAlias bool, mode exposuredata.ExposureMode, listener discovery.Listener, routes []exposuredata.ExposureRoute, operationID string, operationStarted time.Time) (exposuredata.OperationReceipt, error) {
+	if listener.Target.Normalized().Key() != target.Normalized().Key() {
+		return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "HTTPS route requires the exact discovered listener address", false, "changed", "Refresh and select the exact local listener before configuring HTTPS.")
+	}
+	if httpsPort < 1 || httpsPort > 65535 || (root && mode != exposuredata.ExposureServe) || (!root && httpsPort != 443) {
+		return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrInvalidInput, "exposure", "HTTPS route port or mode is invalid", false, "invalid", "Named paths use port 443; explicit root routes currently require private Serve and a valid port.")
+	}
+	providerKey := string(mode) + ":https=" + strconv.Itoa(httpsPort)
+	backend := tailscale.HTTPPathBackendArgument(target)
+	if localhostBackendAlias {
+		backend = tailscale.HTTPSBackendArgument(target, true)
+	}
+	backendTarget, targetErr := targetmodel.ParseTarget(backend, "tcp")
+	if targetErr != nil {
+		return exposuredata.OperationReceipt{}, fault.WrapError(fault.ErrInvalidInput, "exposure", "HTTPS backend identity is invalid", false, "invalid", "Select a valid local HTTP listener address.", targetErr)
+	}
+	if err := c.requireModeReady(ctx, mode); err != nil {
+		return exposuredata.OperationReceipt{}, err
+	}
+	caps, err := c.provider.Capabilities(ctx)
+	if err != nil {
+		return exposuredata.OperationReceipt{}, err
+	}
+	pathKind := exposuredata.RouteKindHTTPPath
+	if root {
+		pathKind = exposuredata.RouteKindHTTPSRoot
+	}
+	if (mode == exposuredata.ExposureServe && !caps.ServePath) || (mode == exposuredata.ExposureFunnel && !caps.FunnelPath) {
+		return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsupported, "exposure", string(mode)+" exact HTTPS handler operations are unsupported by the installed Tailscale client", false, "read_only", "Use a Tailscale version with exact HTTPS listener and --set-path operations; Tailge will not reset or replace shared handlers.")
+	}
+	if (mode == exposuredata.ExposureServe && (!caps.Serve || !caps.ExactServe || !caps.ServeHTTPS)) || (mode == exposuredata.ExposureFunnel && (!caps.Funnel || !caps.ExactFunnel || !caps.FunnelHTTPS || caps.FunnelLegacy)) {
+		return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsupported, "exposure", string(mode)+" HTTPS routes are unsupported by the installed Tailscale client", false, "read_only", "Use a Tailscale version with exact HTTPS listener operations; existing handlers will not be reset.")
+	}
+	seenEndpointSelectors := make(map[string]struct{})
+	for _, route := range routes {
+		selector, parseErr := tailscale.ParseListenerSelector(route.ProviderKey, route.Mode)
+		if route.ProviderKey == "" || parseErr != nil {
+			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnknown, "exposure", "an existing route has no exact provider endpoint identity", false, "read_only", "Review provider status manually; Tailge will not mutate an unidentified HTTPS endpoint.")
+		}
+		if selector.Port != httpsPort {
+			continue
+		}
+		selectorIdentity := routeRemovalSelectorIdentity(route)
+		if _, duplicate := seenEndpointSelectors[selectorIdentity]; duplicate {
+			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrAmbiguous, "exposure", "ambiguous HTTPS handler identity: multiple provider routes share one exact selector", false, "ambiguous", "Refresh and resolve the duplicate route identity before adding another handler.")
+		}
+		seenEndpointSelectors[selectorIdentity] = struct{}{}
+		if route.ID == "" || route.State != exposuredata.ExposureActive {
+			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnknown, "exposure", "an existing HTTPS handler has incomplete route identity", false, "read_only", "Refresh provider status; Tailge will not mutate an endpoint with incomplete handler state.")
+		}
+		if route.Mode != mode {
+			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "Serve and Funnel cannot be mixed on the shared HTTPS endpoint", false, "scope_conflict", "Every handler on this hostname and port shares one access scope.")
+		}
+		if selector.Transport != "https" || (route.Kind != exposuredata.RouteKindHTTPPath && route.Kind != exposuredata.RouteKindHTTPSRoot) {
+			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "the HTTPS endpoint already has a non-HTTP handler", false, "conflict", "Remove or move the exact existing endpoint handler before adding an HTTP route.")
+		}
+		if (route.Kind == exposuredata.RouteKindHTTPPath && route.Path == "") || (route.Kind == exposuredata.RouteKindHTTPSRoot && route.Path != "/") {
+			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnknown, "exposure", "an existing HTTPS handler has incomplete path identity", false, "read_only", "Refresh provider status; Tailge will not mutate a handler whose exact path is unknown.")
+		}
+		if route.Path == path {
+			if route.Kind == pathKind && route.Mode == mode && route.ID != "" && route.State == exposuredata.ExposureActive && route.Target.Normalized().Key() == backendTarget.Normalized().Key() && tailscale.HTTPPathBackendMatches(route.Backend, backend) {
+				return exposuredata.OperationReceipt{ID: route.ID, StartedAt: operationStarted, FinishedAt: c.currentTime(), Verified: true}, nil
+			}
+			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "the requested HTTPS path is already configured for a different route identity", false, "conflict", "Choose another path or disable the exact existing handler first.")
+		}
+	}
+	if err := c.requireCurrentListener(ctx, target); err != nil {
+		return exposuredata.OperationReceipt{}, err
+	}
+	precondition := tailscale.ExposurePrecondition{RouteIDs: RouteIDs(routes, target), RouteIDsHash: RouteIDsHash(routes, target), AllRoutesHash: tailscale.RoutesHash(routes)}
+	if precondition.AllRoutesHash == "" || precondition.RouteIDsHash == "" {
+		return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "HTTPS route preflight is incomplete", false, "unsafe", "Refresh all provider route state before adding an HTTPS handler.")
+	}
+	change := tailscale.ExposureChange{Target: target, Mode: mode, ProviderKey: providerKey, Path: path, HTTPSPort: httpsPort, HTTPPath: !root, HTTPSRoot: root, Backend: backend, Preconditions: precondition}
+	receipt, setErr := c.provider.Set(ctx, change)
+	phase := "set-http-path"
+	if root {
+		phase = "set-https-root"
+	}
+	c.recordReceiptEvent(operationID, phase, target, mode, setErr)
+	if setErr != nil {
+		return receipt, setErr
+	}
+	verifiedRoute, verifyErr := c.verifyHTTPSRoute(ctx, target, mode, providerKey, path, httpsPort, root, localhostBackendAlias, backend)
+	c.recordVerificationEvent(operationID, target, mode, verifyErr)
+	if verifyErr != nil {
+		receipt.Error = ptr(fault.AsAppError(verifyErr).Safe())
+		return receipt, verifyErr
+	}
+	if verifiedRoute.ID == "" {
+		return receipt, fault.NewError(fault.ErrVerification, "exposure", "HTTPS route was not observed after configuration", true, "unknown", "Refresh and inspect Tailscale before retrying.")
+	}
+	receipt.Verified = true
+	c.markManagedRoute(verifiedRoute)
+	return receipt, nil
+}
+
+func (c exactOperationDependencies) verifyHTTPSRoute(ctx context.Context, target targetmodel.Target, mode exposuredata.ExposureMode, providerKey, path string, httpsPort int, root, localhostBackendAlias bool, backend string) (exposuredata.ExposureRoute, error) {
+	backendTarget, targetErr := targetmodel.ParseTarget(backend, "tcp")
+	if targetErr != nil {
+		return exposuredata.ExposureRoute{}, fault.WrapError(fault.ErrVerification, "exposure", "HTTPS backend identity is invalid", false, "unknown", "Refresh and inspect the exact local backend before retrying.", targetErr)
+	}
+	kind := exposuredata.RouteKindHTTPPath
+	if root {
+		kind = exposuredata.RouteKindHTTPSRoot
+	}
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for {
+		snapshot, err := c.provider.List(ctx)
+		if err == nil && snapshot.Authoritative && snapshot.Error == nil {
+			matches := make([]exposuredata.ExposureRoute, 0, 1)
+			for _, route := range snapshot.Routes {
+				if route.Kind != kind || route.Mode != mode || route.ProviderKey != providerKey || route.Path != path || !tailscale.HTTPPathBackendMatches(route.Backend, backend) || route.Target.Normalized().Key() != backendTarget.Normalized().Key() {
+					continue
+				}
+				observed, parseErr := url.Parse(route.URL)
+				if parseErr != nil || !strings.EqualFold(observed.Scheme, "https") || observed.Hostname() == "" || observed.Path != path {
+					continue
+				}
+				observedPort := observed.Port()
+				if (httpsPort == 443 && observedPort != "") || (httpsPort != 443 && observedPort != strconv.Itoa(httpsPort)) {
+					continue
+				}
+				matches = append(matches, route)
+			}
+			if len(matches) == 1 {
+				return matches[0], nil
+			}
+			if len(matches) > 1 {
+				return exposuredata.ExposureRoute{}, fault.NewError(fault.ErrAmbiguous, "exposure", "multiple provider handlers match the requested HTTPS route", false, "ambiguous", "Inspect Tailscale and choose one exact handler.")
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return exposuredata.ExposureRoute{}, verificationContextError("HTTPS route could not be verified", ctx.Err())
+		case <-deadline.C:
+			remediation := "Refresh and inspect Tailscale before retrying."
+			if !localhostBackendAlias && (target.Normalized().Address == "::1" || target.Normalized().Address == "::") {
+				remediation = "If Tailscale cannot proxy the numeric IPv6 backend, first disable this exact handler, then explicitly recreate with `--localhost-backend`; this uses hostname resolution and weakens the exact-address guarantee."
+			}
+			return exposuredata.ExposureRoute{}, fault.NewError(fault.ErrVerification, "exposure", "HTTPS route could not be verified", true, "unknown", remediation)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
 func findRoute(routes []exposuredata.ExposureRoute, id string) exposuredata.ExposureRoute {
 	for _, route := range routes {
 		if route.ID == id {

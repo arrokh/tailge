@@ -6,8 +6,9 @@
 - `o` opens an explicitly observed HTTP/HTTPS exposure URL when one exists. For an observed Serve TCP route without a URL, an explicit user press of `o` may resolve Tailscale's reported DNS name plus the exact listener port and use an HTTP browser preview by default; this is UI-only and must not affect route identity or mutation. Funnel TCP routes without an observed URL remain `TCP-only`. Never use a guessed URL for safety decisions.
 - `O` is a local HTTP convenience URL (`http://localhost:<port>/`). It is not proof that a remote raw-TCP exposure speaks HTTP.
 - `y` copies an explicitly observed browser URL; for a Serve TCP route without one, it resolves and copies the same provider-DNS HTTP preview used by `o`. Funnel TCP without an observed URL remains not copyable.
+- Preserve numeric IPv6 backends by default for named HTTPS paths and explicit HTTPS roots. `--localhost-backend` in the CLI or `Ctrl+B` in the TUI `p` dialog is an explicit opt-in to hostname resolution for IPv6 listeners; show that it weakens exact-address guarantees and never substitute it silently.
 - `x` terminates only a currently discovered, identity-revalidated local process. An inactive configured route has no process to terminate; explain that and direct the user to `d` for route removal.
-- Keep shortcut availability visible in the workspace status bar. Preserve fail-closed behavior for missing, stale, ambiguous, or incomplete route identity.
+- Keep shortcut availability visible in the workspace status bar. Multiple complete, distinct, active routes for one listener are a known `MULTI` state, not identity ambiguity; keep broad mode changes blocked and route Disable through an exact-route chooser. Preserve fail-closed behavior for missing, stale, overlapping, or incomplete route identity.
 
 ## Running the current binary
 

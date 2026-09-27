@@ -13,6 +13,7 @@ import (
 
 	"github.com/arrokh/tailge/internal/config"
 	"github.com/arrokh/tailge/internal/discovery"
+	"github.com/arrokh/tailge/internal/exposure"
 	"github.com/arrokh/tailge/internal/exposuredata"
 	"github.com/arrokh/tailge/internal/fault"
 	"github.com/arrokh/tailge/internal/probe"
@@ -22,6 +23,303 @@ import (
 	"github.com/arrokh/tailge/internal/target"
 	"github.com/arrokh/tailge/internal/tui"
 )
+
+type staticListenerObserver struct {
+	snapshot discovery.ListenerSnapshot
+	err      error
+}
+
+func (observer *staticListenerObserver) List(context.Context) (discovery.ListenerSnapshot, error) {
+	return observer.snapshot, observer.err
+}
+
+func httpPathTestAdapter(active *bool, calls *[]string) *tailscale.Adapter {
+	return httpPathTestAdapterWithBackend(active, calls, "http://127.0.0.1:4321")
+}
+
+func httpPathTestAdapterWithBackend(active *bool, calls *[]string, backend string) *tailscale.Adapter {
+	status := `{"TCP":{"443":{"HTTPS":true}},"Web":{"devbox.tailnet.ts.net:443":{"Handlers":{"/node-4321":{"Proxy":"` + backend + `"}}}},"AllowFunnel":{"devbox.tailnet.ts.net:443":false}}`
+	setCommand := "serve --bg --yes --set-path=/node-4321 --https=443 " + backend
+	return &tailscale.Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+		command := strings.Join(args, " ")
+		*calls = append(*calls, command)
+		switch command {
+		case "version":
+			return runner.Result{Stdout: "1.102.4\n"}, nil
+		case "status --json":
+			return runner.Result{Stdout: `{"BackendState":"Running","HaveNodeKey":true,"TailscaleIPs":["100.64.0.2"],"Self":{"HostName":"devbox","DNSName":"devbox.tailnet.ts.net.","TailscaleIPs":["100.64.0.2"],"Online":true}}`}, nil
+		case "serve --help":
+			return runner.Result{Stdout: "status clear --https value --tcp value --set-path value"}, nil
+		case "funnel --help":
+			return runner.Result{Stdout: "status reset --https value --tcp value --set-path value off"}, nil
+		case "serve status --json", "funnel status --json":
+			if !*active {
+				return runner.Result{Stdout: `{}`}, nil
+			}
+			return runner.Result{Stdout: status}, nil
+		case setCommand:
+			*active = true
+			return runner.Result{}, nil
+		case "serve --set-path=/node-4321 --bg --https=443 off":
+			*active = false
+			return runner.Result{}, nil
+		default:
+			return runner.Result{}, errors.New("unexpected command: " + command)
+		}
+	})}
+}
+
+func customHTTPSRootTestAdapter(active *bool, calls *[]string) *tailscale.Adapter {
+	const status = `{"TCP":{"4321":{"HTTPS":true}},"Web":{"devbox.tailnet.ts.net:4321":{"Handlers":{"/":{"Proxy":"http://localhost:4321"}}}},"AllowFunnel":{"devbox.tailnet.ts.net:4321":false}}`
+	return &tailscale.Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+		command := strings.Join(args, " ")
+		*calls = append(*calls, command)
+		switch command {
+		case "version":
+			return runner.Result{Stdout: "1.102.4\n"}, nil
+		case "status --json":
+			return runner.Result{Stdout: `{"BackendState":"Running","HaveNodeKey":true,"TailscaleIPs":["100.64.0.2"],"Self":{"HostName":"devbox","DNSName":"devbox.tailnet.ts.net.","TailscaleIPs":["100.64.0.2"],"Online":true}}`}, nil
+		case "serve --help":
+			return runner.Result{Stdout: "status clear --https value --tcp value --set-path value"}, nil
+		case "funnel --help":
+			return runner.Result{Stdout: "status reset --https value --tcp value --set-path value off"}, nil
+		case "serve status --json", "funnel status --json":
+			if *active {
+				return runner.Result{Stdout: status}, nil
+			}
+			return runner.Result{Stdout: `{}`}, nil
+		case "serve --bg --yes --set-path=/ --https=4321 http://localhost:4321":
+			*active = true
+			return runner.Result{}, nil
+		case "serve --set-path=/ --bg --https=4321 off":
+			*active = false
+			return runner.Result{}, nil
+		default:
+			return runner.Result{}, errors.New("unexpected command: " + command)
+		}
+	})}
+}
+
+func TestHumanStatusShowsEveryHTTPSPathAndCapabilityReason(t *testing.T) {
+	listener := discovery.Listener{ID: "listener", Name: "web", Target: target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}}
+	view := exposure.View{Items: []exposure.ReconciledItem{{
+		ID: listener.ID, Listener: &listener, State: exposuredata.ExposureActive,
+		Routes: []exposuredata.ExposureRoute{
+			{ID: "api", ProviderKey: "serve:https=443", Kind: exposuredata.RouteKindHTTPPath, Path: "/api", URL: "https://dev.example.ts.net/api", Target: listener.Target, Mode: exposuredata.ExposureServe},
+			{ID: "docs", ProviderKey: "serve:https=443", Kind: exposuredata.RouteKindHTTPPath, Path: "/docs", URL: "https://dev.example.ts.net/docs", Target: listener.Target, Mode: exposuredata.ExposureServe},
+		},
+	}}}
+	var output bytes.Buffer
+	printView(&output, view)
+	for _, want := range []string{"web\tmultiple\tactive\tmultiple", "https-path=/api", "https-path=/docs", "https://dev.example.ts.net/api", "https://dev.example.ts.net/docs"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("human route status omitted %q: %s", want, output.String())
+		}
+	}
+	output.Reset()
+	printReadiness(&output, readinessmodel.Readiness{Modes: []readinessmodel.ModeReadiness{{
+		Mode: exposuredata.ExposureServe, Status: readinessmodel.ReadinessReady,
+		HTTPPathStatus: readinessmodel.ReadinessReadOnly, HTTPPathMessage: "--set-path is unavailable", HTTPPathRemediation: "Upgrade Tailscale",
+	}}})
+	for _, want := range []string{"HTTPS paths: read_only", "HTTP path reason: --set-path is unavailable", "HTTP path next: Upgrade Tailscale"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("human readiness omitted %q: %s", want, output.String())
+		}
+	}
+}
+
+func TestHTTPSRootCLIUsesExplicitCustomPortAndExactRemoval(t *testing.T) {
+	manager, err := config.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manager.Path, []byte("version: 1\nserve_probe_version: 1.102.4\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listenerTarget := target.Target{Address: "::1", Port: 4321, Protocol: "tcp"}.Normalized()
+	observer := &staticListenerObserver{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{{ID: "node-listener", Target: listenerTarget, Name: "Node.js", Process: "node", PID: 41, Scope: target.ScopeLoopback, Metadata: discovery.MetadataComplete}}}}
+	active := false
+	var calls []string
+	application := app{config: manager, discoverer: observer, tailscale: customHTTPSRootTestAdapter(&active, &calls)}
+	var stdout, stderr bytes.Buffer
+	code := application.exposure([]string{"http", "serve", listenerTarget.String(), "--root", "--https-port", "4321", "--localhost-backend", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("custom HTTPS root CLI failed: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !active || !strings.Contains(stdout.String(), `"kind": "https_root"`) || !strings.Contains(stdout.String(), `"url": "https://devbox.tailnet.ts.net:4321/"`) {
+		t.Fatalf("custom root route was not configured or observed: active=%t output=%s", active, stdout.String())
+	}
+	if !containsCall(calls, "serve --bg --yes --set-path=/ --https=4321 http://localhost:4321") {
+		t.Fatalf("root route did not use explicit custom HTTPS port and localhost alias: %v", calls)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = application.exposure([]string{"http", "disable", listenerTarget.String(), "--root", "--https-port", "4321", "--confirm-external", "--json"}, &stdout, &stderr)
+	if code != 0 || active {
+		t.Fatalf("exact custom root route removal failed: code=%d active=%t stdout=%q stderr=%q", code, active, stdout.String(), stderr.String())
+	}
+	if !containsCall(calls, "serve --set-path=/ --bg --https=4321 off") {
+		t.Fatalf("root route was not removed with exact handler selector: %v", calls)
+	}
+}
+
+func TestNamedHTTPPathCLIExplicitlySelectsLocalhostBackendForIPv6(t *testing.T) {
+	manager, err := config.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manager.Path, []byte("version: 1\nserve_probe_version: 1.102.4\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listenerTarget := target.Target{Address: "::1", Port: 4321, Protocol: "tcp"}.Normalized()
+	observer := &staticListenerObserver{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{{ID: "node-listener", Target: listenerTarget, Name: "Node.js", Process: "node", PID: 41, Scope: target.ScopeLoopback, Metadata: discovery.MetadataComplete}}}}
+	active := false
+	var calls []string
+	adapter := httpPathTestAdapterWithBackend(&active, &calls, "http://localhost:4321")
+	application := app{config: manager, discoverer: observer, tailscale: adapter}
+	var stdout, stderr bytes.Buffer
+	code := application.exposure([]string{"http", "serve", listenerTarget.String(), "--path", "node-4321", "--localhost-backend", "--json"}, &stdout, &stderr)
+	if code != 0 || !active {
+		t.Fatalf("IPv6 named path with explicit alias failed: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !containsCall(calls, "serve --bg --yes --set-path=/node-4321 --https=443 http://localhost:4321") || !strings.Contains(stdout.String(), `"address": "127.0.0.1"`) || !strings.Contains(stdout.String(), `"url": "https://devbox.tailnet.ts.net/node-4321"`) || !strings.Contains(stdout.String(), "weakens the exact IPv6 address guarantee") {
+		t.Fatalf("CLI did not pass or report explicit localhost backend: calls=%v output=%s", calls, stdout.String())
+	}
+}
+
+func TestNamedHTTPPathCLIPreservesNumericIPv6AndSuggestsExplicitAlias(t *testing.T) {
+	manager, err := config.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manager.Path, []byte("version: 1\nserve_probe_version: 1.102.4\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listenerTarget := target.Target{Address: "::1", Port: 4321, Protocol: "tcp"}.Normalized()
+	observer := &staticListenerObserver{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{{ID: "node-listener", Target: listenerTarget, Name: "Node.js", Process: "node", PID: 41, Scope: target.ScopeLoopback, Metadata: discovery.MetadataComplete}}}}
+	active := false
+	var calls []string
+	application := app{config: manager, discoverer: observer, tailscale: httpPathTestAdapterWithBackend(&active, &calls, "http://[::1]:4321")}
+	var stdout, stderr bytes.Buffer
+	code := application.exposure([]string{"http", "serve", listenerTarget.String(), "--path", "node-4321", "--json"}, &stdout, &stderr)
+	if code != 0 || !active {
+		t.Fatalf("numeric IPv6 named path failed: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !containsCall(calls, "serve --bg --yes --set-path=/node-4321 --https=443 http://[::1]:4321") || strings.Contains(strings.Join(calls, " "), "http://localhost:4321") || !strings.Contains(stdout.String(), "unknown proxy destination") || !strings.Contains(stdout.String(), "--localhost-backend") {
+		t.Fatalf("CLI did not preserve exact IPv6 or provide opt-in guidance: calls=%v output=%s", calls, stdout.String())
+	}
+}
+
+func TestHTTPSRootCLIRequiresExplicitPortAndAliasOptIn(t *testing.T) {
+	application := app{discoverer: &staticListenerObserver{snapshot: discovery.ListenerSnapshot{Authoritative: true}}}
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "root port required", args: []string{"http", "serve", "[::1]:4321", "--root"}, want: "requires an explicit --https-port"},
+		{name: "path and root conflict", args: []string{"http", "serve", "[::1]:4321", "--root", "--https-port", "4321", "--path", "api"}, want: "mutually exclusive"},
+		{name: "named path stays on standard port", args: []string{"http", "serve", "[::1]:4321", "--path", "api", "--https-port", "4321"}, want: "use --root"},
+		{name: "alias requires IPv6 listener", args: []string{"http", "serve", "127.0.0.1:4321", "--path", "api", "--localhost-backend"}, want: "only valid for IPv6 listeners"},
+		{name: "custom root remains private", args: []string{"http", "funnel", "[::1]:4321", "--root", "--https-port", "4321"}, want: "only through private Serve"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := application.exposure(test.args, &stdout, &stderr)
+			if code == 0 || !strings.Contains(stderr.String(), test.want) {
+				t.Fatalf("unsafe HTTPS root arguments were accepted or unclear: code=%d stderr=%q", code, stderr.String())
+			}
+		})
+	}
+}
+
+func TestHTTPPathCLIRequiresIntentAndPublicConfirmation(t *testing.T) {
+	observer := &staticListenerObserver{snapshot: discovery.ListenerSnapshot{Authoritative: true}}
+	var calls []string
+	adapter := httpPathTestAdapter(new(bool), &calls)
+	application := app{discoverer: observer, tailscale: adapter}
+	var stdout, stderr bytes.Buffer
+	code := application.exposure([]string{"http", "funnel", "127.0.0.1:4321"}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "every path") {
+		t.Fatalf("Funnel confirmation was not explicit: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	for _, call := range calls {
+		if strings.Contains(call, "--set-path") {
+			t.Fatalf("provider mutation ran without public confirmation: %v", calls)
+		}
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = application.exposure([]string{"http", "serve", "127.0.0.1:4321", "--path", "../bad"}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "lowercase slug") {
+		t.Fatalf("invalid path accepted: code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestHTTPPathCLIGeneratesPathAndRemovesOnlyExactHandler(t *testing.T) {
+	manager, err := config.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manager.Path, []byte("version: 1\nserve_probe_version: 1.102.4\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listenerTarget := target.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
+	observer := &staticListenerObserver{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{{ID: "node-listener", Target: listenerTarget, Name: "Node.js", Process: "node", PID: 41, Scope: target.ScopeLoopback, Metadata: discovery.MetadataComplete}}}}
+	active := false
+	var calls []string
+	application := app{config: manager, discoverer: observer, tailscale: httpPathTestAdapter(&active, &calls)}
+	var stdout, stderr bytes.Buffer
+	code := application.exposure([]string{"http", "serve", listenerTarget.String(), "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("HTTP route CLI failed: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !active || !strings.Contains(stdout.String(), `"path": "/node-4321"`) || !strings.Contains(stdout.String(), `"url": "https://devbox.tailnet.ts.net/node-4321"`) {
+		t.Fatalf("generated route was not persisted or configured: active=%t output=%s", active, stdout.String())
+	}
+	if !containsCall(calls, "serve --bg --yes --set-path=/node-4321 --https=443 http://127.0.0.1:4321") {
+		t.Fatalf("generated path did not use the explicit HTTPS handler operation: %v", calls)
+	}
+	observer.snapshot.Listeners[0].Name = "renamed-process"
+	observer.snapshot.Listeners[0].Process = "renamed-process"
+	stdout.Reset()
+	stderr.Reset()
+	code = application.exposure([]string{"disable", listenerTarget.String(), "--json"}, &stdout, &stderr)
+	if code == 0 || !active || !strings.Contains(stdout.String(), "requires explicit route identity") || containsCall(calls, "serve --set-path=/node-4321 --bg --https=443 off") {
+		t.Fatalf("raw disable unexpectedly removed a named HTTP route: code=%d active=%t stdout=%q calls=%v", code, active, stdout.String(), calls)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = application.exposure([]string{"http", "disable", listenerTarget.String(), "--path", "node-4321", "--confirm-external"}, &stdout, &stderr)
+	if code != 0 || active || !strings.Contains(stdout.String(), "HTTPS path /node-4321") || !strings.Contains(stdout.String(), "removed and verified") {
+		t.Fatalf("exact path disable feedback was unclear: code=%d active=%t stdout=%q stderr=%q", code, active, stdout.String(), stderr.String())
+	}
+	if !containsCall(calls, "serve --set-path=/node-4321 --bg --https=443 off") {
+		t.Fatalf("disable did not remove the persisted exact path: %v", calls)
+	}
+}
+
+func containsCall(calls []string, wanted string) bool {
+	for _, call := range calls {
+		if call == wanted {
+			return true
+		}
+	}
+	return false
+}
 
 func TestParseFlagValuesSeparatesBooleanAndStringFlags(t *testing.T) {
 	parsed, err := parseFlagValues([]string{"--json", "8080", "--address=127.0.0.1", "--protocol", "tcp"}, map[string]bool{"json": false, "address": true, "protocol": true})

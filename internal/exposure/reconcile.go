@@ -75,7 +75,10 @@ func Reconcile(listeners discovery.ListenerSnapshot, exposures exposuredata.Expo
 			route := exposures.Routes[routeIndex]
 			if Matches(route.Target, listener.Target) {
 				matched[route.ID] = append(matched[route.ID], i)
-				route = applyOwnership(route, managed)
+				route = adviseIPv6HTTPSBackend(applyOwnership(route, managed))
+				if item.Recommendation == "" {
+					item.Recommendation = route.Recommendation
+				}
 				if !exposures.Authoritative {
 					route.State = exposuredata.ExposureUnknown
 				}
@@ -91,8 +94,13 @@ func Reconcile(listeners discovery.ListenerSnapshot, exposures exposuredata.Expo
 			item.State = exposuredata.ExposureUnknown
 			item.Warning = appendWarning(item.Warning, "listener or exposure state is incomplete; no route change is safe")
 		} else if len(item.Routes) > 1 {
-			item.State = exposuredata.ExposureAmbiguous
-			item.Warning = appendWarning(item.Warning, "multiple exposure routes match this listener; choose an exact route before changing it")
+			if activeRoutesHaveExactIdentity(item.Routes) {
+				item.State = exposuredata.ExposureActive
+				item.Mode = commonRouteMode(item.Routes)
+			} else {
+				item.State = exposuredata.ExposureAmbiguous
+				item.Warning = appendWarning(item.Warning, "multiple exposure routes match this listener; choose an exact route before changing it")
+			}
 		} else if len(item.Routes) == 1 {
 			item.Mode = item.Routes[0].Mode
 			item.State = item.Routes[0].State
@@ -110,7 +118,7 @@ func Reconcile(listeners discovery.ListenerSnapshot, exposures exposuredata.Expo
 		}
 	}
 	for _, original := range exposures.Routes {
-		route := applyOwnership(original, managed)
+		route := adviseIPv6HTTPSBackend(applyOwnership(original, managed))
 		matches := matched[route.ID]
 		if len(matches) == 1 {
 			continue
@@ -131,6 +139,9 @@ func Reconcile(listeners discovery.ListenerSnapshot, exposures exposuredata.Expo
 		} else {
 			item.State = exposuredata.ExposureInactive
 			item.Recommendation = exposuredata.InactiveRecommendation(route.Target)
+			if route.Recommendation != "" {
+				item.Recommendation += " " + route.Recommendation
+			}
 			route.State = exposuredata.ExposureInactive
 			item.Routes[0] = route
 		}
@@ -157,6 +168,71 @@ func Reconcile(listeners discovery.ListenerSnapshot, exposures exposuredata.Expo
 	return view
 }
 
+func activeRoutesHaveExactIdentity(routes []exposuredata.ExposureRoute) bool {
+	if len(routes) < 2 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(routes))
+	seenSelectors := make(map[string]struct{}, len(routes))
+	for _, route := range routes {
+		if route.ID == "" || route.State != exposuredata.ExposureActive {
+			return false
+		}
+		if _, exists := seen[route.ID]; exists {
+			return false
+		}
+		seen[route.ID] = struct{}{}
+		selectorIdentity := strings.Join([]string{string(route.Mode), route.ProviderKey, route.Service, route.Path}, "\x00")
+		if _, exists := seenSelectors[selectorIdentity]; exists {
+			return false
+		}
+		seenSelectors[selectorIdentity] = struct{}{}
+		selector, err := tailscale.ParseListenerSelector(route.ProviderKey, route.Mode)
+		if err != nil {
+			return false
+		}
+		switch route.Kind {
+		case exposuredata.RouteKindRawTCP:
+			if selector.Transport != "tcp" || route.Path != "" {
+				return false
+			}
+		case exposuredata.RouteKindHTTPPath:
+			path, pathErr := exposuredata.NormalizeHTTPPath(strings.TrimPrefix(route.Path, "/"))
+			if selector.Transport != "https" || selector.Port != 443 || pathErr != nil || path != route.Path || !httpBackendMatchesTarget(route) {
+				return false
+			}
+		case exposuredata.RouteKindHTTPSRoot:
+			if selector.Transport != "https" || route.Path != "/" || !httpBackendMatchesTarget(route) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func httpBackendMatchesTarget(route exposuredata.ExposureRoute) bool {
+	if route.Backend == "" {
+		return false
+	}
+	return tailscale.HTTPPathBackendMatches(route.Backend, tailscale.HTTPPathBackendArgument(route.Target)) ||
+		tailscale.HTTPPathBackendMatches(route.Backend, tailscale.HTTPSBackendArgument(route.Target, true))
+}
+
+func commonRouteMode(routes []exposuredata.ExposureRoute) exposuredata.ExposureMode {
+	if len(routes) == 0 {
+		return exposuredata.ExposureDisabled
+	}
+	mode := routes[0].Mode
+	for _, route := range routes[1:] {
+		if route.Mode != mode {
+			return exposuredata.ExposureMultiple
+		}
+	}
+	return mode
+}
+
 func appendWarning(existing, addition string) string {
 	if existing == "" {
 		return addition
@@ -174,6 +250,14 @@ func sensitivePort(port int) bool {
 	default:
 		return false
 	}
+}
+
+func adviseIPv6HTTPSBackend(route exposuredata.ExposureRoute) exposuredata.ExposureRoute {
+	if (route.Kind == exposuredata.RouteKindHTTPPath || route.Kind == exposuredata.RouteKindHTTPSRoot) &&
+		route.Target.Normalized().Address == "::1" && route.Recommendation == "" {
+		route.Recommendation = exposuredata.NumericIPv6HTTPSBackendRecommendation
+	}
+	return route
 }
 
 func applyOwnership(route exposuredata.ExposureRoute, managed map[string]bool) exposuredata.ExposureRoute {
@@ -688,6 +772,53 @@ func (c *Controller) ApplyRoute(ctx context.Context, target target.Target, provi
 
 func (c *Controller) ApplyRouteApproved(ctx context.Context, target target.Target, providerKey string, confirmExternal bool, timeout time.Duration, approval MutationApproval) (receipt exposuredata.OperationReceipt, applyErr error) {
 	return c.applyRoute(ctx, target, providerKey, confirmExternal, timeout, &approval)
+}
+
+// ApplyRouteIdentityApproved removes one exact provider route when multiple
+// named handlers share an endpoint selector.
+func (c *Controller) ApplyRouteIdentity(ctx context.Context, target target.Target, routeID string, confirmExternal bool, timeout time.Duration) (receipt exposuredata.OperationReceipt, applyErr error) {
+	return c.applyRouteIdentity(ctx, target, routeID, confirmExternal, timeout, nil)
+}
+
+func (c *Controller) ApplyRouteIdentityApproved(ctx context.Context, target target.Target, routeID string, confirmExternal bool, timeout time.Duration, approval MutationApproval) (receipt exposuredata.OperationReceipt, applyErr error) {
+	return c.applyRouteIdentity(ctx, target, routeID, confirmExternal, timeout, &approval)
+}
+
+// HTTPPathOptions carries explicit choices that weaken backend address
+// guarantees. Defaults preserve the exact discovered listener address.
+type HTTPPathOptions struct {
+	LocalhostBackendAlias bool
+}
+
+// ApplyHTTPPath explicitly configures one discovered listener as a named HTTP
+// path handler on the shared HTTPS endpoint. Listener discovery itself never
+// calls this operation or implies HTTP.
+func (c *Controller) ApplyHTTPPath(ctx context.Context, target target.Target, path string, mode exposuredata.ExposureMode, confirmFunnel bool, timeout time.Duration) (receipt exposuredata.OperationReceipt, applyErr error) {
+	return c.ApplyHTTPPathWithOptions(ctx, target, path, mode, confirmFunnel, HTTPPathOptions{}, timeout)
+}
+
+func (c *Controller) ApplyHTTPPathApproved(ctx context.Context, target target.Target, path string, mode exposuredata.ExposureMode, confirmFunnel bool, timeout time.Duration, approval MutationApproval) (receipt exposuredata.OperationReceipt, applyErr error) {
+	return c.ApplyHTTPPathWithOptionsApproved(ctx, target, path, mode, confirmFunnel, HTTPPathOptions{}, timeout, approval)
+}
+
+func (c *Controller) ApplyHTTPPathWithOptions(ctx context.Context, target target.Target, path string, mode exposuredata.ExposureMode, confirmFunnel bool, options HTTPPathOptions, timeout time.Duration) (receipt exposuredata.OperationReceipt, applyErr error) {
+	return c.applyHTTPPath(ctx, target, path, mode, confirmFunnel, options, timeout, nil)
+}
+
+func (c *Controller) ApplyHTTPPathWithOptionsApproved(ctx context.Context, target target.Target, path string, mode exposuredata.ExposureMode, confirmFunnel bool, options HTTPPathOptions, timeout time.Duration, approval MutationApproval) (receipt exposuredata.OperationReceipt, applyErr error) {
+	return c.applyHTTPPath(ctx, target, path, mode, confirmFunnel, options, timeout, &approval)
+}
+
+// ApplyHTTPSRoot explicitly maps the selected listener to the HTTPS root at the
+// requested Serve port. IPv6 listeners retain their numeric backend by default;
+// localhostBackendAlias opts into hostname resolution when an operator accepts
+// that weaker address guarantee.
+func (c *Controller) ApplyHTTPSRoot(ctx context.Context, target target.Target, httpsPort int, localhostBackendAlias bool, timeout time.Duration) (receipt exposuredata.OperationReceipt, applyErr error) {
+	return c.applyHTTPSRoot(ctx, target, httpsPort, localhostBackendAlias, timeout, nil)
+}
+
+func (c *Controller) ApplyHTTPSRootApproved(ctx context.Context, target target.Target, httpsPort int, localhostBackendAlias bool, timeout time.Duration, approval MutationApproval) (receipt exposuredata.OperationReceipt, applyErr error) {
+	return c.applyHTTPSRoot(ctx, target, httpsPort, localhostBackendAlias, timeout, &approval)
 }
 
 func (c *Controller) applyRoute(ctx context.Context, target target.Target, providerKey string, confirmExternal bool, timeout time.Duration, approval *MutationApproval) (receipt exposuredata.OperationReceipt, applyErr error) {

@@ -13,6 +13,20 @@ func (m *workspaceModel) setBanner(value string, sticky bool) {
 	m.banner, m.bannerSticky = sanitizeTUIText(value), sticky
 }
 
+func (m *workspaceModel) clearBannerNotice(notice string) {
+	parts := strings.Split(m.banner, " | ")
+	kept := parts[:0]
+	for _, part := range parts {
+		if part != notice {
+			kept = append(kept, part)
+		}
+	}
+	m.banner = strings.Join(kept, " | ")
+	if m.banner == "" {
+		m.bannerSticky = false
+	}
+}
+
 func (m *workspaceModel) appendBanner(value string, sticky bool) {
 	value = sanitizeTUIText(value)
 	if value == "" || strings.Contains(m.banner, value) {
@@ -32,6 +46,18 @@ func safeMessage(err error) string {
 		return ""
 	}
 	return sanitizeTUIText(fault.AsAppError(err).Message)
+}
+
+func safeOperationFailure(err error) string {
+	if err == nil {
+		return ""
+	}
+	appErr := fault.AsAppError(err)
+	message := appErr.Message
+	if appErr.Remediation != "" {
+		message += " Next: " + appErr.Remediation
+	}
+	return sanitizeTUIText(message)
 }
 
 func (m *workspaceModel) applyStatus(message statusMsg) {

@@ -21,4 +21,6 @@ const (
 	modalQuit
 	modalHelp
 	modalPalette
+	modalHTTPPath
+	modalChooseURL
 )

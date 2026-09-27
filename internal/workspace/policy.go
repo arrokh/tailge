@@ -64,10 +64,10 @@ func actionAvailabilityForItem(item exposure.ReconciledItem, mode exposuredata.E
 	if context.ProcessBusy {
 		return unavailable("Action unavailable: process termination is in progress")
 	}
-	// A target with multiple exact routes is ambiguous for enable/replace. A
-	// batch cannot open one route chooser per item, so it is also blocked for
-	// disable when batch is true.
-	if item.State == exposuredata.ExposureUnknown || item.State == exposuredata.ExposureUnavailable || item.State == exposuredata.ExposureUnsupported || (item.State == exposuredata.ExposureAmbiguous && (mode != exposuredata.ExposureDisabled || len(item.Routes) <= 1 || batch)) {
+	// Incomplete route identity is ambiguous; known multiple exact routes are
+	// summarized separately. A batch cannot open one exact-route chooser per
+	// item, so disable remains blocked for multiple routes when batch is true.
+	if item.State == exposuredata.ExposureUnknown || item.State == exposuredata.ExposureUnavailable || item.State == exposuredata.ExposureUnsupported || item.State == exposuredata.ExposureAmbiguous {
 		return unavailable("Action unavailable: selected state is not authoritative or exact")
 	}
 	if mode == exposuredata.ExposureDisabled {
@@ -83,6 +83,21 @@ func actionAvailabilityForItem(item exposure.ReconciledItem, mode exposuredata.E
 		for _, route := range item.Routes {
 			if route.ProviderKey == "" {
 				return unavailable("Disable unavailable: exact route selector is missing")
+			}
+			if route.Kind == exposuredata.RouteKindHTTPPath || route.Kind == exposuredata.RouteKindHTTPSRoot {
+				if context.ReadinessError != nil {
+					return unavailable("Disable unavailable: HTTP path readiness state is stale")
+				}
+				status, message, remediation := HTTPPathStatus(context.Readiness, route.Mode)
+				if status != readiness.ReadinessReady {
+					if message == "" {
+						message = "HTTP path mutation capability is not ready"
+					}
+					if remediation != "" {
+						message += " Next: " + remediation
+					}
+					return unavailable("Disable unavailable: " + message)
+				}
 			}
 		}
 		if !SameStateForItem(context.View, item, mode) {
@@ -106,11 +121,14 @@ func actionAvailabilityForItem(item exposure.ReconciledItem, mode exposuredata.E
 			return unavailable("Action unavailable: readiness state is stale")
 		}
 	}
+	if len(item.Routes) == 1 && (item.Routes[0].Kind == exposuredata.RouteKindHTTPPath || item.Routes[0].Kind == exposuredata.RouteKindHTTPSRoot) && !SameStateForItem(context.View, item, mode) {
+		return unavailable("Explicit HTTPS handlers can only be changed through their exact route action")
+	}
 	if item.Listener == nil {
 		return unavailable("Enable unavailable: no current exact local listener")
 	}
 	if len(item.Routes) > 1 {
-		return unavailable("Action unavailable: existing routes are ambiguous")
+		return unavailable("Action unavailable: multiple exact routes are configured; choose one exact route before changing exposure")
 	}
 	if len(item.Routes) == 1 && item.Routes[0].ProviderKey == "" && item.Routes[0].Mode != mode {
 		return unavailable("Action unavailable: existing route has no exact provider selector")
@@ -159,6 +177,21 @@ func ModeStatus(report readiness.Readiness, wanted exposuredata.ExposureMode) re
 	return readiness.ReadinessUnknown
 }
 
+// HTTPPathStatus returns the independently reported HTTPS path capability and
+// readiness, without claiming anything about application health.
+func HTTPPathStatus(report readiness.Readiness, wanted exposuredata.ExposureMode) (readiness.ReadinessStatus, string, string) {
+	for _, mode := range report.Modes {
+		if mode.Mode == wanted {
+			status := mode.HTTPPathStatus
+			if status == "" {
+				status = readiness.ReadinessUnknown
+			}
+			return status, mode.HTTPPathMessage, mode.HTTPPathRemediation
+		}
+	}
+	return readiness.ReadinessUnknown, "HTTP path readiness was not reported", "Run `tailge doctor --tailscale` and inspect the installed Tailscale capabilities."
+}
+
 // ReadinessActionReason renders the first actionable readiness check.
 func ReadinessActionReason(report readiness.Readiness, wanted exposuredata.ExposureMode) string {
 	for _, mode := range report.Modes {
@@ -192,6 +225,11 @@ func AlreadyMessage(mode exposuredata.ExposureMode) string {
 func PreviewRoute(item exposure.ReconciledItem, routeKey string) *exposuredata.ExposureRoute {
 	if routeKey != "" {
 		for i := range item.Routes {
+			if item.Routes[i].ID == routeKey {
+				return &item.Routes[i]
+			}
+		}
+		for i := range item.Routes {
 			if item.Routes[i].ProviderKey == routeKey {
 				return &item.Routes[i]
 			}
@@ -208,6 +246,11 @@ func PreviewRoute(item exposure.ReconciledItem, routeKey string) *exposuredata.E
 // external-ownership confirmation.
 func ExternalPreview(item exposure.ReconciledItem, routeKey string) bool {
 	if routeKey != "" {
+		for _, route := range item.Routes {
+			if route.ID == routeKey {
+				return route.Ownership != exposuredata.OwnershipManaged
+			}
+		}
 		for _, route := range item.Routes {
 			if route.ProviderKey == routeKey {
 				return route.Ownership != exposuredata.OwnershipManaged

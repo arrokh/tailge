@@ -59,7 +59,7 @@ tailge exposure status
 tailge exposure status --json
 ```
 
-Serve and Funnel readiness are reported separately. `read_only` is a deliberate fail-closed state: the daemon, identity, and connection may be ready while exact mutation capability remains unverified. Serve requires persisted compatibility evidence. Funnel is enabled only when the installed CLI supports exact per-listener operations; broad `funnel reset` support is not sufficient.
+Serve and Funnel readiness are reported separately. `read_only` is a deliberate fail-closed state: the daemon, identity, and connection may be ready while exact mutation capability remains unverified. Serve requires persisted compatibility evidence. Funnel is enabled only when the installed CLI supports exact per-listener operations; broad `funnel reset` support is not sufficient. HTTPS-path readiness is reported separately for each mode and requires exact HTTPS plus `--set-path` support; unsupported path handlers remain unavailable with a reason and remediation.
 
 Tailscale status may describe the same endpoint in both Serve and Funnel data. Tailge classifies an endpoint as public only when its matching `AllowFunnel` entry is explicitly `true`; otherwise it remains a private Serve route. The hostname or URL alone does not identify the access scope.
 
@@ -104,6 +104,44 @@ tailge exposure disable 127.0.0.1:3000 --confirm-external --json
 ```
 
 Mutations are bounded, serialized per target, protected by fresh route fingerprints, and verified with a fresh provider read. Replacement is allowed only when the previous route has a deterministic selector that can restore it exactly if the new operation fails. A command that cannot prove its final state reports `unverified`, not success. Omitting `--mode` for an ambiguous disable remains fail-closed.
+
+### Add HTTPS routes to local HTTP services
+
+Listener discovery proves TCP only, so the existing `exposure serve` and `exposure funnel` commands remain raw-TCP operations. Use the explicit `exposure http` subcommands to opt in to Tailscale's HTTPS reverse proxy:
+
+```sh
+# Private tailnet URL; app continues listening on local HTTP
+tailge exposure http serve '[::1]:4321' --path api
+
+# Opt in to localhost resolution if Tailscale rejects numeric IPv6 destinations
+tailge exposure http serve '[::1]:4321' --path api --localhost-backend
+
+# Omit --path to generate and persist a normalized process-name-plus-port slug
+tailge exposure http serve '[::1]:4321'
+
+# Public URL; requires confirmation because every path on the endpoint becomes public
+tailge exposure http funnel '[::1]:4321' --path preview --confirm-public
+
+# Explicit root on a custom HTTPS port (private Serve only)
+tailge exposure http serve '[::1]:4321' --root --https-port 4321 --localhost-backend
+
+# Remove one exact named path or custom-port root
+tailge exposure http disable '[::1]:4321' --path api --confirm-external
+tailge exposure http disable '[::1]:4321' --root --https-port 4321 --confirm-external
+```
+
+Named paths are one lowercase slug segment containing letters, digits, and hyphens (for example `api`); `/` has no implicit service. The browser uses `https://<machine>.<tailnet>.ts.net/<path>` on standard HTTPS port 443. For an app that needs `/` on a custom HTTPS port, explicitly select `--root --https-port PORT`; for example, this produces `https://<machine>.<tailnet>.ts.net:4321/`. Custom-port roots are private Serve only; Funnel on a custom root is not supported. Tailscale terminates HTTPS and forwards local HTTP to the selected listener, so the app does not need a TLS change or restart. Named paths strip their mount prefix before the app receives the request. Generated path slugs are stored in provider state and do not silently change when the process name later changes. After a verified apply, the CLI prints the provider-observed browser URL when one is available; `tailge exposure status` shows observed handlers.
+
+When one listener has several complete, distinct active routes, the workspace shows `ACTIVE` with mode `MULTI` rather than `AMBIG`; the routes remain separately listed. Press `d` to choose one exact route to disable. Broad Serve/Funnel mode changes stay blocked until the operator selects a single target/route; incomplete or overlapping route identity remains ambiguous and fail-closed.
+
+IPv6 numeric backends remain exact by default for named paths and roots. If Tailscale returns `unknown proxy destination` for a numeric IPv6 destination, first disable the exact handler with `exposure http disable` and its exact `--path` (or `--root --https-port PORT`), then recreate it with `--localhost-backend` (for a named path or root) to use `http://localhost:<port>`. For example, to replace an existing `/blog` handler on an IPv6-only service:
+
+```sh
+tailge exposure http disable '[::1]:4321' --path blog --confirm-external
+tailge exposure http serve '[::1]:4321' --path blog --localhost-backend
+```
+
+In the TUI `p` path dialog, `Ctrl+B` toggles this alias for IPv6 listeners; the confirmation preview warns that hostname resolution weakens the exact-address guarantee. Tailge never substitutes it silently. The `o` shortcut only opens an observed URL; it does not configure routes. Remove a custom root with `--root --https-port PORT`; `--confirm-external` is required when ownership is unknown. Serve remains private to authenticated tailnet users. Funnel applies to the shared hostname and HTTPS port, so every sibling path on that endpoint becomes public. Tailge rejects duplicate paths and mixed Serve/Funnel scope, preserves sibling handlers, and removes only the exact selected route. Provider route verification does not test backend proxy reachability or application health; open the printed URL to smoke-test actual delivery.
 
 ### Configure preferences
 
@@ -159,9 +197,10 @@ The workspace uses Bubble Tea's alternate screen and raw keyboard mode only afte
 | `r` / `R` | Refresh / fresh retry preview after failure |
 | `C` / `Ctrl-l` | Clear the accepted filter |
 | `c` | Open confirmed cancellation for an Applying operation |
-| `o` | Open the observed exposure URL |
+| `p` | Preview and add one named HTTPS path for the selected HTTP listener; `Ctrl+B` explicitly toggles localhost backend alias on IPv6 |
+| `o` | Open an observed exposure URL; choose an exact path if several are present |
 | `O` | Open `http://localhost:<port>/` for the selected listener |
-| `y` | Copy the observed URL through terminal OSC 52 |
+| `y` | Copy an observed URL through terminal OSC 52; choose an exact path if several are present |
 | `x` | Confirm termination of current local process(es) |
 | `U` | Clear all selected items |
 | `X` | Dismiss visible feedback |
@@ -177,7 +216,7 @@ Action previews default to Cancel. Funnel displays a public-internet warning and
 
 ### URLs, transport, and process actions
 
-`o` opens an explicitly observed HTTP/HTTPS URL. For a Serve `tcp=` route without an observed URL, an explicit `o` may use the provider-reported Tailscale DNS name and exact listener port as an HTTP preview. This is a UI convenience only: it never changes route identity or mutation behavior. Funnel TCP without an observed URL remains `TCP-only` and cannot be copied.
+`o` opens an explicitly observed HTTP/HTTPS URL. If several HTTPS path URLs are present, the workspace asks which exact observed URL to open; `y` offers the same picker before copying. For a Serve `tcp=` route without an observed URL, an explicit `o` may use the provider-reported Tailscale DNS name and exact listener port as an HTTP preview. This is a UI convenience only: it never changes route identity or mutation behavior. Funnel TCP without an observed URL remains `TCP-only` and cannot be copied.
 
 `O` opens the local convenience URL `http://localhost:<port>/`. It is not evidence that a remote raw-TCP exposure speaks HTTP.
 
@@ -185,7 +224,7 @@ Action previews default to Cancel. Funnel displays a public-internet warning and
 
 `x` only terminates a currently discovered, identity-revalidated local process. It sends SIGTERM once and never escalates to SIGKILL. An inactive configured route has no process to terminate; use `d` to disable the route.
 
-The bottom bar shows `ok`, `off`, `TCP-only`, or `URL-only` for `o`, `O`, and `y`. `NO_COLOR=1` keeps written state indicators while disabling color.
+The bottom bar shows whether `p` named HTTP paths are ready and shows `ok`, `off`, `TCP-only`, or `URL-only` for `o`, `O`, and `y`. `NO_COLOR=1` keeps written state indicators while disabling color.
 
 ### Refresh and operation state
 
@@ -203,7 +242,7 @@ Routes not created and verified by the current Tailge session are external or un
 
 ### Transport and identity
 
-Local listener discovery proves only that a TCP listener exists; it does not prove HTTP or HTTPS. Exposure mutations may therefore use exact raw-TCP selectors (`serve:tcp=...` or `funnel:tcp=...`) and never infer a protocol.
+Local listener discovery proves only that a TCP listener exists; it does not prove HTTP or HTTPS. Existing exposure mutations may therefore use exact raw-TCP selectors (`serve:tcp=...` or `funnel:tcp=...`) and never infer a protocol. Named HTTP paths and explicit HTTPS root handlers are separate route kinds: identity includes the HTTPS endpoint selector, handler path (`/` for root), backend, target, mode, and observed URL. Multiple handlers may share an HTTPS selector; disabling one requires its exact handler path and identity, not just the shared selector. Root handlers are only created by explicit `--root --https-port PORT` intent.
 
 Route identity retains the provider selector, service, handler path, backend, target, mode, and observed URL. Tailscale's `AllowFunnel: true` is the evidence for public access; absent or false means private Serve. A permissions-only `AllowFunnel` payload with no handler is an authoritative empty route set, not an active exposure.
 

@@ -129,6 +129,9 @@ func (a app) exposure(args []string, stdout, stderr io.Writer) int {
 	if subcommand == "status" {
 		return a.exposureStatus(args[1:], stdout, stderr)
 	}
+	if subcommand == "http" {
+		return a.httpExposure(args[1:], stdout, stderr)
+	}
 	if subcommand != "serve" && subcommand != "funnel" && subcommand != "disable" {
 		return reportError(stderr, invalidArgs("unknown exposure command "+strconv.Quote(subcommand)))
 	}
@@ -146,14 +149,6 @@ func (a app) exposure(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return reportMaybeJSON(stdout, stderr, fault.WrapError(fault.ErrInvalidInput, "cli", err.Error(), false, "invalid", "Use address:port or a port with --address.", err), parsed.bools["json"])
 	}
-	unlock, err := exposure.AcquireMutationLock(context.Background(), a.config.Path+".exposure.lock")
-	if err != nil {
-		if parsed.bools["json"] {
-			return writeJSON(stdout, stderr, response{SchemaVersion: schemaVersion, Errors: errorsFrom(err)})
-		}
-		return reportError(stderr, err)
-	}
-	defer unlock()
 	cfg, _, err := a.config.Ensure(context.Background())
 	if err != nil {
 		if parsed.bools["json"] {
@@ -203,6 +198,225 @@ func (a app) exposure(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "operation %s completed\n", receipt.ID)
 	}
 	return 0
+}
+
+func (a app) httpExposure(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || (args[0] != "serve" && args[0] != "funnel" && args[0] != "disable") {
+		return reportError(stderr, invalidArgs("exposure http requires serve, funnel, or disable"))
+	}
+	mode := exposuredata.ExposureMode(args[0])
+	if args[0] == "disable" {
+		mode = exposuredata.ExposureDisabled
+	}
+	parsed, err := parseFlagValues(args[1:], map[string]bool{"confirm-public": false, "confirm-external": false, "json": false, "root": false, "localhost-backend": false, "address": true, "path": true, "https-port": true})
+	if err != nil {
+		return reportMaybeJSON(stdout, stderr, err, wantsJSON(args[1:]))
+	}
+	if len(parsed.positionals) != 1 {
+		return reportMaybeJSON(stdout, stderr, invalidArgs("exposure http "+string(mode)+" requires exactly one target"), parsed.bools["json"])
+	}
+	return a.runHTTPPathExposure(mode, parsed, stdout, stderr)
+}
+
+func (a app) runHTTPPathExposure(mode exposuredata.ExposureMode, parsed flagValues, stdout, stderr io.Writer) int {
+	target, err := parseTarget(parsed.positionals[0], parsed.values["address"], "tcp")
+	if err != nil {
+		return reportMaybeJSON(stdout, stderr, fault.WrapError(fault.ErrInvalidInput, "cli", err.Error(), false, "invalid", "Use address:port or a port with --address.", err), parsed.bools["json"])
+	}
+	root := parsed.bools["root"]
+	httpsPort := 443
+	if parsed.values["https-port"] != "" {
+		httpsPort, err = strconv.Atoi(parsed.values["https-port"])
+		if err != nil || httpsPort < 1 || httpsPort > 65535 {
+			return reportMaybeJSON(stdout, stderr, invalidArgs("--https-port must be between 1 and 65535"), parsed.bools["json"])
+		}
+	} else if root {
+		return reportMaybeJSON(stdout, stderr, invalidArgs("--root requires an explicit --https-port"), parsed.bools["json"])
+	}
+	if parsed.bools["localhost-backend"] && target.Address != "::1" && target.Address != "::" {
+		return reportMaybeJSON(stdout, stderr, invalidArgs("--localhost-backend is only valid for IPv6 listeners"), parsed.bools["json"])
+	}
+	if root && strings.TrimSpace(parsed.values["path"]) != "" {
+		return reportMaybeJSON(stdout, stderr, invalidArgs("--root and --path are mutually exclusive"), parsed.bools["json"])
+	}
+	if !root && httpsPort != 443 {
+		return reportMaybeJSON(stdout, stderr, invalidArgs("named HTTP paths use HTTPS port 443; use --root for a custom HTTPS port"), parsed.bools["json"])
+	}
+	if root && mode == exposuredata.ExposureFunnel {
+		return reportMaybeJSON(stdout, stderr, fault.NewError(fault.ErrUnsupported, "cli", "custom-port HTTPS root routes are currently available only through private Serve", false, "read_only", "Use a named HTTP path for Funnel, after reviewing its shared public visibility."), parsed.bools["json"])
+	}
+	path := ""
+	if strings.TrimSpace(parsed.values["path"]) != "" {
+		path, err = exposuredata.NormalizeHTTPPath(parsed.values["path"])
+		if err != nil {
+			return reportMaybeJSON(stdout, stderr, fault.WrapError(fault.ErrInvalidInput, "cli", err.Error(), false, "invalid", "Use one path slug such as `api`, or omit --path to generate one.", err), parsed.bools["json"])
+		}
+	}
+	if mode == exposuredata.ExposureDisabled && strings.TrimSpace(parsed.values["path"]) == "" && !root {
+		return reportMaybeJSON(stdout, stderr, invalidArgs("exposure http disable requires --path or --root to select one exact handler"), parsed.bools["json"])
+	}
+	if mode == exposuredata.ExposureDisabled && parsed.bools["localhost-backend"] {
+		return reportMaybeJSON(stdout, stderr, invalidArgs("--localhost-backend configures a route and is not valid with disable"), parsed.bools["json"])
+	}
+	if mode == exposuredata.ExposureDisabled && parsed.bools["confirm-public"] {
+		return reportMaybeJSON(stdout, stderr, invalidArgs("--confirm-public is only valid for Funnel"), parsed.bools["json"])
+	}
+	if mode == exposuredata.ExposureFunnel && !parsed.bools["confirm-public"] {
+		return reportMaybeJSON(stdout, stderr, fault.NewError(fault.ErrUnsafe, "cli", "Funnel makes every path on the shared HTTPS hostname and port public", false, "not_confirmed", "Review all sibling handlers and repeat with --confirm-public."), parsed.bools["json"])
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if path == "" && mode != exposuredata.ExposureDisabled && !root {
+		if a.discoverer == nil {
+			return reportMaybeJSON(stdout, stderr, fault.NewError(fault.ErrDependency, "cli", "listener discovery is unavailable", true, "unavailable", "Refresh listener discovery and retry."), parsed.bools["json"])
+		}
+		listeners, discoverErr := a.discoverer.List(ctx)
+		if discoverErr != nil || !listeners.Authoritative || listeners.Error != nil {
+			if discoverErr == nil {
+				discoverErr = fault.NewError(fault.ErrUnknown, "cli", "listener state is not authoritative", true, "unknown", "Refresh local listener discovery before generating a service path.")
+			}
+			return reportMaybeJSON(stdout, stderr, discoverErr, parsed.bools["json"])
+		}
+		matches := make([]discovery.Listener, 0, 1)
+		for _, listener := range listeners.Listeners {
+			if listener.Target.Normalized().Key() == target.Normalized().Key() {
+				matches = append(matches, listener)
+			}
+		}
+		if len(matches) != 1 {
+			return reportMaybeJSON(stdout, stderr, fault.NewError(fault.ErrAmbiguous, "cli", "generated service path requires one exact discovered listener", false, "ambiguous", "Use an address-specific target and refresh listener discovery."), parsed.bools["json"])
+		}
+		name := matches[0].Process
+		if name == "" {
+			name = matches[0].Name
+		}
+		path, err = exposuredata.GeneratedHTTPPath(name, target.Port)
+		if err != nil {
+			return reportMaybeJSON(stdout, stderr, fault.WrapError(fault.ErrInvalidInput, "cli", err.Error(), false, "invalid", "Select a valid discovered listener port.", err), parsed.bools["json"])
+		}
+	}
+	cfg, _, err := a.config.Ensure(ctx)
+	if err != nil {
+		return reportMaybeJSON(stdout, stderr, err, parsed.bools["json"])
+	}
+	if a.tailscale == nil {
+		return reportMaybeJSON(stdout, stderr, fault.NewError(fault.ErrDependency, "cli", "Tailscale provider is unavailable", true, "unavailable", "Install Tailscale and retry."), parsed.bools["json"])
+	}
+	controller := exposure.NewController(a.discoverer, a.tailscale)
+	controller.MutationLockPath = a.config.Path + ".exposure.lock"
+	controller.ReadinessOptions = tailscale.ReadinessOptions{ServeProbeVersion: cfg.ServeProbeVersion, FunnelProbeVersion: cfg.FunnelProbeVersion}
+	var receipt exposuredata.OperationReceipt
+	var applyErr error
+	var route exposuredata.ExposureRoute
+	if mode == exposuredata.ExposureDisabled {
+		snapshot, listErr := a.tailscale.List(ctx)
+		if listErr != nil || !snapshot.Authoritative || snapshot.Error != nil {
+			if listErr == nil {
+				listErr = fault.NewError(fault.ErrUnknown, "cli", "provider route state is not authoritative", true, "unknown", "Refresh Tailscale status before disabling a path.")
+			}
+			return reportMaybeJSON(stdout, stderr, listErr, parsed.bools["json"])
+		}
+		matches := make([]exposuredata.ExposureRoute, 0, 1)
+		wantKind, wantPath := exposuredata.RouteKindHTTPPath, path
+		if root {
+			wantKind, wantPath = exposuredata.RouteKindHTTPSRoot, "/"
+		}
+		for _, observed := range snapshot.Routes {
+			selector, selectorErr := tailscale.ParseListenerSelector(observed.ProviderKey, observed.Mode)
+			if observed.Kind == wantKind && observed.Path == wantPath && selectorErr == nil && selector.Transport == "https" && selector.Port == httpsPort && targetmodel.TargetsMatch(observed.Target, target) {
+				matches = append(matches, observed)
+			}
+		}
+		if len(matches) != 1 {
+			return reportMaybeJSON(stdout, stderr, fault.NewError(fault.ErrAmbiguous, "cli", "the named HTTP path does not identify exactly one configured route", false, "ambiguous", "Review exposure status and provide the exact target and path."), parsed.bools["json"])
+		}
+		route = matches[0]
+		receipt, applyErr = controller.ApplyRouteIdentity(ctx, target, route.ID, parsed.bools["confirm-external"], cfg.OperationTimeout)
+	} else if root {
+		receipt, applyErr = controller.ApplyHTTPSRoot(ctx, target, httpsPort, parsed.bools["localhost-backend"], cfg.OperationTimeout)
+		route = exposuredata.ExposureRoute{ProviderKey: string(mode) + ":https=" + strconv.Itoa(httpsPort), Kind: exposuredata.RouteKindHTTPSRoot, Path: "/", Target: target, Mode: mode}
+		if applyErr == nil && receipt.Verified {
+			if observed, ok := observedHTTPSRoute(ctx, a.tailscale, target, mode, "/", httpsPort, true, parsed.bools["localhost-backend"]); ok {
+				route = observed
+			}
+		}
+	} else {
+		options := exposure.HTTPPathOptions{LocalhostBackendAlias: parsed.bools["localhost-backend"]}
+		receipt, applyErr = controller.ApplyHTTPPathWithOptions(ctx, target, path, mode, parsed.bools["confirm-public"], options, cfg.OperationTimeout)
+		route = exposuredata.ExposureRoute{ProviderKey: string(mode) + ":https=443", Kind: exposuredata.RouteKindHTTPPath, Path: path, Target: target, Mode: mode}
+		if applyErr == nil && receipt.Verified {
+			if observed, ok := observedHTTPSRoute(ctx, a.tailscale, target, mode, path, 443, false, parsed.bools["localhost-backend"]); ok {
+				route = observed
+			}
+		}
+	}
+	if mode != exposuredata.ExposureDisabled && parsed.bools["localhost-backend"] {
+		route.Recommendation = exposuredata.LocalhostHTTPSBackendRecommendation
+	} else if mode != exposuredata.ExposureDisabled && (target.Address == "::1" || target.Address == "::") {
+		route.Recommendation = exposuredata.NumericIPv6HTTPSBackendRecommendation
+	}
+	if parsed.bools["json"] {
+		return writeJSON(stdout, stderr, response{SchemaVersion: schemaVersion, Data: map[string]any{"route": route, "operation": receipt}, Errors: errorsFrom(applyErr, receipt.Error)})
+	}
+	if applyErr != nil {
+		printError(stderr, applyErr)
+		return fault.AsAppError(applyErr).Exit
+	}
+	if receipt.Verified {
+		if mode == exposuredata.ExposureDisabled {
+			if root {
+				fmt.Fprintf(stdout, "HTTPS root on port %d for %s removed and verified\n", httpsPort, target.String())
+			} else {
+				fmt.Fprintf(stdout, "HTTPS path %s on %s removed and verified\n", path, target.String())
+			}
+		} else if root {
+			fmt.Fprintf(stdout, "HTTPS root on port %d for %s (%s) verified\n", httpsPort, target.String(), mode)
+		} else {
+			fmt.Fprintf(stdout, "HTTPS path %s on %s (%s) verified\n", path, target.String(), mode)
+		}
+		if mode != exposuredata.ExposureDisabled && route.URL != "" {
+			fmt.Fprintf(stdout, "URL: %s\n", route.URL)
+		}
+		if route.Recommendation != "" {
+			fmt.Fprintf(stdout, "Next: %s\n", route.Recommendation)
+		}
+	} else {
+		fmt.Fprintf(stdout, "HTTPS path %s operation %s completed\n", path, receipt.ID)
+	}
+	return 0
+}
+
+func observedHTTPSRoute(ctx context.Context, provider *tailscale.Adapter, target targetmodel.Target, mode exposuredata.ExposureMode, path string, httpsPort int, root, localhostBackendAlias bool) (exposuredata.ExposureRoute, bool) {
+	if provider == nil {
+		return exposuredata.ExposureRoute{}, false
+	}
+	backend := tailscale.HTTPPathBackendArgument(target)
+	if localhostBackendAlias {
+		backend = tailscale.HTTPSBackendArgument(target, true)
+	}
+	backendTarget, err := targetmodel.ParseTarget(backend, "tcp")
+	if err != nil {
+		return exposuredata.ExposureRoute{}, false
+	}
+	snapshot, err := provider.List(ctx)
+	if err != nil || !snapshot.Authoritative || snapshot.Error != nil {
+		return exposuredata.ExposureRoute{}, false
+	}
+	wantKind := exposuredata.RouteKindHTTPPath
+	if root {
+		wantKind = exposuredata.RouteKindHTTPSRoot
+	}
+	providerKey := string(mode) + ":https=" + strconv.Itoa(httpsPort)
+	matches := make([]exposuredata.ExposureRoute, 0, 1)
+	for _, route := range snapshot.Routes {
+		if route.Kind == wantKind && route.Mode == mode && route.Path == path && route.ProviderKey == providerKey && tailscale.HTTPPathBackendMatches(route.Backend, backend) && route.Target.Normalized().Key() == backendTarget.Normalized().Key() {
+			matches = append(matches, route)
+		}
+	}
+	if len(matches) != 1 || matches[0].URL == "" {
+		return exposuredata.ExposureRoute{}, false
+	}
+	return matches[0], true
 }
 
 func (a app) exposureStatus(args []string, stdout, stderr io.Writer) int {
@@ -643,6 +857,9 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "       tailge doctor --tailscale --probe serve|funnel --self-test-listener --confirm-test-route [--confirm-public]")
 	fmt.Fprintln(w, "       tailge exposure status [--json]")
 	fmt.Fprintln(w, "       tailge exposure serve|funnel|disable TARGET [--address ADDR] [--mode serve|funnel] [--confirm-public] [--confirm-external] [--json]")
+	fmt.Fprintln(w, "       tailge exposure http serve|funnel TARGET [--path SLUG] [--localhost-backend] [--address ADDR] [--confirm-public] [--json]")
+	fmt.Fprintln(w, "       tailge exposure http serve TARGET --root --https-port PORT [--localhost-backend] [--address ADDR] [--json]")
+	fmt.Fprintln(w, "       tailge exposure http disable TARGET (--path SLUG | --root --https-port PORT) [--address ADDR] [--confirm-external] [--json]")
 	fmt.Fprintln(w, "       tailge config path|show|set KEY VALUE|validate | tailge completion bash|zsh|fish")
 }
 func printListeners(w io.Writer, listeners []discovery.Listener) {
@@ -662,8 +879,17 @@ func printView(w io.Writer, view exposure.View) {
 	fmt.Fprintln(w, "SERVICE/TARGET\tMODE\tSTATE\tOWNERSHIP\tDETAIL")
 	for _, item := range view.Items {
 		detail := item.Warning
-		if len(item.Routes) > 0 && item.Routes[0].URL != "" {
-			detail = appendDetail(detail, "url="+item.Routes[0].URL)
+		for _, route := range item.Routes {
+			routeDetail := string(route.Mode) + " ownership=" + valueOr(string(route.Ownership), "unknown") + " selector=" + valueOr(route.ProviderKey, "unavailable")
+			if route.Kind == exposuredata.RouteKindHTTPPath {
+				routeDetail += " https-path=" + valueOr(route.Path, "/")
+			} else if route.Kind == exposuredata.RouteKindHTTPSRoot {
+				routeDetail += " https-root=" + valueOr(route.Path, "/")
+			}
+			if route.URL != "" {
+				routeDetail += " url=" + route.URL
+			}
+			detail = appendDetail(detail, routeDetail)
 		}
 		if item.OperationState != "" {
 			detail = appendDetail(detail, "operation="+string(item.OperationState))
@@ -671,24 +897,22 @@ func printView(w io.Writer, view exposure.View) {
 		if item.DesiredMode != "" && item.DesiredMode != item.Mode {
 			detail = appendDetail(detail, "desired="+string(item.DesiredMode))
 		}
+		if item.Recommendation != "" {
+			detail = appendDetail(detail, "next="+item.Recommendation)
+		}
 		if item.Listener != nil {
 			route := "disabled"
 			own := "-"
-			if len(item.Routes) > 0 {
+			if len(item.Routes) > 1 {
+				route, own = "multiple", "multiple"
+			} else if len(item.Routes) == 1 {
 				route = string(item.Routes[0].Mode)
-				own = string(item.Routes[0].Ownership)
+				own = valueOr(string(item.Routes[0].Ownership), "unknown")
 			}
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", valueOr(item.Listener.Name, item.Listener.Target.String()), route, item.State, own, detail)
 		} else if len(item.Routes) > 0 {
 			r := item.Routes[0]
-			routeDetail := detail
-			if item.Recommendation != "" {
-				routeDetail = item.Recommendation
-				if detail != "" {
-					routeDetail = appendDetail(routeDetail, detail)
-				}
-			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", r.Target.String(), r.Mode, item.State, r.Ownership, routeDetail)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", r.Target.String(), r.Mode, item.State, r.Ownership, detail)
 		}
 	}
 }
@@ -702,6 +926,15 @@ func printReadiness(w io.Writer, r readinessmodel.Readiness) {
 	}
 	for _, m := range r.Modes {
 		fmt.Fprintf(w, "%s: %s (probe=%t, remote=%s)\n", m.Mode, m.Status, m.Probe, m.Remote)
+		if m.HTTPPathStatus != "" {
+			fmt.Fprintf(w, "  HTTPS paths: %s\n", m.HTTPPathStatus)
+			if m.HTTPPathStatus != readinessmodel.ReadinessReady && m.HTTPPathMessage != "" {
+				fmt.Fprintf(w, "  HTTP path reason: %s\n", m.HTTPPathMessage)
+				if m.HTTPPathRemediation != "" {
+					fmt.Fprintf(w, "  HTTP path next: %s\n", m.HTTPPathRemediation)
+				}
+			}
+		}
 	}
 }
 func valueOr(a, b string) string {

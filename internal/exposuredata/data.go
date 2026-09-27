@@ -14,6 +14,7 @@ const (
 	ExposureDisabled ExposureMode = "disabled"
 	ExposureServe    ExposureMode = "serve"
 	ExposureFunnel   ExposureMode = "funnel"
+	ExposureMultiple ExposureMode = "multiple" // Aggregate display state; never valid for a mutation.
 )
 
 func (m ExposureMode) Valid() bool {
@@ -26,6 +27,19 @@ const (
 	OwnershipManaged  Ownership = "managed"
 	OwnershipExternal Ownership = "external"
 	OwnershipUnknown  Ownership = "unknown"
+)
+
+type RouteKind string
+
+const (
+	RouteKindRawTCP    RouteKind = "raw_tcp"
+	RouteKindHTTPPath  RouteKind = "http_path"
+	RouteKindHTTPSRoot RouteKind = "https_root"
+)
+
+const (
+	NumericIPv6HTTPSBackendRecommendation = "If Tailscale returns `unknown proxy destination`, first disable this exact handler, then recreate it with `--localhost-backend` or toggle `Ctrl+B` in the `p` dialog; hostname resolution weakens exact IPv6 address guarantees."
+	LocalhostHTTPSBackendRecommendation   = "This route explicitly uses `http://localhost:<port>`; hostname resolution weakens the exact IPv6 address guarantee."
 )
 
 type ExposureState string
@@ -47,6 +61,7 @@ const (
 type ExposureRoute struct {
 	ID             string           `json:"id"`
 	ProviderKey    string           `json:"provider_key,omitempty"`
+	Kind           RouteKind        `json:"kind,omitempty"`
 	Service        string           `json:"service,omitempty"`
 	Path           string           `json:"path,omitempty"`
 	Target         target.Target    `json:"target"`

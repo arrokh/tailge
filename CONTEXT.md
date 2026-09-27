@@ -41,7 +41,7 @@ _Avoid_: hidden background mutation, transient-only result
 _Avoid_: Enter-to-mutate
 
 **Open route**:
-`o` opens an explicitly observed HTTP/HTTPS exposure URL in the default browser. A route with a `tcp=` selector may still carry an explicitly observed browser URL from provider status; `o` opens it when present. For a Serve TCP route without a URL, an explicit `o` action may resolve the provider-reported Tailscale DNS name and exact listener port and use an HTTP browser preview by default; this is UI-only and is not route identity or mutation evidence. Funnel TCP without a URL remains TCP-only. `O` opens the selected current listener through `http://localhost:<port>/`; it requires a current listener and never infers a remote exposure URL for mutation. `y` copies an explicitly observed browser URL through the terminal's OSC 52 clipboard transport; for a Serve TCP route without one, it resolves and copies the same provider-DNS HTTP preview used by `o`. This reaches the local terminal client over SSH/Mosh rather than only the host OS clipboard. Funnel TCP without an observed URL remains not copyable.
+`o` opens an explicitly observed HTTP/HTTPS exposure URL in the default browser. When several named HTTP paths are observed for one listener, `o` and `y` first ask the operator to select one exact route URL. A route with a `tcp=` selector may still carry an explicitly observed browser URL from provider status; `o` opens it when present. For a Serve TCP route without a URL, an explicit `o` action may resolve the provider-reported Tailscale DNS name and exact listener port and use an HTTP browser preview by default; this is UI-only and is not route identity or mutation evidence. Funnel TCP without a URL remains TCP-only. `O` opens the selected current listener through `http://localhost:<port>/`; it requires a current listener and never infers a remote exposure URL for mutation. `y` copies an explicitly observed browser URL through the terminal's OSC 52 clipboard transport; for a Serve TCP route without one, it resolves and copies the same provider-DNS HTTP preview used by `o`. This reaches the local terminal client over SSH/Mosh rather than only the host OS clipboard. Funnel TCP without an observed URL remains not copyable.
 The bottom status marks `o` as `TCP-only` when the selected route is raw Funnel TCP without an observed browser URL or Serve preview resolver. The table's `SELECT` column shows `[ ]`, `[✓]`, or `[V]` for unselected, normal-selected, and active visual-range rows. Service List items sharing a port collapse into one display row; exposure actions use the available local port as the primary target. The bottom bar explicitly shows whether `o`, `O`, and `y` are `ok`, `off`, `TCP-only`, or `URL-only` for the current selection; color is supplementary.
 _Avoid_: inferred URL, application launch
 
@@ -50,9 +50,21 @@ _Avoid_: inferred URL, application launch
 _Avoid_: implicit process control, PID-only retargeting, SIGKILL escalation
 
 **Serve/Funnel route identity**:
-Tailscale can report one underlying endpoint in both Serve and Funnel status JSON. `AllowFunnel: true` is the evidence that the endpoint is public; absent or false means the route is private Serve. The same hostname/URL is therefore not evidence of two active routes or two access scopes. Exact identity also retains the provider listener selector, service, handler path, backend, target, mode, and observed URL so replacement, removal, ownership, and rollback cannot silently change the route.
+Tailscale can report one underlying endpoint in both Serve and Funnel status JSON. `AllowFunnel: true` is the evidence that the endpoint is public; absent or false means the route is private Serve. The same hostname/URL is therefore not evidence of two active routes or two access scopes. Exact identity also retains the provider listener selector, service, handler path, backend, target, mode, and observed URL so replacement, removal, ownership, and rollback cannot silently change the route. Multiple handlers can share one provider selector; the handler path and complete route identity, not just that selector, distinguish the route to disable. IPv6 numeric backends remain exact unless the operator explicitly selects `--localhost-backend` for a named path or explicit HTTPS root; that opt-in uses hostname resolution and weakens the exact-address guarantee.
 A provider status containing only `AllowFunnel` permissions and no handler is an authoritative empty route set: Funnel permission may remain enabled after its handler is removed. It is not an active exposure and must not force the workspace into `UNKNOWN`.
 _Avoid_: treating identical status payloads as duplicate active Serve and Funnel routes
+
+**Named HTTP path route**:
+An explicit exposure route that uses Tailscale's HTTPS reverse proxy on standard port 443 to forward one named, single-segment path to the selected local HTTP listener. The path prefix is stripped before forwarding, so the application remains unchanged and handles requests as if mounted at `/`. Tailge does not infer HTTP from TCP discovery, does not expose the backend port in the browser URL, and does not create a root/default service. A manual lowercase slug or generated normalized process-name-plus-port slug is persisted in provider route state. IPv6 numeric backends remain the default; `--localhost-backend` or `Ctrl+B` in the `p` dialog explicitly opts into `http://localhost:<port>` when Tailscale rejects a numeric IPv6 proxy destination, with a weaker address-family guarantee. `p` creates the route; `o` only opens a provider-observed URL and never mutates exposure.
+_Avoid_: implicit HTTP detection, an implicit root handler, silent hostname substitution, or treating provider configuration as application health
+
+**Explicit HTTPS root handler**:
+An operator-selected `/` handler on an explicit HTTPS port, configured with `exposure http serve TARGET --root --https-port PORT`. It is private Serve-only; custom-port Funnel roots are not supported. Numeric IPv6 backend identity is preserved by default. `--localhost-backend` explicitly opts into hostname resolution when numeric IPv6 proxying fails, accepting weaker address-family guarantees.
+_Avoid_: assuming a listener speaks HTTP, inferring the HTTPS port from a local listener, or silently substituting `localhost`
+
+**Shared HTTPS access scope**:
+All HTTP handlers on one Tailscale hostname and HTTPS port, including an explicit root handler, share the endpoint's Serve/Funnel visibility. Serve remains private to authenticated tailnet access; Funnel makes every handler on that shared endpoint public. Tailge rejects a mixed private/public handler request and requires explicit Funnel confirmation that calls out the sibling-handler consequence.
+_Avoid_: per-path privacy claims on one shared endpoint
 
 **Compatibility probe**:
 A doctor operation that uses one disposable loopback listener to verify the installed provider's exact mutation and cleanup behavior. It must validate authoritative local and provider state, acquire the shared mutation lock, clean up the exact observed route even after uncertain command completion, verify removal, and persist version evidence only after cleanup succeeds.
@@ -63,7 +75,7 @@ The single navigable list groups items visually into local listeners, inactive c
 _Avoid_: hidden route tabs, separate list modes
 
 **Workspace chrome**:
-Persistent top and bottom status areas keep identity, source freshness, readiness, focus, search, operation state, warnings, and available keys visible while the user navigates.
+Persistent top and bottom status areas keep identity, source freshness, Serve/Funnel and HTTPS-path readiness, focus, search, operation state, warnings, and available keys visible while the user navigates. The `p` named-HTTP-path shortcut indicates whether an exact HTTPS path mode is currently ready. In its IPv6 path dialog, `Ctrl+B` toggles the explicit localhost backend alias and the confirmation preview calls out the weakened address guarantee; `o` stays an open-only shortcut.
 _Avoid_: hidden readiness, stderr-only warnings
 
 **Sticky feedback**:
@@ -83,8 +95,8 @@ All exposure changes use focused Confirm/Cancel controls with Cancel selected by
 _Avoid_: default-confirm, accidental Enter
 
 **Exact route choice**:
-When one target has multiple observed routes, Disable opens a route picker and removes only the selected provider route. Noninteractive callers use `--mode serve|funnel`; omission remains fail-closed.
-_Avoid_: silently disabling every route, target-only ambiguity
+When one listener has multiple complete, distinct, active route identities, its aggregate state remains active and its mode is shown as multiple; multiplicity alone is not ambiguity. A broad mode change stays unavailable, while Disable opens a route picker and removes only the selected exact provider route. Routes sharing one HTTPS endpoint selector are distinguished by path and complete identity. Incomplete or duplicated route identity, or one route matching multiple local listeners, remains ambiguous and fails closed. Noninteractive raw-TCP callers use `--mode serve|funnel`; named HTTP path callers select an exact `--path`, while explicit root-route callers select `--root --https-port PORT`.
+_Avoid_: marking known distinct routes ambiguous, silently disabling every route, target-only route choice
 
 **Deterministic replacement rollback**:
 A replacement may proceed only when the observed provider selector can be carried through an exact rollback if the new route fails; service-style selectors remain unchanged rather than being guessed.

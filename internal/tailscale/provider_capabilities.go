@@ -21,6 +21,8 @@ type Capabilities struct {
 	FunnelTCP    bool
 	FunnelLegacy bool
 	Service      bool
+	ServePath    bool
+	FunnelPath   bool
 	Version      string
 }
 
@@ -61,6 +63,7 @@ func (a *Adapter) Capabilities(ctx context.Context) (Capabilities, error) {
 	serveLower, funnelLower := strings.ToLower(serve), strings.ToLower(funnel)
 	serveClear := hasSubcommand(serveLower, "clear")
 	serviceFlag := hasValueFlag(serveLower, "--service") || strings.Contains(serveLower, "--service=")
+	servePath := hasValueFlag(serveLower, "--set-path") || strings.Contains(serveLower, "--set-path=")
 	serveHTTPS := strings.Contains(serveLower, "--https")
 	serveTCP := strings.Contains(serveLower, "--tcp")
 	serveExactOff := exactFlagOff(serveLower)
@@ -68,6 +71,7 @@ func (a *Adapter) Capabilities(ctx context.Context) (Capabilities, error) {
 	funnelLegacy := strings.Contains(funnelLower, "{on|off}") || strings.Contains(funnelLower, "{on,off}")
 	funnelHTTPS := strings.Contains(funnelLower, "--https")
 	funnelTCP := strings.Contains(funnelLower, "--tcp")
+	funnelPath := hasValueFlag(funnelLower, "--set-path") || strings.Contains(funnelLower, "--set-path=")
 	// The v2 Funnel CLI accepts `tailscale funnel --https=<port> off`
 	// (and the equivalent --tcp form), but its --help output omits the
 	// positional `off` syntax. Recognize the typed value form; Set and Remove
@@ -86,6 +90,8 @@ func (a *Adapter) Capabilities(ctx context.Context) (Capabilities, error) {
 		FunnelTCP:    funnelTCP,
 		FunnelLegacy: funnelLegacy,
 		Service:      serviceFlag,
+		ServePath:    servePath,
+		FunnelPath:   funnelPath,
 		Version:      version,
 	}, nil
 }
@@ -187,6 +193,7 @@ func (a *Adapter) Readiness(ctx context.Context, options ReadinessOptions) (read
 			modeReady.Probe = true
 			modeReady.Checks = append(modeReady.Checks, readinessmodel.ReadinessCheck{Name: string(mode) + " compatibility probe", Status: readinessmodel.ReadinessReady, Message: "set, verify, and cleanup evidence matches this adapter version", CheckedAt: now})
 		}
+		modeReady.HTTPPathStatus, modeReady.HTTPPathMessage, modeReady.HTTPPathRemediation = httpPathReadiness(mode, caps, modeReady)
 		report.Modes = append(report.Modes, modeReady)
 	}
 	report.Status = aggregateReadiness(report.Modes, report.Checks)
@@ -196,10 +203,33 @@ func (a *Adapter) Readiness(ctx context.Context, options ReadinessOptions) (read
 	return report, nil
 }
 
+func httpPathReadiness(mode exposuredata.ExposureMode, caps Capabilities, modeReadiness readinessmodel.ModeReadiness) (readinessmodel.ReadinessStatus, string, string) {
+	if mode == exposuredata.ExposureServe && (!caps.ServeHTTPS || !caps.ServePath) {
+		return readinessmodel.ReadinessReadOnly, "the installed Tailscale CLI does not expose exact Serve HTTPS and --set-path handlers", "Use a Tailscale version with HTTPS and --set-path support."
+	}
+	if mode == exposuredata.ExposureFunnel && (!caps.FunnelHTTPS || !caps.FunnelPath || caps.FunnelLegacy) {
+		return readinessmodel.ReadinessReadOnly, "the installed Tailscale CLI does not expose exact Funnel HTTPS and --set-path handlers", "Use a Tailscale version with exact HTTPS and --set-path support."
+	}
+	if modeReadiness.Status != readinessmodel.ReadinessReady {
+		message, remediation := string(mode)+" readiness is "+string(modeReadiness.Status), "Complete the reported readiness checks before adding an HTTP path."
+		for _, check := range modeReadiness.Checks {
+			if check.Status != readinessmodel.ReadinessReady {
+				message = check.Message
+				if check.Remediation != "" {
+					remediation = check.Remediation
+				}
+				break
+			}
+		}
+		return modeReadiness.Status, message, remediation
+	}
+	return readinessmodel.ReadinessReady, "exact HTTPS path configuration is available; provider configuration will be verified after mutation", ""
+}
+
 func modeFailures(status readinessmodel.ReadinessStatus, message, remediation string, now time.Time) []readinessmodel.ModeReadiness {
 	modes := make([]readinessmodel.ModeReadiness, 0, 2)
 	for _, mode := range []exposuredata.ExposureMode{exposuredata.ExposureServe, exposuredata.ExposureFunnel} {
-		modes = append(modes, readinessmodel.ModeReadiness{Mode: mode, Status: status, Remote: "not checked", Checks: []readinessmodel.ReadinessCheck{{Name: "node readiness", Status: status, Message: message, Remediation: remediation, CheckedAt: now}}})
+		modes = append(modes, readinessmodel.ModeReadiness{Mode: mode, Status: status, Remote: "not checked", HTTPPathStatus: status, HTTPPathMessage: message, HTTPPathRemediation: remediation, Checks: []readinessmodel.ReadinessCheck{{Name: "node readiness", Status: status, Message: message, Remediation: remediation, CheckedAt: now}}})
 	}
 	return modes
 }

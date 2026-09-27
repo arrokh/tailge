@@ -19,6 +19,7 @@ type batchOperation struct {
 	itemID          string
 	target          target.Target
 	providerKey     string
+	routeID         string
 	confirmExternal bool
 	approval        exposure.MutationApproval
 }
@@ -33,12 +34,21 @@ func newBatchContext(parent context.Context) batchContext {
 	return batchContext{Context: ctx, cancel: cancel}
 }
 
+func batchRouteSelection(mode exposuredata.ExposureMode, item exposure.ReconciledItem) (providerKey, routeID string) {
+	if mode != exposuredata.ExposureDisabled || len(item.Routes) != 1 {
+		return "", ""
+	}
+	route := item.Routes[0]
+	return route.ProviderKey, route.ID
+}
+
 func (m *workspaceModel) openAction(requested *exposuredata.ExposureMode) {
 	item, ok := m.actionAnchorItem()
 	if !ok {
 		m.setBanner("No service is selected", true)
 		return
 	}
+	m.discardHTTPPathAction()
 	m.modal = modalAction
 	target, _ := itemTarget(item)
 	mode := observedMode(item)
@@ -63,6 +73,14 @@ func (m *workspaceModel) refreshActionModal() {
 }
 
 func (m *workspaceModel) invalidatePreviewIfChanged() {
+	if m.modal == modalChooseURL {
+		item, ok := m.selectedItem()
+		if !ok || item.ID != m.urlItemID || routeFingerprint(item.Routes, nil) != m.urlRoutesFingerprint {
+			m.modal, m.urlAction, m.urlItemID, m.urlRoutesFingerprint = modalNone, "", "", ""
+			m.setBanner("Observed route URLs changed — select a fresh URL", true)
+		}
+		return
+	}
 	if m.modal == modalTerminateProcess {
 		item, ok := m.selectedItem()
 		if !ok || item.ID != m.modalItemID || item.Listener == nil || workspace.ProcessFingerprint(*item.Listener) != m.modalProcessFingerprint {
@@ -75,7 +93,7 @@ func (m *workspaceModel) invalidatePreviewIfChanged() {
 	// apply boundary rechecks refresh/readiness state and the preview before
 	// starting a mutation; closing confirmation here would turn a background
 	// refresh into an unsolicited operator action.
-	if m.modal != modalAction && m.modal != modalDisableRoute {
+	if m.modal != modalAction && m.modal != modalDisableRoute && m.modal != modalHTTPPath && !(m.httpPathAction && m.modal == modalConfirm) {
 		return
 	}
 	if !m.actionSession.previewChanged(
@@ -87,6 +105,7 @@ func (m *workspaceModel) invalidatePreviewIfChanged() {
 		return
 	}
 	m.modal = modalNone
+	m.discardHTTPPathAction()
 	m.setBanner("Selection changed — refresh required", true)
 }
 
@@ -114,8 +133,13 @@ func (m *workspaceModel) startOperation() tea.Cmd {
 	// refresh starts after confirmation opened, return to the selector and let
 	// the workspace update its supplied choices when fresh state arrives.
 	if m.refreshState.isPending() {
-		m.modal = modalAction
-		m.refreshActionModal()
+		if m.httpPathAction {
+			m.modal = modalHTTPPath
+			m.setBanner("HTTP path preview paused while refresh is in progress; review it again after refresh", true)
+		} else {
+			m.modal = modalAction
+			m.refreshActionModal()
+		}
 		return nil
 	}
 	// Re-evaluate the complete action guard at the mutation boundary. A
@@ -123,9 +147,24 @@ func (m *workspaceModel) startOperation() tea.Cmd {
 	// changing route or listener fingerprints; confirmation must never bypass
 	// that newer workspace-owned safety decision.
 	availability := m.actionAvailability(m.actionSession.mode)
+	if m.httpPathAction {
+		availability = workspace.ActionAvailability{}
+		item, ok := m.actionAnchorItem()
+		if !ok {
+			availability = workspace.ActionAvailability{Disabled: true, Reason: "No exact listener is selected"}
+		} else if reason := m.httpPathBaseReason(item); reason != "" {
+			availability = workspace.ActionAvailability{Disabled: true, Reason: reason}
+		} else if status, message, remediation := workspace.HTTPPathStatus(m.readiness, m.httpPathMode); status != "ready" {
+			availability = workspace.ActionAvailability{Disabled: true, Reason: httpPathReadinessReason(m.httpPathMode, status, message, remediation)}
+		}
+	}
 	if availability.Disabled {
-		m.modal = modalAction
-		m.refreshActionModal()
+		if m.httpPathAction {
+			m.modal = modalHTTPPath
+		} else {
+			m.modal = modalAction
+			m.refreshActionModal()
+		}
 		if !availability.Wait {
 			m.setBanner(availability.Reason, true)
 		}
@@ -142,7 +181,11 @@ func (m *workspaceModel) externalPreview() bool {
 	if !ok {
 		return false
 	}
-	return workspace.ExternalPreview(item, m.actionSession.routeKey)
+	routeKey := m.actionSession.routeID
+	if routeKey == "" {
+		routeKey = m.actionSession.routeKey
+	}
+	return workspace.ExternalPreview(item, routeKey)
 }
 
 func (m *workspaceModel) mutationApproval(item exposure.ReconciledItem, target target.Target) exposure.MutationApproval {
@@ -167,6 +210,10 @@ func (m *workspaceModel) mutationApproval(item exposure.ReconciledItem, target t
 func (m *workspaceModel) startSingleOperation() tea.Cmd {
 	item, ok := m.actionAnchorItem()
 	if !ok || item.ID != m.actionSession.itemID {
+		if m.httpPathAction {
+			m.modal = modalNone
+			m.discardHTTPPathAction()
+		}
 		m.setBanner("Selection changed — refresh required", true)
 		return nil
 	}
@@ -176,10 +223,39 @@ func (m *workspaceModel) startSingleOperation() tea.Cmd {
 		listenerFingerprint(m.view.Listeners, m.actionSession.target),
 		selectionFingerprint(m.actionItems()),
 	) {
+		if m.httpPathAction {
+			m.modal = modalNone
+			m.discardHTTPPathAction()
+		}
 		m.setBanner("Selection changed — refresh required", true)
 		return nil
 	}
 	key := m.actionSession.target.Key()
+	if m.httpPathAction {
+		if len(m.actionItems()) != 1 || m.httpPath == "" {
+			m.modal = modalHTTPPath
+			m.setBanner("Named HTTP path preview is incomplete; enter a path and confirm again", true)
+			return nil
+		}
+		if _, busy := m.activeOps[key]; busy {
+			m.setBanner("This target already has an operation Applying", true)
+			return nil
+		}
+		ctx, cancel := context.WithCancel(m.ctx)
+		m.activeOps[key] = cancel
+		m.markApplying(key)
+		target := m.actionSession.target
+		path, mode := m.httpPath, m.httpPathMode
+		options := exposure.HTTPPathOptions{LocalhostBackendAlias: m.httpPathLocalhostBackend}
+		controller, timeout := m.controller, m.cfg.OperationTimeout
+		approval := m.mutationApproval(item, target)
+		m.discardHTTPPathAction()
+		m.transient = "Applying HTTP path " + path + " to " + target.String()
+		return func() tea.Msg {
+			receipt, err := controller.ApplyHTTPPathWithOptionsApproved(ctx, target, path, mode, mode == exposuredata.ExposureFunnel, options, timeout, approval)
+			return operationDoneMsg{targetKey: key, receipt: receipt, err: err}
+		}
+	}
 	if _, busy := m.activeOps[key]; busy {
 		m.setBanner("This target already has an operation Applying", true)
 		return nil
@@ -192,13 +268,16 @@ func (m *workspaceModel) startSingleOperation() tea.Cmd {
 	m.transient = "Applying " + string(mode) + " to " + m.actionSession.target.String()
 	target := m.actionSession.target
 	routeKey := m.actionSession.routeKey
+	routeID := m.actionSession.routeID
 	controller := m.controller
 	timeout := m.cfg.OperationTimeout
 	approval := m.mutationApproval(item, target)
 	return func() tea.Msg {
 		var receipt exposuredata.OperationReceipt
 		var err error
-		if mode == exposuredata.ExposureDisabled && routeKey != "" {
+		if mode == exposuredata.ExposureDisabled && routeID != "" {
+			receipt, err = controller.ApplyRouteIdentityApproved(ctx, target, routeID, confirmExternal, timeout, approval)
+		} else if mode == exposuredata.ExposureDisabled && routeKey != "" {
 			receipt, err = controller.ApplyRouteApproved(ctx, target, routeKey, confirmExternal, timeout, approval)
 		} else {
 			receipt, err = controller.ApplyApproved(ctx, target, mode, confirmFunnel, confirmExternal, timeout, approval)
@@ -237,13 +316,14 @@ func (m *workspaceModel) startBatchOperation() tea.Cmd {
 		if workspace.SameStateForItem(m.view, item, m.actionSession.mode) {
 			continue
 		}
-		providerKey := ""
-		if m.actionSession.mode == exposuredata.ExposureDisabled && len(item.Routes) == 1 {
-			providerKey = item.Routes[0].ProviderKey
-		}
+		providerKey, routeID := batchRouteSelection(m.actionSession.mode, item)
 		approval := m.mutationApproval(item, target)
 		approval.AllowOtherRouteChanges = true
-		requests = append(requests, batchOperation{itemID: item.ID, target: target, providerKey: providerKey, confirmExternal: workspace.ExternalPreview(item, providerKey), approval: approval})
+		routeChoice := routeID
+		if routeChoice == "" {
+			routeChoice = providerKey
+		}
+		requests = append(requests, batchOperation{itemID: item.ID, target: target, providerKey: providerKey, routeID: routeID, confirmExternal: workspace.ExternalPreview(item, routeChoice), approval: approval})
 	}
 	if len(requests) == 0 {
 		m.modal = modalNone
@@ -269,7 +349,9 @@ func (m *workspaceModel) startBatchOperation() tea.Cmd {
 		cmds = append(cmds, func() tea.Msg {
 			var receipt exposuredata.OperationReceipt
 			var err error
-			if mode == exposuredata.ExposureDisabled && request.providerKey != "" {
+			if mode == exposuredata.ExposureDisabled && request.routeID != "" {
+				receipt, err = controller.ApplyRouteIdentityApproved(batchCtx, request.target, request.routeID, request.confirmExternal, timeout, request.approval)
+			} else if mode == exposuredata.ExposureDisabled && request.providerKey != "" {
 				receipt, err = controller.ApplyRouteApproved(batchCtx, request.target, request.providerKey, request.confirmExternal, timeout, request.approval)
 			} else {
 				receipt, err = controller.ApplyApproved(batchCtx, request.target, mode, confirmFunnel, request.confirmExternal, timeout, request.approval)

@@ -72,6 +72,8 @@ func (m *workspaceModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.openAction(ptrMode(exposuredata.ExposureFunnel))
 	case "d":
 		m.openAction(ptrMode(exposuredata.ExposureDisabled))
+	case "p":
+		m.openHTTPPathInput()
 	case "v":
 		m.toggleCurrentSelection()
 	case "V":
@@ -253,6 +255,38 @@ func (m *workspaceModel) updateModal(msg tea.KeyMsg, key string) (tea.Model, tea
 		}
 		m.helpOffset = clamp(m.helpOffset, 0, m.helpMaxOffset())
 		return m, nil
+	case modalHTTPPath:
+		if key == "ctrl+b" {
+			item, ok := m.actionAnchorItem()
+			if ok && item.Listener != nil && supportsLocalhostBackendAlias(item.Listener.Target) {
+				m.httpPathLocalhostBackend = !m.httpPathLocalhostBackend
+			} else {
+				m.setBanner("localhost backend alias is only available for IPv6 listeners", true)
+			}
+			return m, nil
+		}
+		if key == "esc" {
+			m.modal = modalNone
+			m.discardHTTPPathAction()
+			return m, nil
+		}
+		if key == "tab" || key == "shift+tab" {
+			if m.httpPathMode == exposuredata.ExposureServe {
+				m.httpPathMode = exposuredata.ExposureFunnel
+			} else {
+				m.httpPathMode = exposuredata.ExposureServe
+			}
+			return m, nil
+		}
+		if key == "enter" {
+			m.submitHTTPPath()
+			return m, nil
+		}
+		updated, cmd := m.pathInput.Update(msg)
+		m.pathInput = updated
+		return m, cmd
+	case modalChooseURL:
+		return m.updateURLChoiceModal(msg, key)
 	case modalPalette:
 		if key == "esc" {
 			m.modal = modalNone
@@ -356,6 +390,7 @@ func (m *workspaceModel) updateActionModal(_ tea.KeyMsg, key string) (tea.Model,
 		}
 		if len(items[0].Routes) == 1 {
 			m.actionSession.routeKey = items[0].Routes[0].ProviderKey
+			m.actionSession.routeID = items[0].Routes[0].ID
 		}
 	}
 	return m.beginConfirmation(mode)
@@ -389,6 +424,7 @@ func (m *workspaceModel) updateDisableRouteModal(_ tea.KeyMsg, key string) (tea.
 		return m, nil
 	}
 	m.actionSession.routeKey = route.ProviderKey
+	m.actionSession.routeID = route.ID
 	return m.beginConfirmation(exposuredata.ExposureDisabled)
 }
 
@@ -402,6 +438,9 @@ func (m *workspaceModel) beginConfirmation(mode exposuredata.ExposureMode) (tea.
 func (m *workspaceModel) updateConfirmModal(_ tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 	if key == "esc" {
 		m.modal = modalNone
+		if m.httpPathAction {
+			m.discardHTTPPathAction()
+		}
 		return m, nil
 	}
 	if key == "tab" || key == "shift+tab" || key == "left" || key == "right" {
@@ -411,6 +450,9 @@ func (m *workspaceModel) updateConfirmModal(_ tea.KeyMsg, key string) (tea.Model
 	if key == "enter" {
 		if !m.actionSession.confirm {
 			m.modal = modalNone
+			if m.httpPathAction {
+				m.discardHTTPPathAction()
+			}
 			m.transient = "Cancelled; no changes made"
 			return m, nil
 		}
