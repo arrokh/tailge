@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arrokh/tailge/internal/buildinfo"
 	"github.com/arrokh/tailge/internal/config"
 	"github.com/arrokh/tailge/internal/discovery"
 	"github.com/arrokh/tailge/internal/exposure"
@@ -98,6 +99,25 @@ func customHTTPSRootTestAdapter(active *bool, calls *[]string) *tailscale.Adapte
 			return runner.Result{}, errors.New("unexpected command: " + command)
 		}
 	})}
+}
+
+func TestVersionReportsBuildCommitAndRepository(t *testing.T) {
+	originalCommit := buildinfo.Commit
+	buildinfo.Commit = "3d16efbb9058b146749de0d81aa7dd5eede3e9da"
+	t.Cleanup(func() { buildinfo.Commit = originalCommit })
+
+	want := "tailge 3d16efbb9058  https://github.com/arrokh/tailge\n"
+	for _, command := range []string{"version", "--version"} {
+		t.Run(command, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := (app{}).run([]string{command}, nil, &stdout, &stderr); code != 0 {
+				t.Fatalf("version exit code=%d, stderr=%q", code, stderr.String())
+			}
+			if stdout.String() != want {
+				t.Fatalf("version output=%q, want %q", stdout.String(), want)
+			}
+		})
+	}
 }
 
 func TestHumanStatusShowsEveryHTTPSPathAndCapabilityReason(t *testing.T) {

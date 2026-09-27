@@ -7,11 +7,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/arrokh/tailge/internal/buildinfo"
 	"github.com/arrokh/tailge/internal/exposure"
 	"github.com/arrokh/tailge/internal/exposuredata"
 	readinessmodel "github.com/arrokh/tailge/internal/readiness"
 	"github.com/arrokh/tailge/internal/workspace"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func (m *workspaceModel) View() string {
@@ -127,6 +129,45 @@ func (m *workspaceModel) renderTop() string {
 	return strings.Join(lines, "\n")
 }
 
+const (
+	repositoryURL            = buildinfo.RepositoryURL
+	repositoryLabel          = "github.com/arrokh/tailge"
+	compactRepositoryLabel   = "GitHub"
+	footerMinimumStatusWidth = 18
+)
+
+func footerBuildIdentity(width int, status, theme string) (plain, linked string) {
+	commit := sanitizeTUIText(buildinfo.ShortCommit())
+	label := compactRepositoryLabel
+	full := commit + " " + repositoryLabel
+	fullStatusWidth := width - lipgloss.Width(full) - 2
+	if fullStatusWidth >= footerMinimumStatusWidth && fullStatusWidth >= lipgloss.Width(status) {
+		label = repositoryLabel
+	} else if width-lipgloss.Width(commit+" "+label)-2 < footerMinimumStatusWidth {
+		if runes := []rune(commit); len(runes) > 7 {
+			commit = string(runes[:7])
+		}
+	}
+	plain = commit + " " + label
+	linked = paint(theme, "1;36", commit) + " " + ansi.SetHyperlink(repositoryURL) + paint(theme, "4;34", label) + ansi.ResetHyperlink()
+	return plain, linked
+}
+
+func compactFooterStatus(focus, pathStatus, progress string) string {
+	switch {
+	case strings.HasPrefix(progress, "↻ Refreshing"):
+		return "Refreshing"
+	case strings.Contains(progress, "Applying"):
+		return "Applying"
+	case strings.Contains(progress, "Terminating process"):
+		return "Terminating"
+	case progress != "":
+		return progress
+	default:
+		return focus + " " + strings.Replace(pathStatus, "p HTTP path", "p", 1)
+	}
+}
+
 func (m *workspaceModel) renderBottom() string {
 	focus := "List"
 	if m.focus == focusDetails {
@@ -164,7 +205,15 @@ func (m *workspaceModel) renderBottom() string {
 	} else {
 		keys = "j/k or ↑/↓ navigate  v toggle  V visual  U clear selection  p HTTP path  Tab/h/l focus  " + keys + "  ? help  : palette  q quit"
 	}
-	return truncate(fmt.Sprintf("Focus: %s  %s%s%s  %s", focus, m.httpPathStatusLabel(), search, selection, progress), m.width) + "\n" + truncate(keys, m.width)
+	status := fmt.Sprintf("Focus: %s  %s%s%s  %s", focus, m.httpPathStatusLabel(), search, selection, progress)
+	identityText, identityLink := footerBuildIdentity(m.width, status, m.cfg.ColorTheme)
+	statusWidth := maxInt(0, m.width-lipgloss.Width(identityText)-2)
+	if m.width < 60 && lipgloss.Width(status) > statusWidth {
+		status = compactFooterStatus(focus, m.httpPathStatusLabel(), progress)
+	}
+	status = ansi.Truncate(status, statusWidth, "...")
+	padding := strings.Repeat(" ", maxInt(0, statusWidth-lipgloss.Width(status)))
+	return status + padding + "  " + identityLink + "\n" + truncate(keys, m.width)
 }
 
 func (m *workspaceModel) renderList(width, height int) string {

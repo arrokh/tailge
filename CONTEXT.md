@@ -75,7 +75,7 @@ The single navigable list groups items visually into local listeners, inactive c
 _Avoid_: hidden route tabs, separate list modes
 
 **Workspace chrome**:
-Persistent top and bottom status areas keep identity, source freshness, Serve/Funnel and HTTPS-path readiness, focus, search, operation state, warnings, and available keys visible while the user navigates. The `p` named-HTTP-path shortcut indicates whether an exact HTTPS path mode is currently ready. In its IPv6 path dialog, `Ctrl+B` toggles the explicit localhost backend alias and the confirmation preview calls out the weakened address guarantee; `o` stays an open-only shortcut.
+Persistent top and bottom status areas keep identity, source freshness, Serve/Funnel and HTTPS-path readiness, focus, search, operation state, warnings, and available keys visible while the user navigates. The bottom bar also displays the running build's short SHA for checked-out `HEAD` and a link to the Tailge repository. At constrained widths the link label compacts to `GitHub` and the status line prioritizes active progress or focus/path status. The `p` named-HTTP-path shortcut indicates whether an exact HTTPS path mode is currently ready. In its IPv6 path dialog, `Ctrl+B` toggles the explicit localhost backend alias and the confirmation preview calls out the weakened address guarantee; `o` stays an open-only shortcut.
 _Avoid_: hidden readiness, stderr-only warnings
 
 **Sticky feedback**:
