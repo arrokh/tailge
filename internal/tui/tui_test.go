@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +57,19 @@ func TestServiceListDeduplicatesItemsByPort(t *testing.T) {
 	}
 	if items[0].State == exposuredata.ExposureAmbiguous || len(items[0].Routes) != 2 {
 		t.Fatalf("collapsed item was incorrectly marked ambiguous or lost routes: %#v", items[0])
+	}
+}
+
+func TestPortCollapseRetainsPathHandlersSharingProviderSelector(t *testing.T) {
+	m := workspaceFixture()
+	first := exposuredata.ExposureRoute{ID: "api-route", ProviderKey: "serve:https=443", Kind: exposuredata.RouteKindHTTPPath, Path: "/api", Target: m.view.Items[0].Listener.Target, Mode: exposuredata.ExposureServe}
+	second := first
+	second.ID, second.Path, second.URL = "docs-route", "/docs", "https://dev.example.ts.net/docs"
+	m.view.Items[0].Routes = []exposuredata.ExposureRoute{first}
+	m.view.Items = append(m.view.Items, exposure.ReconciledItem{ID: "docs-route-item", Routes: []exposuredata.ExposureRoute{second}, State: exposuredata.ExposureInactive, Mode: exposuredata.ExposureServe})
+	items := m.items()
+	if len(items) != 1 || len(items[0].Routes) != 2 || items[0].Routes[0].Path == items[0].Routes[1].Path {
+		t.Fatalf("same-selector HTTPS path handlers were collapsed as duplicate routes: %#v", items)
 	}
 }
 
@@ -274,15 +289,82 @@ func workspaceFixture() *workspaceModel {
 				Exposures: exposuredata.ExposureSnapshot{At: now, Authoritative: true, Routes: []exposuredata.ExposureRoute{route}},
 				Items:     []exposure.ReconciledItem{{ID: listener.ID, Listener: &listener, Routes: []exposuredata.ExposureRoute{route}, State: exposuredata.ExposureActive, Mode: exposuredata.ExposureServe}},
 			},
-			readiness: readiness.Readiness{At: now, Status: readiness.ReadinessReady, Modes: []readiness.ModeReadiness{{Mode: exposuredata.ExposureServe, Status: readiness.ReadinessReady}, {Mode: exposuredata.ExposureFunnel, Status: readiness.ReadinessReady}}},
+			readiness: readiness.Readiness{At: now, Status: readiness.ReadinessReady, Modes: []readiness.ModeReadiness{{Mode: exposuredata.ExposureServe, Status: readiness.ReadinessReady, HTTPPathStatus: readiness.ReadinessReady}, {Mode: exposuredata.ExposureFunnel, Status: readiness.ReadinessReady, HTTPPathStatus: readiness.ReadinessReady}}},
 			hasView:   true, hasReadiness: true, refreshState: refreshCoordinator{seq: 1, viewDone: true, readinessDone: true},
 			focus: focusList, width: 120, height: 30,
 			activeOps: map[string]context.CancelFunc{},
 		},
 		ctx:         context.Background(),
 		controller:  exposure.NewController(nil, nil),
-		searchInput: newInput("/ "), paletteInput: newInput(": "),
+		searchInput: newInput("/ "), paletteInput: newInput(": "), pathInput: newInput("Path slug: "),
 	}
+}
+
+type pathRouteTestListener struct{ snapshot discovery.ListenerSnapshot }
+
+func (observer *pathRouteTestListener) List(context.Context) (discovery.ListenerSnapshot, error) {
+	return observer.snapshot, nil
+}
+
+type pathRouteTestProvider struct {
+	snapshot  exposuredata.ExposureSnapshot
+	caps      tailscale.Capabilities
+	readiness readiness.Readiness
+	sets      []tailscale.ExposureChange
+	removes   []tailscale.RouteSelector
+}
+
+func (provider *pathRouteTestProvider) Capabilities(context.Context) (tailscale.Capabilities, error) {
+	return provider.caps, nil
+}
+
+func (provider *pathRouteTestProvider) Readiness(context.Context, tailscale.ReadinessOptions) (readiness.Readiness, error) {
+	return provider.readiness, nil
+}
+
+func (provider *pathRouteTestProvider) List(context.Context) (exposuredata.ExposureSnapshot, error) {
+	copySnapshot := provider.snapshot
+	copySnapshot.Routes = append([]exposuredata.ExposureRoute(nil), provider.snapshot.Routes...)
+	return copySnapshot, nil
+}
+
+func (provider *pathRouteTestProvider) Set(_ context.Context, change tailscale.ExposureChange) (exposuredata.OperationReceipt, error) {
+	provider.sets = append(provider.sets, change)
+	routeTarget := change.Target.Normalized()
+	if parsed, err := targetmodel.ParseTarget(change.Backend, "tcp"); err == nil {
+		routeTarget = parsed
+	}
+	route := exposuredata.ExposureRoute{
+		ID:          targetmodel.StableID(string(change.Mode), change.Target.Key(), change.ProviderKey, change.Path),
+		ProviderKey: change.ProviderKey, Kind: exposuredata.RouteKindHTTPPath,
+		Path: change.Path, Backend: change.Backend, Target: routeTarget,
+		Mode: change.Mode, URL: "https://dev.example.ts.net" + change.Path,
+		Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive,
+	}
+	provider.snapshot.Routes = append(provider.snapshot.Routes, route)
+	return exposuredata.OperationReceipt{ID: route.ID}, nil
+}
+
+func (provider *pathRouteTestProvider) Remove(_ context.Context, selector tailscale.RouteSelector, _ string) (exposuredata.OperationReceipt, error) {
+	provider.removes = append(provider.removes, selector)
+	for index, route := range provider.snapshot.Routes {
+		if route.ProviderKey == selector.ID && route.Path == selector.Path && route.Backend == selector.Backend {
+			provider.snapshot.Routes = append(provider.snapshot.Routes[:index], provider.snapshot.Routes[index+1:]...)
+			break
+		}
+	}
+	return exposuredata.OperationReceipt{ID: "remove-" + selector.ID}, nil
+}
+
+func pathRouteCapabilities() tailscale.Capabilities {
+	return tailscale.Capabilities{Serve: true, Funnel: true, ExactServe: true, ExactFunnel: true, ServeHTTPS: true, FunnelHTTPS: true, ServePath: true, FunnelPath: true}
+}
+
+func pathRouteReadiness() readiness.Readiness {
+	return readiness.Readiness{Status: readiness.ReadinessReady, Modes: []readiness.ModeReadiness{
+		{Mode: exposuredata.ExposureServe, Status: readiness.ReadinessReady, HTTPPathStatus: readiness.ReadinessReady},
+		{Mode: exposuredata.ExposureFunnel, Status: readiness.ReadinessReady, HTTPPathStatus: readiness.ReadinessReady},
+	}}
 }
 
 func keyRune(r rune) tea.KeyMsg           { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}} }
@@ -324,6 +406,9 @@ func TestWrapTextLinesRespectsViewportWidth(t *testing.T) {
 
 func TestDetailsGroupsRoutesAndStatusBadges(t *testing.T) {
 	m := workspaceFixture()
+	numericIPv6Path := exposuredata.ExposureRoute{ID: "path-app", ProviderKey: "serve:https=443", Kind: exposuredata.RouteKindHTTPPath, Path: "/blog", Target: targetmodel.Target{Address: "::1", Port: 4321, Protocol: "tcp"}, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipManaged, State: exposuredata.ExposureActive}
+	m.view.Items[0].Routes[0] = numericIPv6Path
+	m.view.Items[0].Recommendation = exposuredata.NumericIPv6HTTPSBackendRecommendation
 	funnel := exposuredata.ExposureRoute{ID: "funnel-app", ProviderKey: "funnel:https=3000", Target: m.view.Items[0].Routes[0].Target, Mode: exposuredata.ExposureFunnel, Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive}
 	m.view.Exposures.Routes = append(m.view.Exposures.Routes, funnel)
 	m.view.Items[0].Routes = append(m.view.Items[0].Routes, funnel)
@@ -331,7 +416,7 @@ func TestDetailsGroupsRoutesAndStatusBadges(t *testing.T) {
 	m.view.Items[0].Warning = "multiple exposure routes match this listener"
 	m.readiness.Modes[1].Status = readiness.ReadinessReadOnly
 	view := m.renderDetails(120, 100)
-	for _, want := range []string{"[! AMBIG]", "── ALERTS ──", "── EXPOSURE ROUTES (2) ──", "[MANAGED]", "[UNKNOWN]", "[! READ-ONLY]"} {
+	for _, want := range []string{"[! AMBIG]", "── ALERTS ──", "── EXPOSURE ROUTES (2) ──", "[MANAGED]", "[UNKNOWN]", "── ACTION ITEMS ──", "unknown proxy destination", "--localhost-backend", "[! READ-ONLY]"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("details missing %q: %s", want, view)
 		}
@@ -376,7 +461,7 @@ func TestHelpDocumentsShortcutGroups(t *testing.T) {
 	help := strings.Join(helpLines(), "\n")
 	for _, text := range []string{
 		"WORKSPACE / NAVIGATION", "SEARCH / FILTER", "ACTION PREVIEW", "CONFIRMATION / APPLYING", "COMMAND PALETTE", "HELP", "SAFETY / STATE",
-		"C or Ctrl-l", "U                    clear all selected items", "s                    preview private Serve", "f                    preview public Funnel", "d                    preview Disable", "Ctrl-d/Page Down", "Ctrl-u/Page Up", "Home/End", "Funnel               remains public",
+		"C or Ctrl-l", "U                    clear all selected items", "s                    preview private Serve", "f                    preview public Funnel", "d                    preview Disable", "p                    add one named HTTP path", "choose among paths", "Ctrl-d/Page Down", "Ctrl-u/Page Up", "Home/End", "Funnel               remains public",
 	} {
 		if !strings.Contains(help, text) {
 			t.Fatalf("help missing %q:\n%s", text, help)
@@ -532,6 +617,24 @@ func TestWorkspacePreservesStableSelectionAcrossRefresh(t *testing.T) {
 	m.Update(viewLoadedMsg{seq: m.refreshState.sequence(), view: view})
 	if m.selectedID != "listener-two" {
 		t.Fatalf("selection was not preserved: %q", m.selectedID)
+	}
+}
+
+func TestWorkspaceRefreshClearsStaleUnavailableURLBannerWhenObservedURLAppears(t *testing.T) {
+	m := workspaceFixture()
+	m.banner, m.bannerSticky = unavailableOpenURLBanner+" | existing warning", true
+	m.view.Items[0].Routes[0].URL = ""
+	m.view.Exposures.Routes[0].URL = ""
+	m.startRefresh()
+	refreshed := m.view
+	refreshed.Items = append([]exposure.ReconciledItem(nil), refreshed.Items...)
+	refreshed.Items[0].Routes = append([]exposuredata.ExposureRoute(nil), refreshed.Items[0].Routes...)
+	refreshed.Items[0].Routes[0].URL = "https://dev.example.ts.net/node-4321"
+	refreshed.Exposures.Routes = append([]exposuredata.ExposureRoute(nil), refreshed.Exposures.Routes...)
+	refreshed.Exposures.Routes[0].URL = "https://dev.example.ts.net/node-4321"
+	m.Update(viewLoadedMsg{seq: m.refreshState.sequence(), view: refreshed})
+	if m.banner != "existing warning" || !m.bannerSticky {
+		t.Fatalf("recovery did not clear only the stale URL notice: banner=%q sticky=%t", m.banner, m.bannerSticky)
 	}
 }
 
@@ -755,8 +858,7 @@ func TestWorkspaceDisableChoosesOneExactRoute(t *testing.T) {
 	funnel := exposuredata.ExposureRoute{ID: "funnel-app", ProviderKey: "funnel:https=3000", Target: m.view.Items[0].Routes[0].Target, Mode: exposuredata.ExposureFunnel, Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive}
 	m.view.Exposures.Routes = append(m.view.Exposures.Routes, funnel)
 	m.view.Items[0].Routes = append(m.view.Items[0].Routes, funnel)
-	m.view.Items[0].State = exposuredata.ExposureAmbiguous
-	m.view.Items[0].Warning = "multiple exposure routes match this listener; choose an exact route before changing it"
+	m.view.Items[0].State = exposuredata.ExposureActive
 	if view := m.View(); !strings.Contains(view, "mode: multiple (choose exact route)") {
 		t.Fatalf("ambiguous route state was presented as a single mode: %q", view)
 	}
@@ -767,11 +869,319 @@ func TestWorkspaceDisableChoosesOneExactRoute(t *testing.T) {
 	}
 	m.Update(keyType(tea.KeyDown))
 	m.Update(keyType(tea.KeyEnter))
-	if m.modal != modalConfirm || m.actionSession.routeKey != "funnel:https=3000" || m.actionSession.confirm {
+	if m.modal != modalConfirm || m.actionSession.routeKey != "funnel:https=3000" || m.actionSession.routeID != funnel.ID || m.actionSession.confirm {
 		t.Fatalf("selected route was not carried into focused confirmation: modal=%v route=%q focus=%t", m.modal, m.actionSession.routeKey, m.actionSession.confirm)
 	}
 	if view := m.View(); !strings.Contains(view, "funnel:https=3000") || !strings.Contains(view, "external/unknown") {
 		t.Fatalf("confirmation did not show selected route and ownership warning: %q", view)
+	}
+}
+
+func TestWorkspaceKnownMultipleRoutesShowsActiveAndUsesExactRouteChooser(t *testing.T) {
+	m := workspaceFixture()
+	listener := *m.view.Items[0].Listener
+	listener.Target = targetmodel.Target{Address: "::1", Port: 4321, Protocol: "tcp"}.Normalized()
+	backendTarget := targetmodel.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
+	listeners := discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{listener}}
+	routes := exposuredata.ExposureSnapshot{Authoritative: true, Routes: []exposuredata.ExposureRoute{
+		{ID: "root-route", ProviderKey: "serve:https=4321", Kind: exposuredata.RouteKindHTTPSRoot, Path: "/", Backend: "http://localhost:4321", Target: backendTarget, Mode: exposuredata.ExposureServe, State: exposuredata.ExposureActive},
+		{ID: "blog-route", ProviderKey: "serve:https=443", Kind: exposuredata.RouteKindHTTPPath, Path: "/blog", Backend: "http://localhost:4321", Target: backendTarget, Mode: exposuredata.ExposureServe, State: exposuredata.ExposureActive},
+	}}
+	m.view = exposure.Reconcile(listeners, routes, nil)
+
+	view := m.View()
+	if !strings.Contains(view, "[● ACTIVE]") || strings.Contains(view, "[! AMBIG]") || !strings.Contains(view, "mode: multiple (choose exact route)") {
+		t.Fatalf("known exact routes were not presented as active/multiple: %q", view)
+	}
+	if strings.Contains(view, "multiple exposure routes match this listener") {
+		t.Fatalf("known exact routes still raised the ambiguous-state alert: %q", view)
+	}
+
+	m.Update(keyRune('d'))
+	m.Update(keyType(tea.KeyEnter))
+	if m.modal != modalDisableRoute || m.disableRouteIndex != 0 {
+		t.Fatalf("active multiple routes did not open exact-route chooser: modal=%v index=%d", m.modal, m.disableRouteIndex)
+	}
+	m.Update(keyType(tea.KeyEnter))
+	if m.modal != modalConfirm || m.actionSession.routeID != "root-route" || m.actionSession.routeKey != "serve:https=4321" {
+		t.Fatalf("exact root identity was not carried into confirmation: modal=%v route=%q selector=%q", m.modal, m.actionSession.routeID, m.actionSession.routeKey)
+	}
+}
+
+func TestWorkspaceDisableDistinguishesHandlersSharingOneSelector(t *testing.T) {
+	m := workspaceFixture()
+	first := exposuredata.ExposureRoute{ID: "api-docs", ProviderKey: "serve:https=443", Kind: exposuredata.RouteKindHTTPPath, Path: "/docs", URL: "https://dev.example.ts.net/docs", Target: m.view.Items[0].Listener.Target, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipManaged, State: exposuredata.ExposureActive}
+	second := first
+	second.ID, second.Path, second.URL = "api-app", "/api", "https://dev.example.ts.net/api"
+	m.view.Items[0].Routes = []exposuredata.ExposureRoute{first, second}
+	m.view.Exposures.Routes = []exposuredata.ExposureRoute{first, second}
+	m.view.Items[0].State = exposuredata.ExposureActive
+	m.Update(keyRune('d'))
+	m.Update(keyType(tea.KeyEnter))
+	m.Update(keyType(tea.KeyDown))
+	m.Update(keyType(tea.KeyEnter))
+	if m.modal != modalConfirm || m.actionSession.routeKey != first.ProviderKey || m.actionSession.routeID != second.ID {
+		t.Fatalf("exact selected path was lost behind shared selector: modal=%v selector=%q routeID=%q", m.modal, m.actionSession.routeKey, m.actionSession.routeID)
+	}
+	if view := m.View(); !strings.Contains(view, "Current path: /api") || !strings.Contains(view, "https://dev.example.ts.net/api") {
+		t.Fatalf("route confirmation omitted the selected path identity: %q", view)
+	}
+}
+
+func TestWorkspaceAmbiguousDuplicateRoutesCannotOpenDisableChooser(t *testing.T) {
+	m := workspaceFixture()
+	first := exposuredata.ExposureRoute{ID: "route-one", ProviderKey: "serve:https=443", Kind: exposuredata.RouteKindHTTPPath, Path: "/api", Backend: "http://127.0.0.1:4321", Target: m.view.Items[0].Listener.Target, Mode: exposuredata.ExposureServe, State: exposuredata.ExposureActive}
+	second := first
+	second.ID, second.Backend = "route-two", "http://localhost:4321"
+	m.view.Items[0].Routes = []exposuredata.ExposureRoute{first, second}
+	m.view.Exposures.Routes = []exposuredata.ExposureRoute{first, second}
+	m.view.Items[0].State = exposuredata.ExposureAmbiguous
+	m.Update(keyRune('d'))
+	m.Update(keyType(tea.KeyEnter))
+	if m.modal == modalDisableRoute || m.modal == modalConfirm || !strings.Contains(m.banner, "not authoritative or exact") {
+		t.Fatalf("ambiguous exact-selector collision reached route removal: modal=%v banner=%q", m.modal, m.banner)
+	}
+}
+
+func TestHTTPPathConflictAllowsOnlyExactSameRouteIdentity(t *testing.T) {
+	target := targetmodel.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}.Normalized()
+	route := exposuredata.ExposureRoute{ID: "api", ProviderKey: "serve:https=443", Kind: exposuredata.RouteKindHTTPPath, Path: "/api", Backend: "http://127.0.0.1:3000", Target: target, Mode: exposuredata.ExposureServe, State: exposuredata.ExposureActive}
+	if reason := httpPathRouteConflict([]exposuredata.ExposureRoute{route}, "/api", exposuredata.ExposureServe, target, false); reason != "" {
+		t.Fatalf("exact same route was treated as collision: %s", reason)
+	}
+	otherTarget := targetmodel.Target{Address: "127.0.0.1", Port: 3001, Protocol: "tcp"}.Normalized()
+	if reason := httpPathRouteConflict([]exposuredata.ExposureRoute{route}, "/api", exposuredata.ExposureServe, otherTarget, false); reason == "" || !strings.Contains(reason, "disable the exact handler") {
+		t.Fatalf("same path on a different backend did not explain exact replacement: %q", reason)
+	}
+}
+
+func TestWorkspaceNamedHTTPPathPreviewsAndAppliesThroughSharedController(t *testing.T) {
+	m := workspaceFixture()
+	listener := *m.view.Items[0].Listener
+	listener.Target = targetmodel.Target{Address: "::1", Port: 3000, Protocol: "tcp"}.Normalized()
+	m.view.Listeners.Listeners = []discovery.Listener{listener}
+	m.view.Items[0].Listener = &listener
+	m.view.Items[0].State = exposuredata.ExposureState("disabled")
+	m.view.Items[0].Mode = exposuredata.ExposureDisabled
+	m.view.Items[0].Routes = nil
+	sibling := exposuredata.ExposureRoute{ID: "sibling-docs", ProviderKey: "serve:https=443", Kind: exposuredata.RouteKindHTTPPath, Path: "/docs", Backend: "http://127.0.0.1:3001", Target: targetmodel.Target{Address: "127.0.0.1", Port: 3001, Protocol: "tcp"}, Mode: exposuredata.ExposureServe, URL: "https://dev.example.ts.net/docs", Ownership: exposuredata.OwnershipManaged, State: exposuredata.ExposureActive}
+	m.view.Exposures.Routes = []exposuredata.ExposureRoute{sibling}
+	m.controller = exposure.NewController(&pathRouteTestListener{snapshot: m.view.Listeners}, &pathRouteTestProvider{snapshot: m.view.Exposures, caps: pathRouteCapabilities(), readiness: pathRouteReadiness()})
+	m.pathInput = newInput("Path slug: ")
+	m.Update(keyRune('p'))
+	if m.modal != modalHTTPPath || !m.httpPathAction {
+		t.Fatalf("p did not open named path input: modal=%v pathAction=%t", m.modal, m.httpPathAction)
+	}
+	m.pathInput.SetValue("api-v2")
+	m.Update(keyType(tea.KeyEnter))
+	if m.modal != modalConfirm || m.httpPath != "/api-v2" {
+		t.Fatalf("named path did not produce a confirmation preview: modal=%v path=%q", m.modal, m.httpPath)
+	}
+	preview := m.View()
+	for _, want := range []string{"Named HTTP path: /api-v2", "Provider endpoint: standard HTTPS port 443", "http://[::1]:3000", "Serve remains private"} {
+		if !strings.Contains(preview, want) {
+			t.Fatalf("confirmation preview missing %q: %s", want, preview)
+		}
+	}
+	m.Update(keyType(tea.KeyTab))
+	_, cmd := m.Update(keyType(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("confirmed named path did not invoke the shared exposure controller")
+	}
+	result, ok := cmd().(operationDoneMsg)
+	if !ok || result.err != nil || !result.receipt.Verified {
+		t.Fatalf("shared path operation was not verified: message=%#v", result)
+	}
+	provider := m.controller.Provider.(*pathRouteTestProvider)
+	if len(provider.snapshot.Routes) != 2 || provider.snapshot.Routes[0].ID != sibling.ID || provider.snapshot.Routes[1].Path != "/api-v2" || provider.snapshot.Routes[1].Backend != "http://[::1]:3000" {
+		t.Fatalf("path apply replaced its sibling or retargeted IPv6: %#v", provider.snapshot.Routes)
+	}
+}
+
+func TestWorkspaceHTTPPathConfirmationReturnsToInputDuringRefresh(t *testing.T) {
+	m := workspaceFixture()
+	m.view.Exposures.Routes = nil
+	m.view.Items[0].Routes = nil
+	m.view.Items[0].State = exposuredata.ExposureState("disabled")
+	m.view.Items[0].Mode = exposuredata.ExposureDisabled
+	m.pathInput = newInput("Path slug: ")
+	m.Update(keyRune('p'))
+	m.pathInput.SetValue("api")
+	m.Update(keyType(tea.KeyEnter))
+	if m.modal != modalConfirm || !m.httpPathAction {
+		t.Fatalf("named path did not reach confirmation: modal=%v pathAction=%t", m.modal, m.httpPathAction)
+	}
+	m.Update(keyType(tea.KeyTab))
+	m.refreshState.pending = true
+	m.Update(keyType(tea.KeyEnter))
+	if m.modal != modalHTTPPath || !m.httpPathAction || m.httpPath != "/api" {
+		t.Fatalf("refresh changed path confirmation into a raw exposure action: modal=%v pathAction=%t path=%q", m.modal, m.httpPathAction, m.httpPath)
+	}
+	if !strings.Contains(m.banner, "refresh is in progress") {
+		t.Fatalf("paused path preview did not explain the refresh: %q", m.banner)
+	}
+}
+
+func TestInvalidatedHTTPPathPreviewClearsMutationIntent(t *testing.T) {
+	m := workspaceFixture()
+	m.view.Exposures.Routes = nil
+	m.view.Items[0].Routes = nil
+	m.view.Items[0].State = exposuredata.ExposureState("disabled")
+	m.view.Items[0].Mode = exposuredata.ExposureDisabled
+	m.pathInput = newInput("Path slug: ")
+	m.Update(keyRune('p'))
+	m.pathInput.SetValue("api")
+	m.Update(keyType(tea.KeyEnter))
+	if m.modal != modalConfirm || !m.httpPathAction {
+		t.Fatalf("named path did not reach confirmation: modal=%v pathAction=%t", m.modal, m.httpPathAction)
+	}
+	m.view.Listeners.Listeners[0].ID = "renamed-listener"
+	m.invalidatePreviewIfChanged()
+	if m.modal != modalNone || m.httpPathAction || m.httpPath != "" || m.httpPathLocalhostBackend {
+		t.Fatalf("stale named path intent survived invalidation: modal=%v action=%t path=%q alias=%t", m.modal, m.httpPathAction, m.httpPath, m.httpPathLocalhostBackend)
+	}
+	m.Update(keyRune('s'))
+	if m.modal != modalAction || m.httpPathAction {
+		t.Fatalf("next raw action inherited stale named path intent: modal=%v pathAction=%t", m.modal, m.httpPathAction)
+	}
+}
+
+func TestWorkspaceNamedHTTPPathAllowsExplicitLocalhostBackendForIPv6(t *testing.T) {
+	m := workspaceFixture()
+	listener := *m.view.Items[0].Listener
+	listener.Target = targetmodel.Target{Address: "::1", Port: 3000, Protocol: "tcp"}.Normalized()
+	m.view.Listeners.Listeners = []discovery.Listener{listener}
+	m.view.Items[0].Listener = &listener
+	m.view.Items[0].State = exposuredata.ExposureState("disabled")
+	m.view.Items[0].Mode = exposuredata.ExposureDisabled
+	m.view.Items[0].Routes = nil
+	m.view.Exposures.Routes = nil
+	provider := &pathRouteTestProvider{snapshot: m.view.Exposures, caps: pathRouteCapabilities(), readiness: pathRouteReadiness()}
+	m.controller = exposure.NewController(&pathRouteTestListener{snapshot: m.view.Listeners}, provider)
+	m.Update(keyRune('p'))
+	m.Update(keyType(tea.KeyCtrlB))
+	m.pathInput.SetValue("api")
+	m.Update(keyType(tea.KeyEnter))
+	preview := m.View()
+	for _, want := range []string{"Named HTTP path: /api", "Local HTTP backend: http://localhost:3000", "hostname resolution", "weakened"} {
+		if !strings.Contains(preview, want) {
+			t.Fatalf("explicit localhost alias preview omitted %q: %s", want, preview)
+		}
+	}
+	m.Update(keyType(tea.KeyTab))
+	_, command := m.Update(keyType(tea.KeyEnter))
+	if command == nil {
+		t.Fatal("confirmed IPv6 named path did not start its operation")
+	}
+	result := command()
+	if _, ok := result.(operationDoneMsg); !ok {
+		t.Fatalf("named path operation returned unexpected result: %#v", result)
+	}
+	if len(provider.sets) != 1 || provider.sets[0].Backend != "http://localhost:3000" {
+		t.Fatalf("TUI did not pass explicit localhost backend to the controller: %#v", provider.sets)
+	}
+	m.view.Items[0].Routes = append([]exposuredata.ExposureRoute(nil), provider.snapshot.Routes...)
+	capture := installTestBrowserLauncher(t)
+	_, openCommand := m.Update(keyRune('o'))
+	if openCommand == nil {
+		t.Fatalf("o did not open the observed HTTPS URL after p configured it: banner=%q", m.banner)
+	}
+	message, ok := openCommand().(statusMsg)
+	if !ok || message.value != "Opened observed URL" {
+		t.Fatalf("o returned an unexpected browser result: %#v", message)
+	}
+	opened, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(opened) != "https://dev.example.ts.net/api" || len(provider.sets) != 1 || len(provider.removes) != 0 {
+		t.Fatalf("p→o flow did not open the observed route without another mutation: url=%q sets=%#v removes=%#v", opened, provider.sets, provider.removes)
+	}
+}
+
+func TestOperationFailureBannerIncludesBackendRemediation(t *testing.T) {
+	m := workspaceFixture()
+	remediation := "Refresh provider status; disable the exact path and retry with --localhost-backend. Hostname resolution weakens the IPv6 address guarantee."
+	err := fault.NewError(fault.ErrOperation, "tailscale", "unknown proxy destination", false, "failed", remediation)
+	targetKey := m.view.Items[0].Listener.Target.Normalized().Key()
+	m.Update(operationDoneMsg{targetKey: targetKey, err: err})
+	if !strings.Contains(m.banner, "unknown proxy destination") || !strings.Contains(m.banner, "Next: "+remediation) {
+		t.Fatalf("operation failure banner hid its backend remediation: %q", m.banner)
+	}
+}
+
+func TestWorkspaceNamedHTTPPathFunnelWarnsAboutSharedEndpoint(t *testing.T) {
+	m := workspaceFixture()
+	m.view.Exposures.Routes = []exposuredata.ExposureRoute{}
+	m.view.Items[0].Routes = nil
+	m.view.Items[0].State = exposuredata.ExposureState("disabled")
+	m.view.Items[0].Mode = exposuredata.ExposureDisabled
+	m.pathInput = newInput("Path slug: ")
+	m.Update(keyRune('p'))
+	m.Update(keyType(tea.KeyTab))
+	m.pathInput.SetValue("public-site")
+	m.Update(keyType(tea.KeyEnter))
+	if m.modal != modalConfirm || m.actionSession.mode != exposuredata.ExposureFunnel || m.actionSession.confirm {
+		t.Fatalf("Funnel preview did not require explicit focus: modal=%v mode=%s confirm=%t", m.modal, m.actionSession.mode, m.actionSession.confirm)
+	}
+	if view := m.View(); !strings.Contains(view, "Funnel makes EVERY path on this shared HTTPS endpoint public") {
+		t.Fatalf("shared endpoint public consequence was omitted: %q", view)
+	}
+}
+
+func TestWorkspaceHTTPPathShortcutRejectsAmbiguousRouteIdentity(t *testing.T) {
+	m := workspaceFixture()
+	first := exposuredata.ExposureRoute{ID: "route-one", ProviderKey: "serve:https=443", Kind: exposuredata.RouteKindHTTPPath, Path: "/api", Backend: "http://127.0.0.1:4321", Target: m.view.Items[0].Listener.Target, Mode: exposuredata.ExposureServe, State: exposuredata.ExposureActive}
+	second := first
+	second.ID, second.Backend = "route-two", "http://localhost:4321"
+	m.view.Items[0].Routes = []exposuredata.ExposureRoute{first, second}
+	m.view.Exposures.Routes = []exposuredata.ExposureRoute{first, second}
+	m.view.Items[0].State = exposuredata.ExposureAmbiguous
+	if m.httpPathShortcutAvailable(m.view.Items[0]) {
+		t.Fatal("p was shown as available for an ambiguous route identity")
+	}
+	m.Update(keyRune('p'))
+	if m.modal != modalNone || !strings.Contains(m.banner, "route identity is ambiguous") {
+		t.Fatalf("ambiguous route set reached the HTTP path preview: modal=%v banner=%q", m.modal, m.banner)
+	}
+}
+
+func TestWorkspaceHTTPPathShortcutShowsUnsupportedProviderReason(t *testing.T) {
+	m := workspaceFixture()
+	m.readiness.Modes[0].HTTPPathStatus = readiness.ReadinessReadOnly
+	m.readiness.Modes[0].HTTPPathMessage = "--set-path is unavailable"
+	m.readiness.Modes[0].HTTPPathRemediation = "Upgrade Tailscale"
+	m.readiness.Modes[1].HTTPPathStatus = readiness.ReadinessReadOnly
+	if !strings.Contains(m.renderBottom(), "p HTTP path[off]") {
+		t.Fatalf("unavailable path capability was not shown in shortcut status: %q", m.renderBottom())
+	}
+	m.Update(keyRune('p'))
+	m.pathInput.SetValue("api")
+	m.Update(keyType(tea.KeyEnter))
+	if m.modal != modalHTTPPath || !strings.Contains(m.banner, "--set-path is unavailable") || !strings.Contains(m.banner, "Upgrade Tailscale") {
+		t.Fatalf("unsupported provider reason was hidden: modal=%v banner=%q", m.modal, m.banner)
+	}
+}
+
+func TestWorkspaceObservedURLPickerChoosesOneExactPathForCopy(t *testing.T) {
+	m := workspaceFixture()
+	first := exposuredata.ExposureRoute{ID: "api", Kind: exposuredata.RouteKindHTTPPath, Path: "/api", URL: "https://dev.example.ts.net/api"}
+	second := exposuredata.ExposureRoute{ID: "docs", Kind: exposuredata.RouteKindHTTPPath, Path: "/docs", URL: "https://dev.example.ts.net/docs"}
+	m.view.Items[0].Routes = []exposuredata.ExposureRoute{first, second}
+	var copied string
+	m.clipboard = ClipboardFunc(func(_ context.Context, value string) error { copied = value; return nil })
+	m.Update(keyRune('y'))
+	if m.modal != modalChooseURL || !strings.Contains(m.View(), "https://dev.example.ts.net/api") || !strings.Contains(m.View(), "https://dev.example.ts.net/docs") {
+		t.Fatalf("multiple observed URLs were not presented for exact selection: modal=%v view=%q", m.modal, m.View())
+	}
+	m.Update(keyType(tea.KeyDown))
+	_, cmd := m.Update(keyType(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("URL picker did not start the selected copy action")
+	}
+	cmd()
+	if copied != "https://dev.example.ts.net/docs" {
+		t.Fatalf("copy action selected %q, want second exact path URL", copied)
 	}
 }
 
@@ -788,6 +1198,29 @@ func TestWorkspaceDisableUnknownRouteUsesFocusedConfirmWithoutYES(t *testing.T) 
 	m.Update(keyType(tea.KeyEnter))
 	if m.modal != modalNone || len(m.activeOps) != 1 {
 		t.Fatalf("focused disable confirmation did not start: modal=%v ops=%d", m.modal, len(m.activeOps))
+	}
+}
+
+func TestWorkspaceObservedURLPickerClosesWhenRouteIdentityChanges(t *testing.T) {
+	m := workspaceFixture()
+	m.selectedID = m.view.Items[0].ID
+	m.view.Items[0].Routes = []exposuredata.ExposureRoute{
+		{ID: "api", Kind: exposuredata.RouteKindHTTPPath, Path: "/api", URL: "https://dev.example.ts.net/api"},
+		{ID: "docs", Kind: exposuredata.RouteKindHTTPPath, Path: "/docs", URL: "https://dev.example.ts.net/docs"},
+	}
+	var copied string
+	m.clipboard = ClipboardFunc(func(_ context.Context, value string) error { copied = value; return nil })
+	m.Update(keyRune('y'))
+	if m.modal != modalChooseURL {
+		t.Fatalf("URL picker did not open: modal=%v", m.modal)
+	}
+	m.view.Items[0].Routes[1].URL = "https://dev.example.ts.net/reference"
+	m.invalidatePreviewIfChanged()
+	if m.modal != modalNone || !strings.Contains(m.banner, "Observed route URLs changed") {
+		t.Fatalf("stale URL selection remained actionable: modal=%v banner=%q", m.modal, m.banner)
+	}
+	if copied != "" {
+		t.Fatalf("stale URL was copied after identity changed: %q", copied)
 	}
 }
 
@@ -839,6 +1272,81 @@ func TestCopyURLResolvesServeTCPPreview(t *testing.T) {
 	status, ok := message.(statusMsg)
 	if !ok || !strings.Contains(status.value, "URL copied to clipboard") || copied != "http://dev.tailnet.ts.net:4321/" {
 		t.Fatalf("Serve TCP copy result=%#v copied=%q", message, copied)
+	}
+}
+
+func installTestBrowserLauncher(t *testing.T) string {
+	t.Helper()
+	directory := t.TempDir()
+	capture := filepath.Join(directory, "opened-url")
+	t.Setenv("TAILGE_OPEN_URL_CAPTURE", capture)
+	script := []byte(`#!/bin/sh
+printf '%s' "$1" > "$TAILGE_OPEN_URL_CAPTURE"
+`)
+	for _, name := range []string{"open", "xdg-open"} {
+		if err := os.WriteFile(filepath.Join(directory, name), script, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", directory)
+	if browserCommand() == "" {
+		t.Skip("browser launcher unsupported on this platform")
+	}
+	return capture
+}
+
+func TestOpenShortcutLaunchesObservedHTTPSPathWithoutCreatingRoutes(t *testing.T) {
+	capture := installTestBrowserLauncher(t)
+	m := workspaceFixture()
+	url := "https://dev.example.ts.net/tailge-probe"
+	route := exposuredata.ExposureRoute{ID: "observed-path", ProviderKey: "serve:https=443", Kind: exposuredata.RouteKindHTTPPath, Path: "/tailge-probe", URL: url, Target: m.view.Items[0].Listener.Target, Mode: exposuredata.ExposureServe}
+	m.view.Items[0].Routes = []exposuredata.ExposureRoute{route}
+	command := m.openSelectedURL()
+	if command == nil {
+		t.Fatalf("o did not launch the observed HTTPS URL: banner=%q", m.banner)
+	}
+	message, ok := command().(statusMsg)
+	if !ok || message.value != "Opened observed URL" {
+		t.Fatalf("observed HTTPS URL launch failed: %#v", message)
+	}
+	opened, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(opened) != url {
+		t.Fatalf("o opened %q instead of the exact observed route URL %q", opened, url)
+	}
+}
+
+func TestOpenShortcutExplainsPathSetupWithoutCreatingRoutes(t *testing.T) {
+	m := workspaceFixture()
+	m.view.Items[0].Routes = nil
+	m.view.Exposures.Routes = nil
+	if command := m.openSelectedURL(); command != nil {
+		t.Fatal("o unexpectedly created or opened a route without an observed URL")
+	}
+	if !strings.Contains(m.banner, "o only opens observed URLs") || !strings.Contains(m.banner, "p to configure") {
+		t.Fatalf("missing observed URL feedback did not explain the open-only contract and setup action: %q", m.banner)
+	}
+	m.banner = ""
+	if command := m.copyURL(); command != nil {
+		t.Fatal("y unexpectedly copied a URL without an observed route")
+	}
+	if !strings.Contains(m.banner, "y only copies observed URLs") || !strings.Contains(m.banner, "p to configure") {
+		t.Fatalf("missing observed URL feedback did not explain the copy-only contract and setup action: %q", m.banner)
+	}
+}
+
+func TestOpenSelectedObservedURLClearsStaleMissingURLBanner(t *testing.T) {
+	m := workspaceFixture()
+	m.view.Items[0].Routes[0].URL = "https://dev.example.ts.net/node-4321"
+	m.banner, m.bannerSticky = unavailableURLBanner, true
+	cmd := m.openSelectedURL()
+	if m.banner == unavailableURLBanner {
+		t.Fatalf("stale missing-URL banner remained after observed URL became available (cmd=%t)", cmd != nil)
+	}
+	if cmd == nil && !strings.Contains(m.banner, "Opening URLs is unsupported") {
+		t.Fatalf("observed URL was neither opened nor rejected with a browser capability reason: cmd=%t banner=%q", cmd != nil, m.banner)
 	}
 }
 
@@ -949,6 +1457,14 @@ func TestVisualSelectionMarkerUsesColorWithoutDependingOnIt(t *testing.T) {
 	row = listenerTableRow(item, 100, false, true, true, "dark")
 	if !strings.Contains(row, "[V]") || strings.Contains(row, "\x1b[") {
 		t.Fatalf("visual marker was not accessible without color: %q", row)
+	}
+}
+
+func TestBatchDisableSelectsHTTPRouteByIdentity(t *testing.T) {
+	item := exposure.ReconciledItem{Routes: []exposuredata.ExposureRoute{{ID: "api-route", ProviderKey: "serve:https=443", Kind: exposuredata.RouteKindHTTPPath, Path: "/api"}}}
+	providerKey, routeID := batchRouteSelection(exposuredata.ExposureDisabled, item)
+	if providerKey != "serve:https=443" || routeID != "api-route" {
+		t.Fatalf("batch disable did not retain exact HTTP route identity: key=%q id=%q", providerKey, routeID)
 	}
 }
 

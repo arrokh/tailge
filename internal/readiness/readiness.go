@@ -24,11 +24,14 @@ type ReadinessCheck struct {
 }
 
 type ModeReadiness struct {
-	Mode   exposuredata.ExposureMode `json:"mode"`
-	Status ReadinessStatus           `json:"status"`
-	Checks []ReadinessCheck          `json:"checks"`
-	Probe  bool                      `json:"probe_verified"`
-	Remote string                    `json:"remote_reachability"`
+	Mode                exposuredata.ExposureMode `json:"mode"`
+	Status              ReadinessStatus           `json:"status"`
+	Checks              []ReadinessCheck          `json:"checks"`
+	Probe               bool                      `json:"probe_verified"`
+	Remote              string                    `json:"remote_reachability"`
+	HTTPPathStatus      ReadinessStatus           `json:"http_path_status,omitempty"`
+	HTTPPathMessage     string                    `json:"http_path_message,omitempty"`
+	HTTPPathRemediation string                    `json:"http_path_remediation,omitempty"`
 }
 
 type Readiness struct {

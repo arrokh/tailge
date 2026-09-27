@@ -167,8 +167,13 @@ func (m *workspaceModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshActionModal()
 		if message.err != nil {
 			m.setBanner("Listener/exposure refresh: "+safeMessage(message.err), true)
-		} else if len(message.view.Warnings) > 0 {
-			m.appendBanner(strings.Join(message.view.Warnings, " | "), true)
+		} else {
+			if viewErr == nil && m.view.Listeners.Authoritative && !m.view.Listeners.Stale && m.view.Exposures.Authoritative && !m.view.Exposures.Stale {
+				m.clearStaleURLUnavailableBanner()
+			}
+			if len(message.view.Warnings) > 0 {
+				m.appendBanner(strings.Join(message.view.Warnings, " | "), true)
+			}
 		}
 		return m, m.finishRefreshPart(message.seq)
 	case readinessLoadedMsg:
@@ -223,7 +228,7 @@ func (m *workspaceModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.startRefresh()
 		}
 		if message.err != nil {
-			m.setBanner("Operation: "+safeMessage(message.err), true)
+			m.setBanner("Operation: "+safeOperationFailure(message.err), true)
 		} else {
 			m.transient = "Operation verified for " + message.targetKey
 		}

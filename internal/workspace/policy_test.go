@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -31,9 +32,46 @@ func authoritativeView(item exposure.ReconciledItem) exposure.View {
 
 func readyWorkspaceReadiness() readiness.Readiness {
 	return readiness.Readiness{Status: readiness.ReadinessReady, Modes: []readiness.ModeReadiness{
-		{Mode: exposuredata.ExposureServe, Status: readiness.ReadinessReady},
-		{Mode: exposuredata.ExposureFunnel, Status: readiness.ReadinessReady},
+		{Mode: exposuredata.ExposureServe, Status: readiness.ReadinessReady, HTTPPathStatus: readiness.ReadinessReady},
+		{Mode: exposuredata.ExposureFunnel, Status: readiness.ReadinessReady, HTTPPathStatus: readiness.ReadinessReady},
 	}}
+}
+
+func TestKnownMultipleRoutesBlockAggregateEnableButAllowExactDisable(t *testing.T) {
+	listenerTarget := target.Target{Address: "::1", Port: 4321, Protocol: "tcp"}.Normalized()
+	backendTarget := target.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
+	listener := discovery.Listener{ID: "listener", Target: listenerTarget, Name: "blog", Process: "node", PID: 4242, Scope: target.ScopeLoopback}
+	routes := exposuredata.ExposureSnapshot{Authoritative: true, Routes: []exposuredata.ExposureRoute{
+		{ID: "root-route", ProviderKey: "serve:https=4321", Kind: exposuredata.RouteKindHTTPSRoot, Path: "/", Backend: "http://localhost:4321", Target: backendTarget, Mode: exposuredata.ExposureServe, State: exposuredata.ExposureActive},
+		{ID: "blog-route", ProviderKey: "serve:https=443", Kind: exposuredata.RouteKindHTTPPath, Path: "/blog", Backend: "http://localhost:4321", Target: backendTarget, Mode: exposuredata.ExposureServe, State: exposuredata.ExposureActive},
+	}}
+	view := exposure.Reconcile(discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{listener}}, routes, nil)
+	item := view.Items[0]
+	context := ActionContext{View: view, Readiness: readyWorkspaceReadiness()}
+
+	enable := ActionAvailabilityForItems([]exposure.ReconciledItem{item}, exposuredata.ExposureServe, context)
+	if !enable.Disabled || !strings.Contains(enable.Reason, "multiple exact routes") || strings.Contains(enable.Reason, "ambiguous") {
+		t.Fatalf("aggregate enable did not explain exact multiple routes: %#v", enable)
+	}
+	disable := ActionAvailabilityForItems([]exposure.ReconciledItem{item}, exposuredata.ExposureDisabled, context)
+	if disable.Disabled {
+		t.Fatalf("exact disable route chooser was blocked: %#v", disable)
+	}
+}
+
+func TestAmbiguousRouteSetBlocksExactDisable(t *testing.T) {
+	item := workspaceItem()
+	first := item.Routes[0]
+	first.ProviderKey, first.Kind, first.Path, first.Backend = "serve:https=443", exposuredata.RouteKindHTTPPath, "/api", "http://127.0.0.1:3000"
+	second := first
+	second.ID, second.Backend = "duplicate-status-entry", "http://localhost:3000"
+	item.Routes = []exposuredata.ExposureRoute{first, second}
+	item.State = exposuredata.ExposureAmbiguous
+	view := authoritativeView(item)
+	got := ActionAvailabilityForItems([]exposure.ReconciledItem{item}, exposuredata.ExposureDisabled, ActionContext{View: view, Readiness: readyWorkspaceReadiness()})
+	if !got.Disabled || !strings.Contains(got.Reason, "not authoritative or exact") {
+		t.Fatalf("ambiguous duplicate selectors remained mutable: %#v", got)
+	}
 }
 
 func TestActionAvailabilityDistinguishesRefreshWaitFromStaleState(t *testing.T) {
@@ -51,6 +89,48 @@ func TestActionAvailabilityDistinguishesRefreshWaitFromStaleState(t *testing.T) 
 	got = ActionAvailabilityForItems([]exposure.ReconciledItem{item}, exposuredata.ExposureFunnel, context)
 	if got.Disabled {
 		t.Fatalf("ready item was blocked: %#v", got)
+	}
+}
+
+func TestDisableActionShowsHTTPPathReadinessReason(t *testing.T) {
+	item := workspaceItem()
+	item.Routes[0].ProviderKey = "serve:https=443"
+	item.Routes[0].Kind = exposuredata.RouteKindHTTPPath
+	item.Routes[0].Path = "/api"
+	item.Routes[0].Backend = "http://127.0.0.1:3000"
+	view := authoritativeView(item)
+	report := readyWorkspaceReadiness()
+	report.Modes[0].HTTPPathStatus = readiness.ReadinessReadOnly
+	report.Modes[0].HTTPPathMessage = "the installed Tailscale CLI lacks --set-path"
+	report.Modes[0].HTTPPathRemediation = "Upgrade Tailscale."
+	got := ActionAvailabilityForItems([]exposure.ReconciledItem{item}, exposuredata.ExposureDisabled, ActionContext{View: view, Readiness: report})
+	if !got.Disabled || !strings.Contains(got.Reason, "lacks --set-path") || !strings.Contains(got.Reason, "Upgrade Tailscale") {
+		t.Fatalf("HTTP path readiness reason missing from Disable: %#v", got)
+	}
+}
+
+func TestRawModeActionIsUnavailableForNamedHTTPPath(t *testing.T) {
+	item := workspaceItem()
+	item.Routes[0].ProviderKey = "serve:https=443"
+	item.Routes[0].Kind = exposuredata.RouteKindHTTPPath
+	item.Routes[0].Path = "/api"
+	item.Routes[0].Backend = "http://127.0.0.1:3000"
+	view := authoritativeView(item)
+	got := ActionAvailabilityForItems([]exposure.ReconciledItem{item}, exposuredata.ExposureFunnel, ActionContext{View: view, Readiness: readyWorkspaceReadiness()})
+	if !got.Disabled || !strings.Contains(got.Reason, "Explicit HTTPS handlers") {
+		t.Fatalf("raw mode action was not blocked for a named path: %#v", got)
+	}
+}
+
+func TestRawModeActionIsUnavailableForExplicitHTTPSRoot(t *testing.T) {
+	item := workspaceItem()
+	item.Routes[0].ProviderKey = "serve:https=4321"
+	item.Routes[0].Kind = exposuredata.RouteKindHTTPSRoot
+	item.Routes[0].Path = "/"
+	view := authoritativeView(item)
+	got := ActionAvailabilityForItems([]exposure.ReconciledItem{item}, exposuredata.ExposureFunnel, ActionContext{View: view, Readiness: readyWorkspaceReadiness()})
+	if !got.Disabled || !strings.Contains(got.Reason, "Explicit HTTPS handlers") {
+		t.Fatalf("raw mode action was not blocked for an explicit root handler: %#v", got)
 	}
 }
 

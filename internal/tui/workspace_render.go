@@ -158,13 +158,13 @@ func (m *workspaceModel) renderBottom() string {
 		selection = fmt.Sprintf("  selected:%d", count)
 	}
 	if m.focus == focusDetails {
-		keys += "  v toggle  V visual  U clear selection  s/f/d batch  Enter inspect  Esc cancel visual/list  C clear filter  c cancel  x terminate selected"
+		keys += "  v toggle  V visual  U clear selection  s/f/d batch  p HTTP path  Enter inspect  Esc cancel visual/list  C clear filter  c cancel  x terminate selected"
 	} else if m.query != "" {
-		keys = "j/k navigate  v toggle  V visual  U clear selection  C clear filter  / edit filter  Tab focus  " + keys + "  ? help  q quit"
+		keys = "j/k navigate  v toggle  V visual  U clear selection  p HTTP path  C clear filter  / edit filter  Tab focus  " + keys + "  ? help  q quit"
 	} else {
-		keys = "j/k or ↑/↓ navigate  v toggle  V visual  U clear selection  Tab/h/l focus  " + keys + "  ? help  : palette  q quit"
+		keys = "j/k or ↑/↓ navigate  v toggle  V visual  U clear selection  p HTTP path  Tab/h/l focus  " + keys + "  ? help  : palette  q quit"
 	}
-	return truncate(fmt.Sprintf("Focus: %s%s%s  %s", focus, search, selection, progress), m.width) + "\n" + truncate(keys, m.width)
+	return truncate(fmt.Sprintf("Focus: %s  %s%s%s  %s", focus, m.httpPathStatusLabel(), search, selection, progress), m.width) + "\n" + truncate(keys, m.width)
 }
 
 func (m *workspaceModel) renderList(width, height int) string {
@@ -495,6 +495,11 @@ func (m *workspaceModel) renderDetails(width, height int) string {
 		if route.ProviderKey != "" {
 			lines = append(lines, "     selector: "+route.ProviderKey)
 		}
+		if route.Kind == exposuredata.RouteKindHTTPPath {
+			lines = append(lines, "     kind: named HTTP path", "     mount path: "+valueOr(route.Path, "/"))
+		} else if route.Kind == exposuredata.RouteKindHTTPSRoot {
+			lines = append(lines, "     kind: explicit HTTPS root handler", "     mount path: /")
+		}
 		if route.URL != "" {
 			lines = append(lines, "     url: "+route.URL)
 		}
@@ -512,6 +517,19 @@ func (m *workspaceModel) renderDetails(width, height int) string {
 		for _, mode := range m.readiness.Modes {
 			owner := strings.ToUpper(string(mode.Mode))
 			lines = append(lines, fmt.Sprintf("  %s: %s  [%s]  [owner: %s]", mode.Mode, mode.Status, readinessBadgeText(mode.Status), owner))
+			pathStatus := mode.HTTPPathStatus
+			if pathStatus != "" || mode.HTTPPathMessage != "" {
+				if pathStatus == "" {
+					pathStatus = readinessmodel.ReadinessUnknown
+				}
+				lines = append(lines, fmt.Sprintf("  %s HTTPS paths: %s", mode.Mode, pathStatus))
+				if mode.HTTPPathMessage != "" && pathStatus != readinessmodel.ReadinessReady {
+					lines = append(lines, "  ["+owner+"] HTTP path reason: "+mode.HTTPPathMessage)
+					if mode.HTTPPathRemediation != "" {
+						lines = append(lines, "  ["+owner+"] HTTP path next: "+mode.HTTPPathRemediation)
+					}
+				}
+			}
 			hasIssue := false
 			for _, check := range mode.Checks {
 				if check.Status == readinessmodel.ReadinessReady {

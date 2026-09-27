@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +21,7 @@ import (
 type RouteIdentity struct {
 	ID          string
 	ProviderKey string
+	Kind        exposuredata.RouteKind
 	Service     string
 	Path        string
 	Target      nettarget.Target
@@ -28,11 +31,11 @@ type RouteIdentity struct {
 }
 
 func IdentityOf(route exposuredata.ExposureRoute) RouteIdentity {
-	return RouteIdentity{ID: route.ID, ProviderKey: route.ProviderKey, Service: route.Service, Path: route.Path, Target: route.Target, Mode: route.Mode, URL: route.URL, Backend: route.Backend}
+	return RouteIdentity{ID: route.ID, ProviderKey: route.ProviderKey, Kind: route.Kind, Service: route.Service, Path: route.Path, Target: route.Target, Mode: route.Mode, URL: route.URL, Backend: route.Backend}
 }
 
 func (identity RouteIdentity) CanonicalKey() string {
-	return strings.Join([]string{identity.ID, identity.ProviderKey, identity.Service, identity.Path, identity.Target.Key(), string(identity.Mode), identity.URL, identity.Backend}, "\x00")
+	return strings.Join([]string{identity.ID, identity.ProviderKey, string(identity.Kind), identity.Service, identity.Path, identity.Target.Key(), string(identity.Mode), identity.URL, identity.Backend}, "\x00")
 }
 
 func RouteFingerprint(route exposuredata.ExposureRoute) string {
@@ -139,6 +142,53 @@ func targetArgument(target nettarget.Target) string {
 		return target.String()
 	}
 	return "http://" + target.String()
+}
+
+// HTTPPathBackendArgument preserves the selected listener address as the exact
+// local HTTP backend. Any alternate host such as localhost must be explicit.
+func HTTPPathBackendArgument(target nettarget.Target) string {
+	target = target.Normalized()
+	if target.Address == "0.0.0.0" {
+		target.Address = "127.0.0.1"
+	} else if target.Address == "::" {
+		target.Address = "::1"
+	}
+	return "http://" + target.String()
+}
+
+// HTTPSBackendArgument optionally uses localhost for IPv6 listeners when the
+// operator explicitly accepts the host-alias resolution tradeoff.
+func HTTPSBackendArgument(target nettarget.Target, allowLocalhostForIPv6 bool) string {
+	target = target.Normalized()
+	if allowLocalhostForIPv6 && (target.Address == "::" || target.Address == "::1") {
+		return "http://localhost:" + strconv.Itoa(target.Port)
+	}
+	return HTTPPathBackendArgument(target)
+}
+
+// HTTPPathBackendMatches compares backend authority while accepting the
+// unbracketed IPv6 spelling emitted by some Tailscale status versions. It
+// still requires local HTTP, the exact parsed address/port, and no mounted
+// backend path of its own.
+func HTTPPathBackendMatches(observed, expected string) bool {
+	observedTarget, observedOK := parseHTTPPathBackend(observed)
+	expectedTarget, expectedOK := parseHTTPPathBackend(expected)
+	return observedOK && expectedOK && observedTarget.Key() == expectedTarget.Key()
+}
+
+func parseHTTPPathBackend(value string) (nettarget.Target, bool) {
+	scheme, rest, ok := strings.Cut(value, "://")
+	if !ok || !strings.EqualFold(scheme, "http") {
+		return nettarget.Target{}, false
+	}
+	if slash := strings.IndexByte(rest, '/'); slash >= 0 && rest[slash:] != "/" {
+		return nettarget.Target{}, false
+	}
+	parsed, err := nettarget.ParseTarget(value, "tcp")
+	if err != nil {
+		return nettarget.Target{}, false
+	}
+	return parsed.Normalized(), true
 }
 
 func targetArgumentForTransport(target nettarget.Target, transport string) string {
@@ -252,6 +302,30 @@ func portNumber(value string) int {
 		return 0
 	}
 	return port
+}
+
+func observedHTTPHandlerURL(base, handler string) string {
+	parsed, err := url.Parse(strings.TrimSpace(base))
+	if err != nil || parsed.Hostname() == "" {
+		return base
+	}
+	host := strings.TrimSuffix(parsed.Hostname(), ".")
+	port := parsed.Port()
+	if port == "443" {
+		port = ""
+	}
+	if port != "" {
+		host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	if handler == "" {
+		handler = parsed.Path
+	}
+	if handler == "" {
+		handler = "/"
+	}
+	return (&url.URL{Scheme: "https", Host: host, Path: handler}).String()
 }
 
 func handlerPath(path []string) string {

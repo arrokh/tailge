@@ -133,6 +133,12 @@ func TestReadinessSeparatesServeAndFunnelMutationEvidence(t *testing.T) {
 	if serve.Status != readinessmodel.ReadinessReady || !serve.Probe {
 		t.Fatalf("serve readiness = %#v", serve)
 	}
+	if serve.HTTPPathStatus != readinessmodel.ReadinessReadOnly || !strings.Contains(serve.HTTPPathMessage, "--set-path") {
+		t.Fatalf("unsupported Serve HTTP path capability was hidden: %#v", serve)
+	}
+	if funnel.HTTPPathStatus != readinessmodel.ReadinessReadOnly || !strings.Contains(funnel.HTTPPathMessage, "--set-path") {
+		t.Fatalf("unsupported Funnel HTTP path capability was hidden: %#v", funnel)
+	}
 	if funnel.Status != readinessmodel.ReadinessReady || funnel.Probe || len(funnel.Checks) == 0 || funnel.Checks[0].Status != readinessmodel.ReadinessReady {
 		t.Fatalf("funnel readiness = %#v", funnel)
 	}
@@ -264,8 +270,29 @@ func TestParseStatusHandlesUppercaseURLRouteKeys(t *testing.T) {
 	if err != nil || len(routes) != 1 {
 		t.Fatalf("routes=%#v err=%v", routes, err)
 	}
-	if routes[0].ProviderKey != "serve:https=443" || routes[0].URL != "HTTPS://DEV.example.ts.net:443" {
+	if routes[0].ProviderKey != "serve:https=443" || routes[0].Kind != exposuredata.RouteKindHTTPSRoot || routes[0].Path != "/" || routes[0].URL != "https://DEV.example.ts.net/" {
 		t.Fatalf("unexpected uppercase URL route: %#v", routes[0])
+	}
+}
+
+func TestParseStatusPreservesPathFromHTTPSURLRouteKey(t *testing.T) {
+	routes, err := parseStatus(exposuredata.ExposureServe, []byte(`{"HTTPS://DEV.example.ts.net:443/api":{"Proxy":"http://127.0.0.1:3000"}}`), time.Unix(1, 0))
+	if err != nil || len(routes) != 1 {
+		t.Fatalf("routes=%#v err=%v", routes, err)
+	}
+	if routes[0].Kind != exposuredata.RouteKindHTTPPath || routes[0].Path != "/api" || routes[0].ProviderKey != "serve:https=443" || routes[0].URL != "https://DEV.example.ts.net/api" {
+		t.Fatalf("HTTPS URL route key lost handler path identity: %#v", routes[0])
+	}
+}
+
+func TestParseStatusDoesNotTreatPortLikeHandlerPathAsEndpointPort(t *testing.T) {
+	fixture := []byte(`{"TCP":{"443":{"HTTPS":true}},"Web":{"dev.example.ts.net:443":{"Handlers":{"/api:4321":{"Proxy":"http://127.0.0.1:3000"}}}}}`)
+	routes, err := parseStatus(exposuredata.ExposureServe, fixture, time.Unix(1, 0))
+	if err != nil || len(routes) != 1 {
+		t.Fatalf("routes=%#v err=%v", routes, err)
+	}
+	if routes[0].ProviderKey != "serve:https=443" || routes[0].Path != "/api:4321" || routes[0].URL != "https://dev.example.ts.net/api:4321" {
+		t.Fatalf("handler path suffix was mistaken for its HTTPS endpoint port or URL: %#v", routes[0])
 	}
 }
 
@@ -275,7 +302,7 @@ func TestParseStatusFindsWebProxyAndExactPublicPortSelector(t *testing.T) {
 	if err != nil || len(routes) != 1 {
 		t.Fatalf("routes=%#v err=%v", routes, err)
 	}
-	if routes[0].ProviderKey != "serve:https=443" || routes[0].URL != "https://dev.example.ts.net:443" || routes[0].Target.Port != 3000 {
+	if routes[0].ProviderKey != "serve:https=443" || routes[0].Kind != exposuredata.RouteKindHTTPSRoot || routes[0].Path != "/" || routes[0].URL != "https://dev.example.ts.net/" || routes[0].Target.Port != 3000 {
 		t.Fatalf("unexpected web route: %#v", routes[0])
 	}
 }
@@ -293,6 +320,18 @@ func TestParseStatusAcceptsTailscaleUnbracketedIPv6Proxy(t *testing.T) {
 	routes, err := parseStatus(exposuredata.ExposureServe, fixture, time.Unix(1, 0))
 	if err != nil || len(routes) != 1 || routes[0].Target.Address != "::1" || routes[0].Target.Port != 4322 {
 		t.Fatalf("unbracketed IPv6 proxy was not parsed: routes=%#v err=%v", routes, err)
+	}
+}
+
+func TestHTTPSFunnelScopeUsesPublicEndpointPortNotBackendPort(t *testing.T) {
+	fixture := []byte(`{"TCP":{"443":{"HTTPS":true}},"Web":{"dev.example.ts.net:443":{"Handlers":{"/api":{"Proxy":"http://127.0.0.1:4321"}}}},"AllowFunnel":{"dev.example.ts.net:4321":true}}`)
+	serveRoutes, err := parseStatus(exposuredata.ExposureServe, fixture, time.Unix(1, 0))
+	if err != nil || len(serveRoutes) != 1 || serveRoutes[0].ProviderKey != "serve:https=443" {
+		t.Fatalf("backend-port Funnel permission hid the private HTTPS endpoint: routes=%#v err=%v", serveRoutes, err)
+	}
+	funnelRoutes, err := parseStatus(exposuredata.ExposureFunnel, fixture, time.Unix(1, 0))
+	if err != nil || len(funnelRoutes) != 0 {
+		t.Fatalf("Funnel permission on the backend port was applied to HTTPS: routes=%#v err=%v", funnelRoutes, err)
 	}
 }
 
@@ -319,11 +358,11 @@ func TestParseStatusUsesAllowFunnelToSeparateServeAndFunnel(t *testing.T) {
 
 	mixed := []byte(`{"Web":{"private.example.ts.net:3000":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"}}},"public.example.ts.net:3000":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3001"}}}},"AllowFunnel":{"private.example.ts.net:3000":false,"public.example.ts.net:3000":true}}`)
 	serveRoutes, err = parseStatus(exposuredata.ExposureServe, mixed, time.Unix(1, 0))
-	if err != nil || len(serveRoutes) != 1 || serveRoutes[0].URL != "https://private.example.ts.net:3000" {
+	if err != nil || len(serveRoutes) != 1 || serveRoutes[0].URL != "https://private.example.ts.net:3000/" {
 		t.Fatalf("host-specific private Serve route was misclassified: routes=%#v err=%v", serveRoutes, err)
 	}
 	funnelRoutes, err = parseStatus(exposuredata.ExposureFunnel, mixed, time.Unix(1, 0))
-	if err != nil || len(funnelRoutes) != 1 || funnelRoutes[0].URL != "https://public.example.ts.net:3000" {
+	if err != nil || len(funnelRoutes) != 1 || funnelRoutes[0].URL != "https://public.example.ts.net:3000/" {
 		t.Fatalf("host-specific public Funnel route was misclassified: routes=%#v err=%v", funnelRoutes, err)
 	}
 }
@@ -372,6 +411,35 @@ func TestListDoesNotDuplicatePrivateServeAsFunnel(t *testing.T) {
 	snapshot, err := adapter.List(context.Background())
 	if err != nil || !snapshot.Authoritative || len(snapshot.Routes) != 1 || snapshot.Routes[0].Mode != exposuredata.ExposureServe {
 		t.Fatalf("private Serve status was duplicated or misclassified: routes=%#v authoritative=%t err=%v", snapshot.Routes, snapshot.Authoritative, err)
+	}
+}
+
+func TestHTTPBackendPreservesIPv6UnlessLocalhostAliasIsExplicit(t *testing.T) {
+	selected := target.Target{Address: "::1", Port: 4321, Protocol: "tcp"}
+	exact := HTTPPathBackendArgument(selected)
+	if exact != "http://[::1]:4321" {
+		t.Fatalf("IPv6 HTTP path backend = %q, want exact loopback URL", exact)
+	}
+	if !HTTPPathBackendMatches("http://::1:4321", exact) || !HTTPPathBackendMatches("http://[::1]:4321/", exact) {
+		t.Fatal("equivalent bracketed/unbracketed IPv6 HTTP backend spellings did not match")
+	}
+	for _, different := range []string{"tcp://[::1]:4321", "http://[::1]:4322", "http://[::1]:4321/admin"} {
+		if HTTPPathBackendMatches(different, exact) {
+			t.Fatalf("different backend identity matched the exact IPv6 backend: %q", different)
+		}
+	}
+	alias := HTTPSBackendArgument(selected, true)
+	if alias != "http://localhost:4321" || !HTTPPathBackendMatches("http://localhost:4321", alias) {
+		t.Fatalf("explicit localhost backend alias = %q", alias)
+	}
+	if HTTPSBackendArgument(selected, false) != exact {
+		t.Fatal("IPv6 backend was silently aliased without explicit permission")
+	}
+	if got := HTTPPathBackendArgument(target.Target{Address: "0.0.0.0", Port: 4321, Protocol: "tcp"}); got != "http://127.0.0.1:4321" {
+		t.Fatalf("wildcard HTTP backend = %q", got)
+	}
+	if got := HTTPSBackendArgument(target.Target{Address: "::", Port: 4321, Protocol: "tcp"}, false); got != "http://[::1]:4321" {
+		t.Fatalf("IPv6 wildcard HTTP backend = %q", got)
 	}
 }
 
@@ -573,4 +641,269 @@ func FuzzParseStatusNeverPanics(f *testing.F) {
 	f.Fuzz(func(t *testing.T, text string) {
 		_, _ = parseStatus(exposuredata.ExposureServe, []byte(text), time.Unix(1, 0))
 	})
+}
+
+func TestSetHTTPPathRequiresExplicitNonRootSingleSegmentIntent(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		path      string
+		httpPath  bool
+		wantError string
+	}{
+		{name: "root path", path: "/", httpPath: true, wantError: "non-root"},
+		{name: "nested path", path: "/api/v2", httpPath: true, wantError: "non-root"},
+		{name: "missing explicit intent", path: "/api", wantError: "explicit HTTP path intent"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			adapter := &Adapter{Binary: "tailscale", Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+				command := strings.Join(args, " ")
+				switch command {
+				case "version":
+					return runner.Result{Stdout: "1.102.4\n"}, nil
+				case "serve --help":
+					return runner.Result{Stdout: "status clear --https value --tcp value --set-path value"}, nil
+				case "funnel --help":
+					return runner.Result{Stdout: "status reset --https value --tcp value --set-path value off"}, nil
+				default:
+					return runner.Result{}, errors.New("unexpected command: " + command)
+				}
+			})}
+			targetRoute := target.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}
+			_, err := adapter.Set(context.Background(), ExposureChange{
+				Target: targetRoute, Mode: exposuredata.ExposureServe, ProviderKey: "serve:https=443", Path: test.path, HTTPPath: test.httpPath,
+				Preconditions: ExposurePrecondition{RouteIDsHash: RouteIDsHash(nil, targetRoute), AllRoutesHash: RoutesHash(nil)},
+			})
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("expected %q validation failure, got %v", test.wantError, err)
+			}
+		})
+	}
+}
+
+func TestSetHTTPPathPreservesSiblingAndExactIPv6Backend(t *testing.T) {
+	const status = `{"TCP":{"443":{"HTTPS":true}},"Web":{"dev.example.ts.net:443":{"Handlers":{"/docs":{"Proxy":"http://127.0.0.1:3000"}}}},"AllowFunnel":{"dev.example.ts.net:443":false}}`
+	calls := []string{}
+	adapter := &Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+		command := strings.Join(args, " ")
+		calls = append(calls, command)
+		switch command {
+		case "version":
+			return runner.Result{Stdout: "1.102.4\n"}, nil
+		case "serve --help":
+			return runner.Result{Stdout: "status clear --https value --tcp value --set-path value"}, nil
+		case "funnel --help":
+			return runner.Result{Stdout: "status reset --https value --tcp value --set-path value off"}, nil
+		case "serve status --json":
+			return runner.Result{Stdout: status}, nil
+		case "funnel status --json":
+			return runner.Result{Stdout: status}, nil
+		case "serve --bg --yes --set-path=/api-v2 --https=443 http://[::1]:4321":
+			return runner.Result{}, nil
+		default:
+			return runner.Result{}, errors.New("unexpected command: " + command)
+		}
+	})}
+	snapshot, err := adapter.List(context.Background())
+	if err != nil || len(snapshot.Routes) != 1 || snapshot.Routes[0].Path != "/docs" {
+		t.Fatalf("sibling route status=%#v err=%v", snapshot.Routes, err)
+	}
+	backendTarget := target.Target{Address: "::1", Port: 4321, Protocol: "tcp"}.Normalized()
+	_, err = adapter.Set(context.Background(), ExposureChange{
+		Target: backendTarget, Mode: exposuredata.ExposureServe, ProviderKey: "serve:https=443", Path: "/api-v2", HTTPPath: true,
+		Preconditions: ExposurePrecondition{RouteIDsHash: RouteIDsHash(snapshot.Routes, backendTarget), AllRoutesHash: RoutesHash(snapshot.Routes)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls[len(calls)-1] != "serve --bg --yes --set-path=/api-v2 --https=443 http://[::1]:4321" {
+		t.Fatalf("unexpected exact path command: %q", calls[len(calls)-1])
+	}
+	for _, call := range calls {
+		if strings.Contains(call, "reset") || strings.Contains(call, "clear") {
+			t.Fatalf("sibling handlers were changed with a broad reset: %v", calls)
+		}
+	}
+}
+
+func TestSetHTTPPathSuggestsExplicitAliasWhenTailscaleRejectsNumericIPv6(t *testing.T) {
+	listener := target.Target{Address: "::1", Port: 4321, Protocol: "tcp"}.Normalized()
+	adapter := &Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+		command := strings.Join(args, " ")
+		switch command {
+		case "version":
+			return runner.Result{Stdout: "1.102.4\n"}, nil
+		case "serve --help":
+			return runner.Result{Stdout: "status clear --https value --tcp value --set-path value"}, nil
+		case "funnel --help":
+			return runner.Result{Stdout: "status reset --https value --tcp value --set-path value off"}, nil
+		case "serve status --json", "funnel status --json":
+			return runner.Result{Stdout: `{}`}, nil
+		case "serve --bg --yes --set-path=/api --https=443 http://[::1]:4321":
+			return runner.Result{Stderr: "unknown proxy destination: http://[::1]:4321", ExitCode: 1}, errors.New("exit status 1")
+		default:
+			return runner.Result{}, errors.New("unexpected command: " + command)
+		}
+	})}
+	_, err := adapter.Set(context.Background(), ExposureChange{
+		Target: listener, Mode: exposuredata.ExposureServe, ProviderKey: "serve:https=443", Path: "/api", HTTPPath: true,
+		Backend: "http://[::1]:4321", Preconditions: ExposurePrecondition{RouteIDsHash: RouteIDsHash(nil, listener), AllRoutesHash: RoutesHash(nil)},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unknown proxy destination") {
+		t.Fatalf("numeric IPv6 proxy rejection was not preserved: %v", err)
+	}
+	remediation := fault.AsAppError(err).Remediation
+	for _, want := range []string{"--localhost-backend", "disable", "exact", "weakens"} {
+		if !strings.Contains(remediation, want) {
+			t.Fatalf("numeric IPv6 failure omitted %q remediation: %q", want, remediation)
+		}
+	}
+}
+
+func TestSetHTTPPathRejectsCollisionAndEndpointVisibilityConflict(t *testing.T) {
+	cases := []struct {
+		name, status, mode string
+		want               string
+	}{
+		{name: "duplicate path", status: `{"TCP":{"443":{"HTTPS":true}},"Web":{"dev.example.ts.net:443":{"Handlers":{"/api":{"Proxy":"http://127.0.0.1:3000"}}}},"AllowFunnel":{"dev.example.ts.net:443":false}}`, mode: "serve", want: "already configured"},
+		{name: "visibility conflict", status: `{"TCP":{"443":{"HTTPS":true}},"Web":{"dev.example.ts.net:443":{"Handlers":{"/docs":{"Proxy":"http://127.0.0.1:3000"}}}},"AllowFunnel":{"dev.example.ts.net:443":true}}`, mode: "serve", want: "visibility"},
+		{name: "unaddressable existing route", status: `{"Web":{"dev.example.ts.net":{"Handlers":{"/docs":{"Proxy":"http://127.0.0.1:3000"}}}}}`, mode: "serve", want: "no exact endpoint selector"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			calls := []string{}
+			adapter := &Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+				command := strings.Join(args, " ")
+				calls = append(calls, command)
+				switch command {
+				case "version":
+					return runner.Result{Stdout: "1.102.4\n"}, nil
+				case "serve --help":
+					return runner.Result{Stdout: "status clear --https value --tcp value --set-path value"}, nil
+				case "funnel --help":
+					return runner.Result{Stdout: "status reset --https value --tcp value --set-path value off"}, nil
+				case "serve status --json", "funnel status --json":
+					return runner.Result{Stdout: test.status}, nil
+				default:
+					return runner.Result{}, errors.New("unexpected command: " + command)
+				}
+			})}
+			snapshot, err := adapter.List(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = adapter.Set(context.Background(), ExposureChange{Target: target.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}, Mode: exposuredata.ExposureMode(test.mode), ProviderKey: "serve:https=443", Path: "/api", HTTPPath: true, Preconditions: ExposurePrecondition{RouteIDsHash: RouteIDsHash(nil, target.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}), AllRoutesHash: RoutesHash(snapshot.Routes)}})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected %q conflict, got %v", test.want, err)
+			}
+			for _, call := range calls {
+				if strings.Contains(call, "--set-path=/api") {
+					t.Fatalf("mutating command ran despite conflict: %v", calls)
+				}
+			}
+		})
+	}
+}
+
+func TestRemoveFunnelHTTPPathUsesExactHandlerAndPreservesSibling(t *testing.T) {
+	const status = `{"TCP":{"443":{"HTTPS":true}},"Web":{"dev.example.ts.net:443":{"Handlers":{"/api":{"Proxy":"http://127.0.0.1:3000"},"/docs":{"Proxy":"http://127.0.0.1:3001"}}}},"AllowFunnel":{"dev.example.ts.net:443":true}}`
+	calls := []string{}
+	adapter := &Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+		command := strings.Join(args, " ")
+		calls = append(calls, command)
+		switch command {
+		case "version":
+			return runner.Result{Stdout: "1.102.4\n"}, nil
+		case "serve --help":
+			return runner.Result{Stdout: "status clear --https value --tcp value --set-path value"}, nil
+		case "funnel --help":
+			return runner.Result{Stdout: "status reset --https value --tcp value --set-path value off"}, nil
+		case "serve status --json", "funnel status --json":
+			return runner.Result{Stdout: status}, nil
+		case "funnel --set-path=/api --https=443 off":
+			return runner.Result{}, nil
+		default:
+			return runner.Result{}, errors.New("unexpected command: " + command)
+		}
+	})}
+	snapshot, err := adapter.List(context.Background())
+	if err != nil || len(snapshot.Routes) != 2 {
+		t.Fatalf("routes=%#v err=%v", snapshot.Routes, err)
+	}
+	var targetRoute target.Target
+	var pathRoute exposuredata.ExposureRoute
+	for _, route := range snapshot.Routes {
+		if route.Path == "/api" {
+			targetRoute, pathRoute = route.Target, route
+		}
+	}
+	if pathRoute.Mode != exposuredata.ExposureFunnel || targetRoute.Port != 3000 {
+		t.Fatalf("Funnel path identity was not parsed exactly: %#v", pathRoute)
+	}
+	_, err = adapter.Remove(context.Background(), RouteSelector{ID: "funnel:https=443", Target: &targetRoute, Mode: exposuredata.ExposureFunnel, Path: pathRoute.Path, Backend: pathRoute.Backend, AllRoutesHash: RoutesHash(snapshot.Routes)}, RouteIDsHash(snapshot.Routes, targetRoute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls[len(calls)-1] != "funnel --set-path=/api --https=443 off" {
+		t.Fatalf("exact Funnel path removal command=%q", calls[len(calls)-1])
+	}
+}
+
+func TestRemoveHTTPPathRejectsRawTCPSelector(t *testing.T) {
+	targetRoute := target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}
+	calls := []string{}
+	adapter := &Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+		calls = append(calls, strings.Join(args, " "))
+		return runner.Result{}, nil
+	})}
+	_, err := adapter.Remove(context.Background(), RouteSelector{
+		ID: "serve:tcp=443", Target: &targetRoute, Mode: exposuredata.ExposureServe,
+		Path: "/api", Backend: "http://127.0.0.1:3000", AllRoutesHash: "routes-hash",
+	}, "route-hash")
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "https listener selector") {
+		t.Fatalf("named path removal accepted raw TCP selector: %v", err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("invalid path/TCP selector reached provider: %v", calls)
+	}
+}
+
+func TestRemoveHTTPPathUsesExactHandlerAndPreservesSibling(t *testing.T) {
+	const status = `{"TCP":{"443":{"HTTPS":true}},"Web":{"dev.example.ts.net:443":{"Handlers":{"/api":{"Proxy":"http://127.0.0.1:3000"},"/docs":{"Proxy":"http://127.0.0.1:3001"}}}},"AllowFunnel":{"dev.example.ts.net:443":false}}`
+	calls := []string{}
+	adapter := &Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+		command := strings.Join(args, " ")
+		calls = append(calls, command)
+		switch command {
+		case "version":
+			return runner.Result{Stdout: "1.102.4\n"}, nil
+		case "serve --help":
+			return runner.Result{Stdout: "status clear --https value --tcp value --set-path value"}, nil
+		case "funnel --help":
+			return runner.Result{Stdout: "status reset --https value --tcp value --set-path value off"}, nil
+		case "serve status --json", "funnel status --json":
+			return runner.Result{Stdout: status}, nil
+		case "serve --set-path=/api --bg --https=443 off":
+			return runner.Result{}, nil
+		default:
+			return runner.Result{}, errors.New("unexpected command: " + command)
+		}
+	})}
+	snapshot, err := adapter.List(context.Background())
+	if err != nil || len(snapshot.Routes) != 2 {
+		t.Fatalf("routes=%#v err=%v", snapshot.Routes, err)
+	}
+	var targetRoute target.Target
+	var pathRoute exposuredata.ExposureRoute
+	for _, route := range snapshot.Routes {
+		if route.Path == "/api" {
+			targetRoute, pathRoute = route.Target, route
+		}
+	}
+	_, err = adapter.Remove(context.Background(), RouteSelector{ID: "serve:https=443", Target: &targetRoute, Mode: exposuredata.ExposureServe, Path: pathRoute.Path, Backend: pathRoute.Backend, AllRoutesHash: RoutesHash(snapshot.Routes)}, RouteIDsHash(snapshot.Routes, targetRoute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls[len(calls)-1] != "serve --set-path=/api --bg --https=443 off" {
+		t.Fatalf("exact path removal command=%q", calls[len(calls)-1])
+	}
 }

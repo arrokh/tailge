@@ -2,6 +2,7 @@ package exposure
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/arrokh/tailge/internal/exposuredata"
@@ -12,29 +13,64 @@ import (
 // apply is the Controller lifecycle adapter around exactExposureOperation.
 // Controller reserves the target, publishes lifecycle events, and records the
 // final receipt; the operation owns the ordered provider mutation protocol.
-func (c *Controller) apply(ctx context.Context, target targetmodel.Target, mode exposuredata.ExposureMode, selectedProviderKey string, selectedRouteMode exposuredata.ExposureMode, confirmFunnel, confirmExternal bool, timeout time.Duration, approval *MutationApproval) (receipt exposuredata.OperationReceipt, applyErr error) {
-	op := exactExposureOperation{
+func (c *Controller) apply(ctx context.Context, target targetmodel.Target, mode exposuredata.ExposureMode, selectedProviderKey string, selectedRouteMode exposuredata.ExposureMode, confirmFunnel, confirmExternal bool, timeout time.Duration, approval *MutationApproval) (exposuredata.OperationReceipt, error) {
+	op := c.newExactOperation(target, mode, selectedProviderKey, "", selectedRouteMode, confirmFunnel, confirmExternal, timeout, approval)
+	return c.trackOperation(ctx, op)
+}
+
+func (c *Controller) applyRouteIdentity(ctx context.Context, target targetmodel.Target, routeID string, confirmExternal bool, timeout time.Duration, approval *MutationApproval) (exposuredata.OperationReceipt, error) {
+	if routeID == "" {
+		return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrInvalidInput, "exposure", "an exact route identity is required", false, "invalid", "Refresh and select one exact route before disabling.")
+	}
+	op := c.newExactOperation(target, exposuredata.ExposureDisabled, "", routeID, exposuredata.ExposureDisabled, false, confirmExternal, timeout, approval)
+	return c.trackOperation(ctx, op)
+}
+
+func (c *Controller) applyHTTPPath(ctx context.Context, target targetmodel.Target, path string, mode exposuredata.ExposureMode, confirmFunnel bool, options HTTPPathOptions, timeout time.Duration, approval *MutationApproval) (exposuredata.OperationReceipt, error) {
+	op := c.newExactOperation(target, mode, "", "", exposuredata.ExposureDisabled, confirmFunnel, false, timeout, approval)
+	op.httpPath = path
+	op.httpPathIntent = true
+	op.httpsPort = 443
+	op.localhostBackendAlias = options.LocalhostBackendAlias
+	return c.trackOperation(ctx, op)
+}
+
+func (c *Controller) applyHTTPSRoot(ctx context.Context, target targetmodel.Target, httpsPort int, localhostBackendAlias bool, timeout time.Duration, approval *MutationApproval) (exposuredata.OperationReceipt, error) {
+	op := c.newExactOperation(target, exposuredata.ExposureServe, "", "", exposuredata.ExposureDisabled, false, false, timeout, approval)
+	op.httpPath = "/"
+	op.httpsPort = httpsPort
+	op.httpsRootIntent = true
+	op.localhostBackendAlias = localhostBackendAlias
+	return c.trackOperation(ctx, op)
+}
+
+func (c *Controller) newExactOperation(target targetmodel.Target, mode exposuredata.ExposureMode, selectedProviderKey, selectedRouteID string, selectedRouteMode exposuredata.ExposureMode, confirmFunnel, confirmExternal bool, timeout time.Duration, approval *MutationApproval) exactExposureOperation {
+	return exactExposureOperation{
+		dependencies: exactOperationDependencies{
+			discoverer:         c.Discoverer,
+			provider:           c.Provider,
+			mutationLockPath:   c.MutationLockPath,
+			readinessOptions:   c.ReadinessOptions,
+			now:                c.now,
+			decorateRoutes:     c.decorateExposureRoutes,
+			markManaged:        c.markManagedRoute,
+			revokeManaged:      c.revokeManagedRoute,
+			recordReceipt:      c.recordReceiptEvent,
+			recordVerification: c.recordVerificationEvent,
+		},
 		target:              target,
 		mode:                mode,
 		selectedProviderKey: selectedProviderKey,
+		selectedRouteID:     selectedRouteID,
 		selectedRouteMode:   selectedRouteMode,
 		confirmFunnel:       confirmFunnel,
 		confirmExternal:     confirmExternal,
 		timeout:             timeout,
 		approval:            approval,
 	}
-	op.dependencies = exactOperationDependencies{
-		discoverer:         c.Discoverer,
-		provider:           c.Provider,
-		mutationLockPath:   c.MutationLockPath,
-		readinessOptions:   c.ReadinessOptions,
-		now:                c.now,
-		decorateRoutes:     c.decorateExposureRoutes,
-		markManaged:        c.markManagedRoute,
-		revokeManaged:      c.revokeManagedRoute,
-		recordReceipt:      c.recordReceiptEvent,
-		recordVerification: c.recordVerificationEvent,
-	}
+}
+
+func (c *Controller) trackOperation(ctx context.Context, op exactExposureOperation) (receipt exposuredata.OperationReceipt, applyErr error) {
 	if err := op.validate(); err != nil {
 		return exposuredata.OperationReceipt{}, err
 	}
@@ -62,6 +98,11 @@ func (c *Controller) apply(ctx context.Context, target targetmodel.Target, mode 
 	}
 	operationStarted := c.now()
 	operationID := targetmodel.StableID("apply", operationKey, string(op.mode), operationStarted.UTC().Format(time.RFC3339Nano))
+	if op.httpPathIntent {
+		operationID = targetmodel.StableID("apply-http-path", operationKey, string(op.mode), op.httpPath, operationStarted.UTC().Format(time.RFC3339Nano))
+	} else if op.httpsRootIntent {
+		operationID = targetmodel.StableID("apply-https-root", operationKey, strconv.Itoa(op.httpsPort), operationStarted.UTC().Format(time.RFC3339Nano))
+	}
 	op.operationID = operationID
 	op.operationStarted = operationStarted
 	receipt = exposuredata.OperationReceipt{ID: operationID, StartedAt: operationStarted}

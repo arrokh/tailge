@@ -26,6 +26,7 @@ type exposureActionSession struct {
 	index    int
 	mode     exposuredata.ExposureMode
 	routeKey string
+	routeID  string
 	itemID   string
 	target   targetmodel.Target
 	choices  []exposureActionChoice
@@ -56,6 +57,7 @@ func (s *exposureActionSession) open(itemID string, target targetmodel.Target, m
 	s.target = target
 	s.mode = mode
 	s.routeKey = ""
+	s.routeID = ""
 	s.index = modeIndex(mode)
 	s.confirm = false
 	s.choices = nil

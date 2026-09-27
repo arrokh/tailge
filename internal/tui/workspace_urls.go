@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,23 @@ import (
 	osc52 "github.com/aymanbagabas/go-osc52/v2"
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+const unavailableURLBanner = "No observed exposure URL is available"
+const unavailableOpenURLBanner = "No observed exposure URL is available. o only opens observed URLs; use p to configure a named path."
+const unavailableCopyURLBanner = "No observed exposure URL is available. y only copies observed URLs; use p to configure a named path."
+
+func (m *workspaceModel) clearStaleURLUnavailableBanner() {
+	if m.banner == "" {
+		return
+	}
+	item, ok := m.selectedItem()
+	if !ok || len(observedHTTPURLRoutes(item)) == 0 {
+		return
+	}
+	m.clearBannerNotice(unavailableURLBanner)
+	m.clearBannerNotice(unavailableOpenURLBanner)
+	m.clearBannerNotice(unavailableCopyURLBanner)
+}
 
 func (m *workspaceModel) urlShortcutStatus() string {
 	observed, tcpOnly, browserFallback, local := false, false, false, false
@@ -95,32 +113,95 @@ func (m *workspaceModel) openSelectedURL() tea.Cmd {
 		m.setBanner("No service is selected", true)
 		return nil
 	}
-	if route, url, ok := observedURLActionRoute(item); ok {
-		if url != "" {
-			return m.openURL(url, "observed URL")
-		}
+	urls := observedHTTPURLRoutes(item)
+	if len(urls) > 0 {
+		m.clearStaleURLUnavailableBanner()
+	}
+	if len(urls) > 1 {
+		m.urlAction, m.urlItemID, m.urlRoutesFingerprint, m.urlRouteIndex, m.modal = "open", item.ID, routeFingerprint(item.Routes, nil), 0, modalChooseURL
+		return nil
+	}
+	if len(urls) == 1 {
+		return m.openURL(urls[0].URL, "observed URL")
+	}
+	if route, _, ok := observedURLActionRoute(item); ok {
 		return m.resolveServeTCPBrowserURL(route)
 	}
 	if selector := workspace.RawTCPRouteSelector(item); selector != "" {
 		m.setBanner("Observed route "+selector+" is TCP-only; no browser URL exists. Use a TCP client.", true)
 		return nil
 	}
-	m.setBanner("No observed exposure URL is available", true)
+	m.setBanner(unavailableOpenURLBanner, true)
 	return nil
 }
 
-func observedURLActionRoute(item exposure.ReconciledItem) (exposuredata.ExposureRoute, string, bool) {
+func observedHTTPURLRoutes(item exposure.ReconciledItem) []exposuredata.ExposureRoute {
+	routes := make([]exposuredata.ExposureRoute, 0, len(item.Routes))
 	for _, route := range item.Routes {
-		if url, ok := workspace.ObservedRouteURL(route); ok {
-			return route, url, true
+		if _, ok := workspace.ObservedRouteURL(route); ok {
+			routes = append(routes, route)
 		}
 	}
+	sort.Slice(routes, func(i, j int) bool {
+		if routes[i].URL != routes[j].URL {
+			return routes[i].URL < routes[j].URL
+		}
+		return routes[i].ID < routes[j].ID
+	})
+	return routes
+}
+
+func observedURLActionRoute(item exposure.ReconciledItem) (exposuredata.ExposureRoute, string, bool) {
+	urls := observedHTTPURLRoutes(item)
+	if len(urls) == 1 {
+		return urls[0], urls[0].URL, true
+	}
+	if len(urls) > 1 {
+		return exposuredata.ExposureRoute{}, "", false
+	}
+	var fallback exposuredata.ExposureRoute
+	count := 0
 	for _, route := range item.Routes {
 		if workspace.RouteTransport(route) == "tcp" && route.Mode == exposuredata.ExposureServe {
-			return route, "", true
+			fallback = route
+			count++
 		}
 	}
+	if count == 1 {
+		return fallback, "", true
+	}
 	return exposuredata.ExposureRoute{}, "", false
+}
+
+func (m *workspaceModel) updateURLChoiceModal(_ tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
+	item, ok := m.selectedItem()
+	if !ok || item.ID != m.urlItemID || routeFingerprint(item.Routes, nil) != m.urlRoutesFingerprint {
+		m.modal, m.urlAction, m.urlItemID, m.urlRoutesFingerprint = modalNone, "", "", ""
+		m.setBanner("Observed route URLs changed — select a fresh URL", true)
+		return m, nil
+	}
+	routes := observedHTTPURLRoutes(item)
+	if len(routes) < 2 {
+		m.modal, m.urlAction, m.urlItemID, m.urlRoutesFingerprint = modalNone, "", "", ""
+		return m, nil
+	}
+	switch key {
+	case "esc":
+		m.modal, m.urlAction, m.urlItemID, m.urlRoutesFingerprint = modalNone, "", "", ""
+	case "up", "k":
+		m.urlRouteIndex = (m.urlRouteIndex + len(routes) - 1) % len(routes)
+	case "down", "j":
+		m.urlRouteIndex = (m.urlRouteIndex + 1) % len(routes)
+	case "enter":
+		route := routes[clamp(m.urlRouteIndex, 0, len(routes)-1)]
+		action := m.urlAction
+		m.modal, m.urlAction, m.urlItemID, m.urlRoutesFingerprint = modalNone, "", "", ""
+		if action == "copy" {
+			return m, m.copyURLCommand(route.URL)
+		}
+		return m, m.openURL(route.URL, "observed URL")
+	}
+	return m, nil
 }
 
 func (m *workspaceModel) resolveServeTCPBrowserURL(route exposuredata.ExposureRoute) tea.Cmd {
@@ -203,17 +284,25 @@ func (m *workspaceModel) copyURL() tea.Cmd {
 		return nil
 	}
 	item := items[m.selectedIdx]
-	if route, url, ok := observedURLActionRoute(item); ok {
-		if url != "" {
-			return m.copyURLCommand(url)
-		}
+	urls := observedHTTPURLRoutes(item)
+	if len(urls) > 0 {
+		m.clearStaleURLUnavailableBanner()
+	}
+	if len(urls) > 1 {
+		m.urlAction, m.urlItemID, m.urlRoutesFingerprint, m.urlRouteIndex, m.modal = "copy", item.ID, routeFingerprint(item.Routes, nil), 0, modalChooseURL
+		return nil
+	}
+	if len(urls) == 1 {
+		return m.copyURLCommand(urls[0].URL)
+	}
+	if route, _, ok := observedURLActionRoute(item); ok {
 		return m.resolveServeTCPCopyURL(route)
 	}
 	if selector := workspace.RawTCPRouteSelector(item); selector != "" {
 		m.setBanner("Observed route "+selector+" is TCP-only; no browser URL exists to copy", true)
 		return nil
 	}
-	m.setBanner("No observed exposure URL is available", true)
+	m.setBanner(unavailableCopyURLBanner, true)
 	return nil
 }
 
@@ -265,11 +354,14 @@ func copySelectedURL(out, errOut io.Writer, items []exposure.ReconciledItem, sel
 	if selected < 0 || selected >= len(items) {
 		return
 	}
-	for _, route := range items[selected].Routes {
-		if url, ok := workspace.ObservedRouteURL(route); ok {
-			copyURLValue(out, errOut, url, clipboard)
-			return
-		}
+	routes := observedHTTPURLRoutes(items[selected])
+	if len(routes) == 1 {
+		copyURLValue(out, errOut, routes[0].URL, clipboard)
+		return
+	}
+	if len(routes) > 1 {
+		fmt.Fprintln(out, "Multiple observed URLs are available; choose one in the workspace.")
+		return
 	}
 	fmt.Fprintln(out, "No URL is available for the selected item.")
 }
