@@ -27,10 +27,8 @@ func (m *workspaceModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.focus == focusDetails {
 		if key == "esc" {
 			m.focus = focusList
+			m.gGeneration = 0
 			return m, nil
-		}
-		if cmd, handled := m.handleGlobalNavigation(key); handled {
-			return m, cmd
 		}
 	}
 	if m.gGeneration != 0 {
@@ -42,7 +40,8 @@ func (m *workspaceModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.gGeneration = 0
 	}
 	if key == "g" {
-		m.gGeneration++
+		m.gSequence++
+		m.gGeneration = m.gSequence
 		generation := m.gGeneration
 		return m, tea.Tick(450*time.Millisecond, func(time.Time) tea.Msg { return gTimeoutMsg{generation: generation} })
 	}
@@ -125,7 +124,7 @@ func (m *workspaceModel) handleGlobalNavigation(key string) (tea.Cmd, bool) {
 		m.goFirst()
 		return nil, true
 	}
-	if key == "end" {
+	if key == "end" || key == "G" {
 		m.goLast()
 		return nil, true
 	}

@@ -69,6 +69,7 @@ type workspaceState struct {
 	hasView             bool
 	hasReadiness        bool
 	gGeneration         uint64
+	gSequence           uint64
 	activeOps           map[string]context.CancelFunc
 	batchID             string
 	batchTotal          int

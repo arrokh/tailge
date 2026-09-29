@@ -688,6 +688,62 @@ func TestWorkspaceSearchIsIncrementalAndCancelsSafely(t *testing.T) {
 	}
 }
 
+func TestWorkspaceDocumentedGNavigation(t *testing.T) {
+	m := workspaceFixture()
+	second := discovery.Listener{ID: "listener-two", Name: "api", Target: targetmodel.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}}
+	m.view.Items = append(m.view.Items, exposure.ReconciledItem{ID: second.ID, Listener: &second, State: exposuredata.ExposureState("disabled"), Mode: exposuredata.ExposureDisabled})
+	m.reselect("", 0)
+	firstID := m.selectedID
+	lastID := m.items()[len(m.items())-1].ID
+	if firstID == lastID {
+		t.Fatal("fixture requires two distinct visible items")
+	}
+	m.Update(keyRune('G'))
+	if m.selectedID != lastID {
+		t.Fatalf("G did not select last item: got %q want %q", m.selectedID, lastID)
+	}
+	m.Update(keyRune('g'))
+	m.Update(keyRune('g'))
+	if m.selectedID != firstID {
+		t.Fatalf("gg did not select first item: got %q want %q", m.selectedID, firstID)
+	}
+}
+
+func TestWorkspacePendingGRejectsStaleTimeout(t *testing.T) {
+	m := workspaceFixture()
+	m.Update(keyRune('g'))
+	stale := m.gGeneration
+	m.Update(keyType(tea.KeyEsc))
+	m.Update(keyRune('g'))
+	if m.gGeneration == 0 || m.gGeneration == stale {
+		t.Fatalf("new pending g reused prior timer generation: prior=%d current=%d", stale, m.gGeneration)
+	}
+	m.Update(gTimeoutMsg{generation: stale})
+	if m.gGeneration == 0 {
+		t.Fatal("stale timer cancelled a newer pending g")
+	}
+}
+
+func TestWorkspaceDetailNavigationInterruptsPendingG(t *testing.T) {
+	m := workspaceFixture()
+	m.focus = focusDetails
+	m.Update(keyRune('g'))
+	m.Update(keyRune('j'))
+	if m.gGeneration != 0 {
+		t.Fatalf("detail scrolling left g pending: generation=%d", m.gGeneration)
+	}
+}
+
+func TestWorkspaceEscCancelsPendingGFromDetails(t *testing.T) {
+	m := workspaceFixture()
+	m.focus = focusDetails
+	m.Update(keyRune('g'))
+	m.Update(keyType(tea.KeyEsc))
+	if m.focus != focusList || m.gGeneration != 0 {
+		t.Fatalf("Esc did not return to list and cancel pending g: focus=%v pending=%d", m.focus, m.gGeneration)
+	}
+}
+
 func TestWorkspaceDetailAndHelpScrollingAreBounded(t *testing.T) {
 	m := workspaceFixture()
 	m.focus = focusDetails
