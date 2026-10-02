@@ -15,6 +15,19 @@ const (
 	MetadataUnknown  MetadataQuality = "unknown"
 )
 
+type ProcessMemorySource string
+
+const (
+	ProcessMemoryRSS               ProcessMemorySource = "rss"
+	ProcessMemoryPhysicalFootprint ProcessMemorySource = "physical_footprint"
+)
+
+type ProcessUsage struct {
+	CPUPercent   float64             `json:"cpu_percent"`
+	MemoryBytes  uint64              `json:"memory_bytes"`
+	MemorySource ProcessMemorySource `json:"memory_source,omitempty"`
+}
+
 type Listener struct {
 	ID           string              `json:"id"`
 	Target       target.Target       `json:"target"`
@@ -23,6 +36,7 @@ type Listener struct {
 	Process      string              `json:"process,omitempty"`
 	CommandLine  string              `json:"command_line,omitempty"`
 	ProcessStart string              `json:"process_start,omitempty"`
+	Usage        *ProcessUsage       `json:"usage,omitempty"`
 	Scope        target.NetworkScope `json:"scope"`
 	Metadata     MetadataQuality     `json:"metadata"`
 	FirstSeen    time.Time           `json:"first_seen"`

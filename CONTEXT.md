@@ -21,7 +21,7 @@ Workspace search updates the visible service items as each character is entered,
 _Avoid_: submit-only filtering
 
 **Adaptive split**:
-The service workspace gives the list about 40% of a wide terminal and the detail pane the remaining space, while protecting a minimum readable list width. On narrow terminals it collapses to one focused pane rather than squeezing text.
+The service workspace gives the list about 40% of a wide terminal and the detail pane the remaining space, while protecting a 53-column minimum list-pane width for its process-usage columns. On narrow terminals it collapses to one focused pane rather than squeezing text. `z` zooms the focused left or right pane to the full workspace content area; pressing `z` again restores the split.
 _Avoid_: fixed equal panes, squeezed text
 
 **Selection continuity**:
@@ -46,7 +46,7 @@ The bottom status marks `o` as `TCP-only` when the selected route is raw Funnel 
 _Avoid_: inferred URL, application launch
 
 **Process termination**:
-`x` opens a focused confirmation for the selected listener process; Enter confirms, the PID/listener/identity are revalidated, and only SIGTERM is sent. An inactive configured exposure route has no current local process, so `x` reports that fact and directs the user to `d` to disable the route. While termination runs, the active listener row shows `TERMINATING` in the Status column; selected batches advance sequentially.
+`x` opens a focused confirmation for the selected listener process or marked process set; Enter confirms, every PID/listener/identity in the captured batch is revalidated, and only SIGTERM is sent. A refresh during confirmation keeps a valid batch open and cancels it if any captured process identity changes. An inactive configured exposure route has no current local process, so `x` reports that fact and directs the user to `d` to disable the route. While termination runs, the active listener row shows `TERMINATING` in the Status column; selected batches advance sequentially.
 _Avoid_: implicit process control, PID-only retargeting, SIGKILL escalation
 
 **Serve/Funnel route identity**:
@@ -75,7 +75,7 @@ The single navigable list groups items visually into local listeners, inactive c
 _Avoid_: hidden route tabs, separate list modes
 
 **Workspace chrome**:
-Persistent top and bottom status areas keep identity, source freshness, Serve/Funnel and HTTPS-path readiness, focus, search, operation state, warnings, and available keys visible while the user navigates. The bottom bar also displays the running build's short SHA for checked-out `HEAD` and a link to the Tailge repository. At constrained widths the link label compacts to `GitHub` and the status line prioritizes active progress or focus/path status. The `p` named-HTTP-path shortcut indicates whether an exact HTTPS path mode is currently ready. In its IPv6 path dialog, `Ctrl+B` toggles the explicit localhost backend alias and the confirmation preview calls out the weakened address guarantee; `o` stays an open-only shortcut.
+Persistent top and bottom status areas keep identity, source freshness, Serve/Funnel and HTTPS-path readiness, focus, search, operation state, warnings, and available keys visible while the user navigates. The bottom bar also displays the running build's short SHA for checked-out `HEAD` and a link to the Tailge repository. Grouped navigation hints adapt to terminal width; the selected sort mode is shown where space allows, while `o`/`O`/`y` availability remains visible with compact labels when needed. At constrained widths the link label compacts to `GitHub` and the status line prioritizes active progress or focus/path status. The `p` named-HTTP-path shortcut indicates whether an exact HTTPS path mode is currently ready. In its IPv6 path dialog, `Ctrl+B` toggles the explicit localhost backend alias and the confirmation preview calls out the weakened address guarantee; `o` stays an open-only shortcut.
 _Avoid_: hidden readiness, stderr-only warnings
 
 **Sticky feedback**:
@@ -127,7 +127,7 @@ An accepted search query remains visible and filters the workspace until deliber
 _Avoid_: disappearing filter, irreversible search edit
 
 **Compact service row**:
-A fixed-height list row carries only the selection state, concise service/target identity, exposure state, and relevant ownership; full diagnostics belong to details.
+A fixed-height list row carries selection state, concise service/target identity, exposure state, and best-effort process CPU and memory when available. macOS uses physical footprint with RSS fallback; Linux uses RSS. Unavailable measurements are marked with a dash, the source is identified in details/JSON, and full diagnostics belong to details.
 _Avoid_: multiline list row, hidden diagnostics
 
 **Redundant state indicator**:
@@ -151,11 +151,11 @@ The active keyboard commands follow the focused workspace mode: normal shortcuts
 _Avoid_: global mutation shortcuts, typing-triggered action
 
 **Single-target action**:
-`v` toggles only the current item. `V` enters/exits Vim-style visual-line selection; navigation extends the selection from its anchor without clearing previously selected rows. Exposure actions apply to the selected set sequentially, with independent exact-target validation, per-target verification, and failure reporting. A multi-route target still requires one exact route selection and cannot be included in a batch disable.
+`v` toggles only the current item. `V` enters/exits Vim-style visual-line selection; navigation extends the selection from its anchor without clearing previously selected rows. Exposure actions and `x` apply to the selected set sequentially, with independent exact-target or process-identity validation, per-target verification, and failure reporting. A multi-route target still requires one exact route selection and cannot be included in a batch disable.
 _Avoid_: bulk exposure, broad disable
 
-**Port-first order**:
-Within each visual service section, items default to ascending port, then address and stable identity; sorting never changes target identity.
+**Name-first order**:
+Within each visual service section, items default to case-insensitive ascending service name, then address, port, and stable identity. `S` cycles Name ascending, Name descending, and unsorted observation order; existing explicit port/address/exposure preferences remain configurable. Sorting never changes target identity.
 _Avoid_: unstable refresh order
 
 **Visible system listener**:
@@ -195,7 +195,7 @@ Details are organized as Summary, Alerts, Action Items, Listener, Exposure Route
 _Avoid_: unstructured diagnostic dump
 
 **Visible pane focus**:
-The focused pane is identified by its colored border and persistent status bar; panel titles stay clean, while the selected service row retains a written marker and highlight.
+The focused pane is identified by its colored border and persistent status bar; panel titles stay clean, while the selected service row retains a written marker and highlight. `z` zooms whichever pane has focus without changing selection or panel focus; focus navigation can choose the other pane while zoomed.
 _Avoid_: ambiguous focus
 
 **No-match detail state**:
@@ -203,7 +203,7 @@ When active search hides every item, details clear and show search-clearing guid
 _Avoid_: stale hidden details
 
 **Automatic pane sizing**:
-The first workspace version chooses pane geometry from terminal dimensions and does not expose manual split-resize controls. Split view requires at least 100 columns and 24 rows; below either threshold the workspace collapses to one pane.
+The workspace chooses pane geometry from terminal dimensions and does not expose manual split-resize controls. Split view requires at least 100 columns and 24 rows; below either threshold the workspace collapses to one pane. In split view, `z` toggles the focused list or details pane between the split and full-width/full-height content area.
 _Avoid_: squeezed fixed layout, premature resize key
 
 **Safe Vim sequence**:

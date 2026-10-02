@@ -32,6 +32,7 @@ type workspaceState struct {
 	width  int
 	height int
 	focus  paneFocus
+	zoomed bool
 
 	query             string
 	searching         bool

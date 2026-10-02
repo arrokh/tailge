@@ -56,7 +56,7 @@ tailge scan
 tailge scan --json
 ```
 
-The scan reports address, port, process, PID when available, metadata quality, and network scope. Linux discovery uses `lsof` when available and falls back to `ss`.
+The scan reports address, port, process, PID when available, metadata quality, and network scope. Its JSON form adds an optional `usage` object with `cpu_percent`, `memory_bytes`, and `memory_source` when process metrics are available. macOS prefers `phys_footprint` (`physical_footprint`) and falls back to RSS; Linux reports RSS. Linux listener discovery uses `lsof` when available and falls back to `ss`.
 
 ### Check readiness and routes
 
@@ -165,7 +165,7 @@ tailge config set sort name
 tailge config set color_theme dark
 ```
 
-Supported settings also include `show_system_listeners` and `show_inactive_configured_ports`. `color_theme` accepts `auto` (the default), `dark`, and `light`. `config validate` checks an existing file without creating a missing one. Invalid or unsafe configuration is preserved and mutations fail closed.
+`sort` accepts `name` (default, ascending), `name-desc`, `none`, `port`, `address`, and `exposure`. In the workspace, `S` cycles `name` → `name-desc` → `none` and saves the preference. Existing explicit settings such as `port` remain respected. Other supported settings include `show_system_listeners` and `show_inactive_configured_ports`. `color_theme` accepts `auto` (the default), `dark`, and `light`. `config validate` checks an existing file without creating a missing one. Invalid or unsafe configuration is preserved and mutations fail closed.
 
 In the TUI, `s`, `f`, and `d` open explicitly labeled Serve, Funnel, and Disabled previews; no provider mutation occurs until confirmation. `C` or `Ctrl-l` clears an accepted filter; `/` edits it and `Ctrl-u` clears the active search text.
 
@@ -187,7 +187,7 @@ Start it with:
 tailge
 ```
 
-The workspace uses Bubble Tea's alternate screen and raw keyboard mode only after TTY validation, and restores terminal state on exit. On terminals at least 100 columns by 24 rows it uses a roughly 40/60 service-list/detail split; smaller terminals collapse to one focused pane. The list is selected first, and refreshes preserve stable item identity.
+The workspace uses Bubble Tea's alternate screen and raw keyboard mode only after TTY validation, and restores terminal state on exit. On terminals at least 100 columns by 24 rows it uses a roughly 40/60 service-list/detail split, with a 53-column minimum list pane for its usage columns; smaller terminals collapse to one focused pane. `z` zooms the focused left or right pane to fill the workspace content area, and `z` again restores the split. The list is selected first, and refreshes preserve stable item identity.
 
 ### Shortcuts
 
@@ -195,6 +195,8 @@ The workspace uses Bubble Tea's alternate screen and raw keyboard mode only afte
 |---|---|
 | `j` / `k`, `n` / `N`, arrows | Navigate the list or scroll details |
 | `Tab` / `Shift-Tab`, `h` / `l` | Change pane focus |
+| `z` | Zoom the focused pane; press again to restore the split |
+| `S` | Cycle name ascending → name descending → unsorted; saves the preference |
 | `Enter` | Focus or expand details; never mutates |
 | `gg`, `G`, `Home`, `End` | First or last item |
 | `/` | Incremental search; `Enter` accepts, `Esc` cancels, `Ctrl-u` clears |
@@ -216,9 +218,9 @@ The workspace uses Bubble Tea's alternate screen and raw keyboard mode only afte
 | `?` | Open scrollable help |
 | `q` / `Ctrl-c` | Quit; guarded while Applying |
 
-The command palette supports `:refresh`, `:retry`, `:serve 3000`, `:funnel 3000`, `:disable 3000`, `:sort port`, `:config show`, `:config set key value`, `:config validate`, and `:quit`.
+The command palette supports `:refresh`, `:retry`, `:serve 3000`, `:funnel 3000`, `:disable 3000`, `:sort name|name-desc|none|port|address|exposure`, `:config show`, `:config set key value`, `:config validate`, and `:quit`.
 
-The service list uses one `SELECT` column: `[ ]` is unselected, `[✓]` is selected, and `[V]` is in the active visual range. Listeners sharing a port collapse into one row and use the available local port as the target. During confirmed process termination, the active row shows `TERMINATING`; selected batches advance one process at a time. Exposure actions on multiple items run sequentially and report each result independently.
+The service list uses one `SELECT` column: `[ ]` is unselected, `[✓]` is selected, and `[V]` is in the active visual range. Process rows include OS-reported CPU percentage and memory; `CPU%` is the platform's `ps %CPU` value, while `MEM` is macOS physical footprint (RSS fallback) or Linux RSS. Details and scan JSON name the memory source. These best-effort measurements show `—` when unavailable and do not participate in process identity or termination safety. Listeners sharing a port collapse into one row and use the available local port as the target. During confirmed process termination, the active row shows `TERMINATING`; selected batches advance one process at a time. Exposure actions and process termination on multiple items run sequentially and report each result independently.
 
 Action previews default to Cancel. Funnel displays a public-internet warning and requires moving focus to Confirm. Unknown, unavailable, stale, ambiguous, and read-only states block unsafe changes. The workspace remains usable when Tailscale or one data source is unavailable. The list groups local listeners, inactive configured routes, and unknown or unavailable rows; very small terminals show a resize notice instead of an overflowing modal.
 
@@ -230,9 +232,9 @@ Action previews default to Cancel. Funnel displays a public-internet warning and
 
 `y` copies an observed URL through OSC 52, so SSH, Mosh, and multiplexer sessions update the attached terminal client's clipboard. For Serve TCP without an observed URL it copies the same provider-DNS preview used by `o`.
 
-`x` only terminates a currently discovered, identity-revalidated local process. It sends SIGTERM once and never escalates to SIGKILL. An inactive configured route has no process to terminate; use `d` to disable the route.
+`x` only terminates currently discovered, identity-revalidated local processes. It opens one focused confirmation for the marked selection, then revalidates each captured PID/listener/process identity before sending SIGTERM sequentially; it never escalates to SIGKILL. A refresh keeps confirmation open while every captured process remains valid and cancels it if any identity changes. An inactive configured route has no process to terminate; use `d` to disable the route.
 
-The bottom bar shows whether `p` named HTTP paths are ready and shows `ok`, `off`, `TCP-only`, or `URL-only` for `o`, `O`, and `y`. It also displays the running build's short SHA for checked-out `HEAD` and a link to the Tailge repository; builds without injected commit metadata show `dev`. The commit is highlighted and the repository link is underlined according to the selected TUI theme; with `NO_COLOR=1`, written indicators remain visible without color and the hyperlink target is retained. The link label may compact to `GitHub` when space is limited; OSC 8-capable terminals make it clickable. On very narrow terminals, the footer prioritizes active progress or compact focus/path status. The SHA does not indicate whether local uncommitted changes were present when building.
+Where space allows, the bottom bar shows the selected sort mode, whether `p` named HTTP paths are ready, and `ok`, `off`, `TCP-only`, or `URL-only` availability for `o`, `O`, and `y`; constrained layouts compact these labels. Grouped keyboard hints adapt to terminal width so the primary navigation, sort, and help keys remain easy to scan. It also displays the running build's short SHA for checked-out `HEAD` and a link to the Tailge repository; builds without injected commit metadata show `dev`. The commit is highlighted and the repository link is underlined according to the selected TUI theme; with `NO_COLOR=1`, written indicators remain visible without color and the hyperlink target is retained. The link label may compact to `GitHub` when space is limited; OSC 8-capable terminals make it clickable. On very narrow terminals, the footer prioritizes active progress or compact focus/path status. The SHA does not indicate whether local uncommitted changes were present when building.
 
 ### Refresh and operation state
 

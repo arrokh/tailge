@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/arrokh/tailge/internal/fault"
@@ -162,12 +164,22 @@ func (d *OSListenerObserver) Terminate(ctx context.Context, requested Listener) 
 }
 
 func (d *OSListenerObserver) enrich(ctx context.Context, snapshot *ListenerSnapshot) {
+	pids := make([]int, 0, len(snapshot.Listeners))
+	seenPIDs := map[int]bool{}
+	for _, listener := range snapshot.Listeners {
+		if listener.PID > 0 && !seenPIDs[listener.PID] {
+			pids = append(pids, listener.PID)
+			seenPIDs[listener.PID] = true
+		}
+	}
+	usageByPID := processUsages(ctx, d.OS, pids)
 	for i := range snapshot.Listeners {
 		l := &snapshot.Listeners[i]
 		if l.PID == 0 {
 			l.Metadata = MetadataPartial
 			continue
 		}
+		l.Usage = usageByPID[l.PID]
 		if command := processCommand(ctx, d.OS, l.PID); command != "" {
 			l.CommandLine = redactCommandLine(command)
 			if strings.Contains(l.CommandLine, "[truncated]") {
@@ -189,6 +201,205 @@ func (d *OSListenerObserver) enrich(ctx context.Context, snapshot *ListenerSnaps
 			}
 		}
 	}
+}
+
+func processUsages(ctx context.Context, goos string, pids []int) map[int]*ProcessUsage {
+	result := map[int]*ProcessUsage{}
+	if goos != "darwin" && goos != "linux" {
+		return result
+	}
+	const maxPIDsPerCommand = 128
+	for start := 0; start < len(pids); start += maxPIDsPerCommand {
+		end := start + maxPIDsPerCommand
+		if end > len(pids) {
+			end = len(pids)
+		}
+		batch := pids[start:end]
+		values := make([]string, 0, len(batch))
+		for _, pid := range batch {
+			if pid > 0 {
+				values = append(values, strconv.Itoa(pid))
+			}
+		}
+		if len(values) == 0 {
+			continue
+		}
+		usageCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		command := exec.CommandContext(usageCtx, "ps", "-p", strings.Join(values, ","), "-o", "pid=", "-o", "%cpu=", "-o", "rss=")
+		command.WaitDelay = 250 * time.Millisecond
+		command.Env = localeCEnvironment()
+		var output, diagnostics boundedMetadataBuffer
+		output.max, diagnostics.max = 16*1024, 16*1024
+		command.Stdout, command.Stderr = &output, &diagnostics
+		err := command.Run()
+		cancel()
+		if err != nil || output.truncated {
+			continue
+		}
+		requested := make(map[int]bool, len(batch))
+		for _, pid := range batch {
+			requested[pid] = true
+		}
+		for _, line := range strings.Split(output.String(), "\n") {
+			pid, usage, err := parseProcessUsageRow(line)
+			if err == nil && requested[pid] {
+				result[pid] = &usage
+			}
+		}
+	}
+	if goos == "darwin" && len(result) > 0 {
+		requested := make([]int, 0, len(result))
+		for pid := range result {
+			requested = append(requested, pid)
+		}
+		sort.Ints(requested)
+		footprintCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		for pid, bytes := range processFootprints(footprintCtx, requested) {
+			if usage := result[pid]; usage != nil {
+				usage.MemoryBytes = bytes
+				usage.MemorySource = ProcessMemoryPhysicalFootprint
+			}
+		}
+		cancel()
+	}
+	return result
+}
+
+func processFootprints(ctx context.Context, pids []int) map[int]uint64 {
+	result := map[int]uint64{}
+	requested := make([]int, 0, len(pids))
+	seen := make(map[int]bool, len(pids))
+	for _, pid := range pids {
+		if pid > 0 && !seen[pid] {
+			requested = append(requested, pid)
+			seen[pid] = true
+		}
+	}
+	if len(requested) == 0 || ctx.Err() != nil {
+		return result
+	}
+	sort.Ints(requested)
+
+	// footprint is much slower when asked to inspect many processes in one
+	// invocation. Bound concurrency, but inspect each PID separately so a
+	// slow process cannot suppress every other process's physical footprint.
+	const maxConcurrentFootprints = 8
+	type footprintResult struct {
+		pid   int
+		bytes uint64
+	}
+	jobs := make(chan int)
+	results := make(chan footprintResult, len(requested))
+	workers := maxConcurrentFootprints
+	if workers > len(requested) {
+		workers = len(requested)
+	}
+	var group sync.WaitGroup
+	for range workers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for pid := range jobs {
+				if ctx.Err() != nil {
+					continue
+				}
+				command := exec.CommandContext(ctx, "footprint", "--noCategories", "-f", "bytes", strconv.Itoa(pid))
+				command.WaitDelay = 250 * time.Millisecond
+				command.Env = localeCEnvironment()
+				var output, diagnostics boundedMetadataBuffer
+				output.max, diagnostics.max = 16*1024, 16*1024
+				command.Stdout, command.Stderr = &output, &diagnostics
+				_ = command.Run()
+				if output.truncated {
+					continue
+				}
+				if bytes, ok := parseProcessFootprintOutput(output.String())[pid]; ok {
+					results <- footprintResult{pid: pid, bytes: bytes}
+				}
+			}
+		}()
+	}
+loop:
+	for _, pid := range requested {
+		select {
+		case jobs <- pid:
+		case <-ctx.Done():
+			break loop
+		}
+	}
+	close(jobs)
+	group.Wait()
+	close(results)
+	for item := range results {
+		result[item.pid] = item.bytes
+	}
+	return result
+}
+
+func parseProcessFootprintOutput(output string) map[int]uint64 {
+	result := map[int]uint64{}
+	currentPID := 0
+	for _, line := range strings.Split(output, "\n") {
+		if marker := strings.Index(line, "]:"); marker >= 0 {
+			start := strings.LastIndex(line[:marker], "[")
+			currentPID = 0
+			if start >= 0 {
+				if pid, err := strconv.Atoi(line[start+1 : marker]); err == nil && pid > 0 {
+					currentPID = pid
+				}
+			}
+			continue
+		}
+		fields := strings.Fields(line)
+		if currentPID == 0 || len(fields) != 3 || fields[0] != "phys_footprint:" || fields[2] != "B" {
+			continue
+		}
+		if bytes, err := strconv.ParseUint(fields[1], 10, 64); err == nil {
+			result[currentPID] = bytes
+		}
+		currentPID = 0
+	}
+	return result
+}
+
+func parseProcessUsageRow(output string) (int, ProcessUsage, error) {
+	fields := strings.Fields(output)
+	if len(fields) != 3 {
+		return 0, ProcessUsage{}, fmt.Errorf("expected PID, CPU, and RSS fields")
+	}
+	pid, err := strconv.Atoi(fields[0])
+	if err != nil || pid <= 0 {
+		return 0, ProcessUsage{}, fmt.Errorf("invalid process ID")
+	}
+	usage, err := parseProcessUsage(strings.Join(fields[1:], " "))
+	return pid, usage, err
+}
+
+func parseProcessUsage(output string) (ProcessUsage, error) {
+	fields := strings.Fields(output)
+	if len(fields) != 2 {
+		return ProcessUsage{}, fmt.Errorf("expected CPU and RSS fields")
+	}
+	cpu, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil || cpu < 0 || math.IsNaN(cpu) || math.IsInf(cpu, 0) {
+		return ProcessUsage{}, fmt.Errorf("invalid CPU percentage")
+	}
+	rssKiB, err := strconv.ParseUint(fields[1], 10, 64)
+	if err != nil || rssKiB > ^uint64(0)/1024 {
+		return ProcessUsage{}, fmt.Errorf("invalid resident memory")
+	}
+	return ProcessUsage{CPUPercent: cpu, MemoryBytes: rssKiB * 1024, MemorySource: ProcessMemoryRSS}, nil
+}
+
+func localeCEnvironment() []string {
+	environment := os.Environ()
+	result := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		if !strings.HasPrefix(entry, "LC_ALL=") {
+			result = append(result, entry)
+		}
+	}
+	return append(result, "LC_ALL=C")
 }
 
 func processCommand(ctx context.Context, goos string, pid int) string {

@@ -65,6 +65,8 @@ func (m *workspaceModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "space", " ":
 		m.openAction(nil)
+	case "S":
+		return m, m.cycleSort()
 	case "s":
 		m.openAction(ptrMode(exposuredata.ExposureServe))
 	case "f":
@@ -75,6 +77,21 @@ func (m *workspaceModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.openHTTPPathInput()
 	case "v":
 		m.toggleCurrentSelection()
+	case "z":
+		if !splitViewAvailable(m.width, m.height) {
+			m.transient = "Zoom requires split view (100 columns × 24 rows)"
+			return m, nil
+		}
+		m.zoomed = !m.zoomed
+		if m.zoomed {
+			pane := "List"
+			if m.focus == focusDetails {
+				pane = "Details"
+			}
+			m.transient = pane + " pane zoomed; press z to restore split view"
+		} else {
+			m.transient = "Split view restored"
+		}
 	case "V":
 		m.toggleVisualSelection()
 	case "U":

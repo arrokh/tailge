@@ -2,12 +2,14 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/arrokh/tailge/internal/buildinfo"
+	"github.com/arrokh/tailge/internal/discovery"
 	"github.com/arrokh/tailge/internal/exposure"
 	"github.com/arrokh/tailge/internal/exposuredata"
 	readinessmodel "github.com/arrokh/tailge/internal/readiness"
@@ -44,8 +46,8 @@ func (m *workspaceModel) workspaceView() string {
 	top := m.renderTop()
 	contentHeight := maxInt(3, m.height-6)
 	var body string
-	if m.width >= splitMinWidth && m.height >= splitMinHeight {
-		listWidth := maxInt(36, m.width*40/100)
+	if splitViewAvailable(m.width, m.height) && !m.zoomed {
+		listWidth := maxInt(minListPaneWidth, m.width*40/100)
 		if listWidth > m.width-40 {
 			listWidth = m.width - 40
 		}
@@ -153,18 +155,109 @@ func footerBuildIdentity(width int, status, theme string) (plain, linked string)
 	return plain, linked
 }
 
-func compactFooterStatus(focus, pathStatus, progress string) string {
-	switch {
-	case strings.HasPrefix(progress, "↻ Refreshing"):
-		return "Refreshing"
-	case strings.Contains(progress, "Applying"):
-		return "Applying"
-	case strings.Contains(progress, "Terminating process"):
-		return "Terminating"
-	case progress != "":
-		return progress
+func compactURLShortcutStatus(status string) string {
+	return strings.NewReplacer(" observed[", ":", " localhost[", ":", " copy[", ":", "]", "").Replace(status)
+}
+
+func compactSortLabel(sortKey string) string {
+	switch sortKey {
+	case "name":
+		return "Name↑"
+	case "name-desc":
+		return "Name↓"
+	case "none":
+		return "Unsorted"
+	case "address":
+		return "Address↑"
+	case "exposure":
+		return "Exposure↑"
 	default:
-		return focus + " " + strings.Replace(pathStatus, "p HTTP path", "p", 1)
+		return "Port↑"
+	}
+}
+
+func footerSortLabel(sortKey string) string {
+	switch sortKey {
+	case "name":
+		return "Name ↑"
+	case "name-desc":
+		return "Name ↓"
+	case "none":
+		return "Unsorted"
+	default:
+		return sortDescription(sortKey)
+	}
+}
+
+func compactFooterStatus(width int, focus, sortKey, pathStatus, progress string) string {
+	if progress != "" {
+		return progress
+	}
+	parts := []string{focus}
+	if width >= 40 {
+		parts = append(parts, compactSortLabel(sortKey))
+	}
+	parts = append(parts, strings.Replace(pathStatus, "p HTTP path", "p", 1))
+	return strings.Join(parts, " ")
+}
+
+func compactFooterStatusWithShortcuts(width int, focus, sortKey, pathStatus, urlStatus, progress string) string {
+	return compactFooterStatus(width, focus, sortKey, pathStatus, progress) + " " + compactURLShortcutStatus(urlStatus)
+}
+
+func footerKeyHints(width int, focus paneFocus, searching, zoomed, canZoom bool, urlStatus string) string {
+	if searching {
+		switch {
+		case width >= 68:
+			return "↑↓ Results · Enter Accept · Esc Cancel · Ctrl+u Clear"
+		case width >= 40:
+			return "Enter/Esc · " + compactURLShortcutStatus(urlStatus)
+		default:
+			hints := "Enter/Esc · " + compactURLShortcutStatus(urlStatus)
+			if lipgloss.Width(hints) <= width {
+				return hints
+			}
+			return compactURLShortcutStatus(urlStatus)
+		}
+	}
+	if width < 40 {
+		return compactURLShortcutStatus(urlStatus) + " · ? Help"
+	}
+	if width < 60 {
+		return "↑↓ Move · " + compactURLShortcutStatus(urlStatus)
+	}
+	zoomHint := ""
+	if canZoom {
+		zoomHint = " · z Zoom"
+		if zoomed {
+			zoomHint = " · z Restore"
+		}
+	}
+	if focus == focusDetails {
+		switch {
+		case width >= 120:
+			return "↑↓ Scroll · Tab List · v/V Select · s/f/d Routes · x Term · p Path · S Sort · / Find" + zoomHint + " · ? Help · q Quit"
+		case width >= 100:
+			return "↑↓ Scroll · Tab List · S Sort · / Find · ? Help · q Quit" + zoomHint
+		case width >= 72:
+			return "↑↓ Scroll · Tab List · S Sort · ? Help · q Quit" + zoomHint
+		case width >= 48:
+			return "↑↓ Scroll · Tab List · ? Help"
+		default:
+			return "↑↓ Scroll · ? Help"
+		}
+	}
+	switch {
+	case width >= 120:
+		return "↑↓ Move · Tab Focus · v/V Select · s/f/d Routes · x Term · p Path · S Sort · / Find" + zoomHint + " · ? Help · q Quit"
+	case width >= 100:
+		return "↑↓ Move · Tab Focus · v Mark · s/f/d Routes · S Sort · / Find · ? Help · q Quit" + zoomHint
+	case width >= 72:
+		return "↑↓ Move · Tab Focus · S Sort · / Find · ? Help · q Quit"
+	case width >= 48:
+		return "↑↓ Move · Tab Focus · S Sort · ? Help"
+	default:
+		return "↑↓ Move · ? Help"
 	}
 }
 
@@ -172,6 +265,9 @@ func (m *workspaceModel) renderBottom() string {
 	focus := "List"
 	if m.focus == focusDetails {
 		focus = "Details"
+	}
+	if m.zoomed {
+		focus += " (zoomed)"
 	}
 	search := ""
 	if m.searching {
@@ -193,27 +289,28 @@ func (m *workspaceModel) renderBottom() string {
 	if progress == "" && m.processBusy {
 		progress = "Terminating process"
 	}
-	keys := m.urlShortcutStatus()
 	selection := ""
 	if count := m.selectionCount(); count > 0 {
 		selection = fmt.Sprintf("  selected:%d", count)
 	}
-	if m.focus == focusDetails {
-		keys += "  v toggle  V visual  U clear selection  s/f/d batch  p HTTP path  Enter inspect  Esc cancel visual/list  C clear filter  c cancel  x terminate selected"
-	} else if m.query != "" {
-		keys = "j/k navigate  v toggle  V visual  U clear selection  p HTTP path  C clear filter  / edit filter  Tab focus  " + keys + "  ? help  q quit"
-	} else {
-		keys = "j/k or ↑/↓ navigate  v toggle  V visual  U clear selection  p HTTP path  Tab/h/l focus  " + keys + "  ? help  : palette  q quit"
+	urlStatus := m.urlShortcutStatus()
+	status := fmt.Sprintf("Focus: %s  Sort: %s  %s  %s%s%s", focus, footerSortLabel(m.cfg.Sort), m.httpPathStatusLabel(), compactURLShortcutStatus(urlStatus), search, selection)
+	if progress != "" {
+		status += "  " + progress
 	}
-	status := fmt.Sprintf("Focus: %s  %s%s%s  %s", focus, m.httpPathStatusLabel(), search, selection, progress)
 	identityText, identityLink := footerBuildIdentity(m.width, status, m.cfg.ColorTheme)
 	statusWidth := maxInt(0, m.width-lipgloss.Width(identityText)-2)
-	if m.width < 60 && lipgloss.Width(status) > statusWidth {
-		status = compactFooterStatus(focus, m.httpPathStatusLabel(), progress)
+	if lipgloss.Width(status) > statusWidth {
+		if m.width < 60 {
+			status = compactFooterStatus(m.width, focus, m.cfg.Sort, m.httpPathStatusLabel(), progress)
+		} else {
+			status = compactFooterStatusWithShortcuts(m.width, focus, m.cfg.Sort, m.httpPathStatusLabel(), urlStatus, progress)
+		}
 	}
 	status = ansi.Truncate(status, statusWidth, "...")
 	padding := strings.Repeat(" ", maxInt(0, statusWidth-lipgloss.Width(status)))
-	return status + padding + "  " + identityLink + "\n" + truncate(keys, m.width)
+	keyHints := footerKeyHints(m.width, m.focus, m.searching, m.zoomed, splitViewAvailable(m.width, m.height), urlStatus)
+	return status + padding + "  " + identityLink + "\n" + ansi.Truncate(keyHints, m.width, "…")
 }
 
 func (m *workspaceModel) renderList(width, height int) string {
@@ -248,56 +345,87 @@ func (m *workspaceModel) renderList(width, height int) string {
 	return clipLines(lines, m.listOffset(lines, height), height)
 }
 
-func listenerTableWidths(width int) (service, target, mode, state int) {
-	// The fixed six-cell selection/focus marker plus three separators leave
-	// the remaining width for the service table columns.
-	available := maxInt(20, width-9)
-	if available < 33 {
-		service = maxInt(7, available*30/100)
-		target = maxInt(7, available*27/100)
-		mode = maxInt(4, available*14/100)
-		state = available - service - target - mode
-		for state < 5 && mode > 4 {
-			mode--
-			state++
+type listenerTableLayout struct {
+	service int
+	target  int
+	mode    int
+	state   int
+	cpu     int
+	memory  int
+}
+
+type listenerTableColumn struct {
+	name  string
+	width int
+}
+
+func (layout listenerTableLayout) columns() []listenerTableColumn {
+	columns := []listenerTableColumn{
+		{name: "SERVICE", width: layout.service},
+		{name: "TARGET", width: layout.target},
+		{name: "MODE", width: layout.mode},
+		{name: "STATUS", width: layout.state},
+		{name: "CPU%", width: layout.cpu},
+		{name: "MEM", width: layout.memory},
+	}
+	visible := columns[:0]
+	for _, column := range columns {
+		if column.width > 0 {
+			visible = append(visible, column)
 		}
-		for state < 5 && target > 7 {
-			target--
-			state++
-		}
-		for state < 5 && service > 5 {
-			service--
-			state++
-		}
-		return service, target, mode, maxInt(5, state)
 	}
-	service = clamp(available*34/100, 10, 26)
-	target = clamp(available*29/100, 10, 22)
-	mode = clamp(available*16/100, 6, 12)
-	state = available - service - target - mode
-	for state < 9 && mode > 6 {
-		mode--
-		state++
+	return visible
+}
+
+func listenerTableWidths(width int) listenerTableLayout {
+	// Keep CPU and RSS visible even in compact list views. At very narrow
+	// widths, target and status columns are progressively omitted rather than
+	// truncating the resource columns off the right edge.
+	switch {
+	case width >= 51:
+		layout := listenerTableLayout{service: 7, target: 7, mode: 5, state: 11, cpu: 5, memory: 5}
+		extra := width - 51
+		serviceExtra := minInt(extra, 19)
+		layout.service += serviceExtra
+		extra -= serviceExtra
+		targetExtra := minInt(extra, 16)
+		layout.target += targetExtra
+		extra -= targetExtra
+		layout.state += extra
+		return layout
+	case width >= 42:
+		return listenerTableLayout{service: 7, mode: 4, state: 11, cpu: 5, memory: 5}
+	case width >= 36:
+		return listenerTableLayout{service: 6, mode: 4, state: 6, cpu: 5, memory: 5}
+	case width >= 29:
+		return listenerTableLayout{service: 6, mode: 4, cpu: 5, memory: 5}
+	default:
+		return listenerTableLayout{service: maxInt(1, width-18), cpu: 5, memory: 5}
 	}
-	for state < 9 && target > 10 {
-		target--
-		state++
-	}
-	for state < 9 && service > 8 {
-		service--
-		state++
-	}
-	return service, target, mode, maxInt(9, state)
 }
 
 func listenerTableHeader(width int) string {
-	service, target, mode, state := listenerTableWidths(width)
-	return paint("auto", "1;37", fmt.Sprintf("SELECT %-*s %-*s %-*s %-*s", service, truncate("SERVICE", service), target, truncate("TARGET", target), mode, truncate("MODE", mode), state, truncate("STATUS", state)))
+	columns := listenerTableWidths(width).columns()
+	cells := make([]string, 0, len(columns))
+	for _, column := range columns {
+		label := column.name
+		if column.name == "SERVICE" && column.width < 7 {
+			label = "SVC"
+		} else if column.name == "TARGET" && column.width < 7 {
+			label = "TGT"
+		}
+		cells = append(cells, fmt.Sprintf("%-*s", column.width, truncate(label, column.width)))
+	}
+	return paint("auto", "1;37", "SELECT "+strings.Join(cells, " "))
 }
 
 func listenerTableDivider(width int) string {
-	service, target, mode, state := listenerTableWidths(width)
-	return paint("auto", "2;36", "      "+strings.Repeat("─", service+target+mode+state+3))
+	columns := listenerTableWidths(width).columns()
+	columnWidth := maxInt(0, len(columns)-1)
+	for _, column := range columns {
+		columnWidth += column.width
+	}
+	return paint("auto", "2;36", "      "+strings.Repeat("─", columnWidth))
 }
 
 func listenerTableRow(item exposure.ReconciledItem, width int, active, marked, visual bool, theme string) string {
@@ -305,7 +433,7 @@ func listenerTableRow(item exposure.ReconciledItem, width int, active, marked, v
 }
 
 func listenerTableRowWithStatus(item exposure.ReconciledItem, width int, active, marked, visual bool, theme, statusOverride string) string {
-	serviceWidth, targetWidth, modeWidth, stateWidth := listenerTableWidths(width)
+	layout := listenerTableWidths(width)
 	name := item.ID
 	if item.Listener != nil {
 		name = valueOr(item.Listener.Name, item.Listener.Target.String())
@@ -318,30 +446,111 @@ func listenerTableRowWithStatus(item exposure.ReconciledItem, width int, active,
 	status := stateBadgeText(item.State)
 	if statusOverride != "" {
 		statusState = exposuredata.ExposureApplying
-		status = stateGlyph(statusState) + " " + statusOverride
+		status = statusOverride
 	}
-	status = truncate(status, stateWidth)
-	columns := fmt.Sprintf("%-*s %-*s %-*s ", serviceWidth, truncate(sanitizeTUIText(name), serviceWidth), targetWidth, truncate(sanitizeTUIText(target), targetWidth), modeWidth, truncate(sanitizeTUIText(displayModeLabel(item)), modeWidth))
-	statusCell := fmt.Sprintf("%-*s", stateWidth, status)
+	cpu, memory := "—", "—"
+	if item.Listener != nil && item.Listener.Usage != nil {
+		cpu = processCPUCell(item.Listener.Usage.CPUPercent)
+		memory = processMemoryCell(item.Listener.Usage.MemoryBytes)
+	}
+	values := map[string]string{
+		"SERVICE": sanitizeTUIText(name),
+		"TARGET":  sanitizeTUIText(target),
+		"MODE":    sanitizeTUIText(displayModeLabel(item)),
+		"STATUS":  sanitizeTUIText(status),
+		"CPU%":    cpu,
+		"MEM":     memory,
+	}
+	columns := layout.columns()
+	plainCells := make([]string, 0, len(columns))
+	renderedCells := make([]string, 0, len(columns))
+	for _, column := range columns {
+		cell := fmt.Sprintf("%-*s", column.width, truncate(values[column.name], column.width))
+		plainCells = append(plainCells, cell)
+		if column.name == "STATUS" && !active && !(visual && marked) {
+			cell = paint(theme, stateColor(statusState), cell)
+		}
+		renderedCells = append(renderedCells, cell)
+	}
 	rawPrefix := itemMarker(active, marked, visual)
-	plainBody := columns + statusCell
-	if width < 38 {
-		row := truncate(rawPrefix+plainBody, width)
-		if visual && marked {
-			return paint(theme, "1;35", row)
-		}
-		if active {
-			return rawPrefix + paint(theme, "1;36", strings.TrimPrefix(row, rawPrefix))
-		}
-		return row
-	}
+	plainBody := strings.Join(plainCells, " ")
 	if visual && marked {
 		return paint(theme, "1;35", rawPrefix+plainBody)
 	}
 	if active {
 		return rawPrefix + paint(theme, "1;36", plainBody)
 	}
-	return rawPrefix + columns + paint(theme, stateColor(statusState), statusCell)
+	return rawPrefix + strings.Join(renderedCells, " ")
+}
+
+func processCPUCell(percent float64) string {
+	if percent < 0 || math.IsNaN(percent) || math.IsInf(percent, 0) {
+		return "—"
+	}
+	if percent >= 1000 {
+		return ">999%"
+	}
+	if percent >= 99.95 {
+		return fmt.Sprintf("%.0f%%", percent)
+	}
+	return fmt.Sprintf("%.1f%%", percent)
+}
+
+func processMemoryCell(bytes uint64) string {
+	const (
+		kib = uint64(1024)
+		mib = kib * 1024
+		gib = mib * 1024
+		tib = gib * 1024
+	)
+	switch {
+	case bytes < kib:
+		return "<1K"
+	case bytes < mib:
+		return fmt.Sprintf("%dK", bytes/kib)
+	case bytes < gib:
+		return fmt.Sprintf("%dM", bytes/mib)
+	case bytes < tib:
+		value := float64(bytes) / float64(gib)
+		if value < 99.95 {
+			return fmt.Sprintf("%.1fG", value)
+		}
+		return fmt.Sprintf("%.0fG", value)
+	default:
+		value := float64(bytes) / float64(tib)
+		if value >= 1000 {
+			return ">999T"
+		}
+		if value < 10 {
+			return fmt.Sprintf("%.1fT", value)
+		}
+		return fmt.Sprintf("%.0fT", value)
+	}
+}
+
+func processMemorySourceLabel(source discovery.ProcessMemorySource) string {
+	if source == discovery.ProcessMemoryPhysicalFootprint {
+		return "physical footprint"
+	}
+	return "RSS"
+}
+
+func processMemoryDetail(bytes uint64) string {
+	const (
+		mib = uint64(1024 * 1024)
+		gib = mib * 1024
+		tib = gib * 1024
+	)
+	switch {
+	case bytes < mib:
+		return fmt.Sprintf("%d KiB", bytes/1024)
+	case bytes < gib:
+		return fmt.Sprintf("%.1f MiB", float64(bytes)/float64(mib))
+	case bytes < tib:
+		return fmt.Sprintf("%.2f GiB", float64(bytes)/float64(gib))
+	default:
+		return fmt.Sprintf("%.2f TiB", float64(bytes)/float64(tib))
+	}
 }
 
 func (m *workspaceModel) processTerminating(item exposure.ReconciledItem) bool {
@@ -529,6 +738,12 @@ func (m *workspaceModel) renderDetails(width, height int) string {
 			"  metadata: "+string(l.Metadata),
 			"  discovered: "+timeText(l.LastSeen),
 		)
+		if l.Usage != nil {
+			lines = append(lines,
+				fmt.Sprintf("  CPU usage: %s (ps %%CPU)", processCPUCell(l.Usage.CPUPercent)),
+				fmt.Sprintf("  memory (%s): %s", processMemorySourceLabel(l.Usage.MemorySource), processMemoryDetail(l.Usage.MemoryBytes)),
+			)
+		}
 		if l.CommandLine != "" {
 			lines = append(lines, "  command: "+l.CommandLine)
 		}

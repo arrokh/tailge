@@ -82,9 +82,16 @@ func (m *workspaceModel) invalidatePreviewIfChanged() {
 		return
 	}
 	if m.modal == modalTerminateProcess {
-		item, ok := m.selectedItem()
-		if !ok || item.ID != m.modalItemID || item.Listener == nil || workspace.ProcessFingerprint(*item.Listener) != m.modalProcessFingerprint {
+		valid := len(m.processBatch) > 0
+		for _, target := range m.processBatch {
+			if _, err := m.revalidateProcessTarget(target); err != nil {
+				valid = false
+				break
+			}
+		}
+		if !valid {
 			m.modal = modalNone
+			m.processBatch = nil
 			m.setBanner("Selection changed — refresh required", true)
 		}
 		return

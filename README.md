@@ -73,6 +73,8 @@ Named HTTP paths use Tailscale HTTPS on standard port 443; an explicit `--root -
 
 Exposure mutations require an exact target, explicit confirmation where applicable, and fresh verification. Multiple complete, distinct routes for one listener display as active with mode `MULTI`; `d` opens an exact-route chooser, while aggregate mode changes remain blocked. Unknown, stale, ambiguous, unavailable, unsupported, or external route identity fails closed. See the [usage guide](docs/usage.md) for commands, TUI shortcuts, configuration, safety rules, and exit codes.
 
+In the workspace, `v`/`V` multi-selection applies to both exposure previews (`s`/`f`/`d`) and guarded process termination (`x`); termination confirms once, revalidates every selected process, and sends SIGTERM sequentially. Listener rows show CPU and memory when available: macOS physical footprint (falling back to RSS), or Linux RSS. New installations sort by service name ascending; `S` cycles ascending, descending, and unsorted. The grouped footer adapts its navigation hints to terminal width. Press `z` to zoom the focused list or details pane to the full workspace area, then press it again to restore the split.
+
 ## Documentation
 
 - [`docs/usage.md`](docs/usage.md) — installation, CLI and TUI usage, configuration, safety, and development checks

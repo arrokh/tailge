@@ -90,6 +90,69 @@ func TestOrderedUsesConfiguredSortKey(t *testing.T) {
 	}
 }
 
+func TestOrderedSupportsDescendingNameAndUnsortedModes(t *testing.T) {
+	items := []exposure.ReconciledItem{
+		{ID: "z", Listener: &discovery.Listener{Name: "zulu", Target: targetmodel.Target{Address: "127.0.0.1", Port: 80, Protocol: "tcp"}}},
+		{ID: "a", Listener: &discovery.Listener{Name: "alpha", Target: targetmodel.Target{Address: "127.0.0.1", Port: 8080, Protocol: "tcp"}}},
+		{ID: "m", Listener: &discovery.Listener{Name: "middle", Target: targetmodel.Target{Address: "127.0.0.1", Port: 9000, Protocol: "tcp"}}},
+	}
+	orderedIDs := func(key string) []string {
+		result := ordered(items, key)
+		ids := make([]string, len(result))
+		for index, item := range result {
+			ids[index] = item.ID
+		}
+		return ids
+	}
+	if got := strings.Join(orderedIDs("name-desc"), ","); got != "z,m,a" {
+		t.Fatalf("descending name order = %q, want z,m,a", got)
+	}
+	if got := strings.Join(orderedIDs("none"), ","); got != "z,a,m" {
+		t.Fatalf("unsorted order = %q, want original z,a,m", got)
+	}
+}
+
+func TestSortShortcutCyclesAndPreservesSelectedIdentity(t *testing.T) {
+	m := workspaceFixture()
+	m.cfg.Sort = "name"
+	second := discovery.Listener{ID: "listener-api", Name: "api", Target: targetmodel.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}}
+	third := discovery.Listener{ID: "listener-db", Name: "db", Target: targetmodel.Target{Address: "127.0.0.1", Port: 5000, Protocol: "tcp"}}
+	m.view.Items = append(m.view.Items,
+		exposure.ReconciledItem{ID: second.ID, Listener: &second},
+		exposure.ReconciledItem{ID: third.ID, Listener: &third},
+	)
+	m.selectedID = "listener-app"
+	m.reselect(m.selectedID, m.selectedIdx)
+	for _, sortKey := range []string{"name-desc", "none", "name"} {
+		m.Update(keyRune('S'))
+		if m.cfg.Sort != sortKey {
+			t.Fatalf("sort after S = %q, want %q", m.cfg.Sort, sortKey)
+		}
+		if m.selectedID != "listener-app" {
+			t.Fatalf("sort %q changed selected identity to %q", sortKey, m.selectedID)
+		}
+	}
+}
+
+func TestPaletteSortPreservesSelectionAndOffersEverySupportedSort(t *testing.T) {
+	m := workspaceFixture()
+	second := discovery.Listener{ID: "listener-api", Name: "api", Target: targetmodel.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}}
+	m.view.Items = append(m.view.Items, exposure.ReconciledItem{ID: second.ID, Listener: &second})
+	m.selectedID = "listener-app"
+	m.reselect(m.selectedID, m.selectedIdx)
+	m.openPalette()
+	m.paletteInput.SetValue(":sort")
+	for _, sortKey := range []string{"name", "name-desc", "none", "port", "address", "exposure"} {
+		if !strings.Contains(strings.Join(m.filteredPalette(), "\n"), ":sort "+sortKey) {
+			t.Errorf("sort mode %q missing from palette suggestions: %#v", sortKey, m.filteredPalette())
+		}
+	}
+	m.executePalette(":sort name-desc")
+	if m.cfg.Sort != "name-desc" || m.selectedID != "listener-app" || m.selectedIdx != 0 {
+		t.Fatalf("palette sort failed to retain focused item: sort=%q id=%q index=%d", m.cfg.Sort, m.selectedID, m.selectedIdx)
+	}
+}
+
 func TestCopySelectedURLKeepsURLVisibleWhenClipboardFails(t *testing.T) {
 	items := []exposure.ReconciledItem{{Routes: []exposuredata.ExposureRoute{{URL: "https://dev.example.ts.net"}}}}
 	var out, errOut bytes.Buffer
@@ -449,8 +512,73 @@ func TestFooterShowsBuildCommitAndLinkedRepository(t *testing.T) {
 	if width := lipgloss.Width(lines[0]); width > m.width {
 		t.Fatalf("footer identity line exceeds width: got %d, want <= %d: %q", width, m.width, lines[0])
 	}
-	if !strings.Contains(lines[1], "j/k or ↑/↓ navigate") {
-		t.Fatalf("build identity displaced shortcut hints: %q", lines[1])
+	if !strings.Contains(lines[1], "↑↓ Move") || !strings.Contains(lines[1], "S Sort") || !strings.Contains(lines[1], "? Help") {
+		t.Fatalf("build identity displaced grouped navigation hints: %q", lines[1])
+	}
+}
+
+func TestFooterUsesGroupedHintsThatAdaptToWidth(t *testing.T) {
+	m := workspaceFixture()
+	for _, test := range []struct {
+		width int
+		want  []string
+	}{
+		{120, []string{"↑↓ Move", "Tab Focus", "v/V Select", "s/f/d Routes", "x Term", "p Path", "S Sort", "/ Find", "z Zoom", "? Help", "q Quit"}},
+		{100, []string{"↑↓ Move", "Tab Focus", "v Mark", "s/f/d Routes", "S Sort", "/ Find", "z Zoom", "? Help", "q Quit"}},
+		{72, []string{"↑↓ Move", "Tab Focus", "S Sort", "/ Find", "? Help", "q Quit"}},
+		{30, []string{"o:off", "O:ok", "y:off", "? Help"}},
+	} {
+		m.width = test.width
+		lines := strings.Split(m.renderBottom(), "\n")
+		visible := ansi.Strip(lines[1])
+		for _, hint := range test.want {
+			if !strings.Contains(visible, hint) {
+				t.Errorf("width %d footer omitted %q: %q", test.width, hint, visible)
+			}
+		}
+		if width := lipgloss.Width(lines[1]); width > test.width {
+			t.Errorf("width %d footer hint row overflowed at %d columns: %q", test.width, width, visible)
+		}
+	}
+	m.width, m.height, m.zoomed = 100, 30, true
+	if line := ansi.Strip(strings.Split(m.renderBottom(), "\n")[1]); !strings.Contains(line, "z Restore") {
+		t.Fatalf("zoomed footer did not explain restore shortcut: %q", line)
+	}
+	m.width, m.height, m.zoomed, m.focus = 120, 30, false, focusDetails
+	if line := ansi.Strip(strings.Split(m.renderBottom(), "\n")[1]); !strings.Contains(line, "↑↓ Scroll") || !strings.Contains(line, "Tab List") {
+		t.Fatalf("details footer did not explain scroll/focus navigation: %q", line)
+	}
+}
+
+func TestFooterShowsSortModeAndLargeOperationsKeepPriority(t *testing.T) {
+	m := workspaceFixture()
+	for _, test := range []struct {
+		sortKey string
+		label   string
+	}{{"name", "Name ↑"}, {"name-desc", "Name ↓"}, {"none", "Unsorted"}} {
+		m.cfg.Sort = test.sortKey
+		line := ansi.Strip(strings.Split(m.renderBottom(), "\n")[0])
+		if !strings.Contains(line, "Sort: "+test.label) {
+			t.Errorf("sort %q missing from footer: %q", test.sortKey, line)
+		}
+	}
+
+	m.width, m.cfg.Sort, m.transient = 80, "name", "Applying batch (2/4)"
+	line := ansi.Strip(strings.Split(m.renderBottom(), "\n")[0])
+	if !strings.Contains(line, "Applying batch (2/4)") || !strings.Contains(line, "o:off") || !strings.Contains(line, "y:off") {
+		t.Fatalf("applying status obscured shortcut availability: %q", line)
+	}
+
+	m.width, m.searching, m.transient = 30, true, ""
+	lines := strings.Split(m.renderBottom(), "\n")
+	visible := ansi.Strip(lines[1])
+	for _, hint := range []string{"Enter/Esc", "o:off", "O:ok", "y:off"} {
+		if !strings.Contains(visible, hint) {
+			t.Errorf("narrow search footer omitted %q: %q", hint, visible)
+		}
+	}
+	if width := lipgloss.Width(lines[1]); width > m.width {
+		t.Errorf("narrow search footer overflowed: %d > %d: %q", width, m.width, visible)
 	}
 }
 
@@ -520,8 +648,8 @@ func TestFooterUsesDevelopmentFallbackAndCompactRepositoryLink(t *testing.T) {
 	if width := lipgloss.Width(lines[0]); width > m.width {
 		t.Fatalf("narrow footer identity line exceeds width: got %d, want <= %d: %q", width, m.width, lines[0])
 	}
-	if !strings.Contains(lines[1], "j/k or ↑/↓ navigate") {
-		t.Fatalf("narrow build identity displaced shortcut hints: %q", lines[1])
+	if !strings.Contains(lines[1], "? Help") || !strings.Contains(lines[1], "o:off") {
+		t.Fatalf("narrow footer hid help or shortcut availability: %q", lines[1])
 	}
 }
 
@@ -596,7 +724,7 @@ func TestHelpDocumentsShortcutGroups(t *testing.T) {
 	help := strings.Join(helpLines(), "\n")
 	for _, text := range []string{
 		"WORKSPACE / NAVIGATION", "SEARCH / FILTER", "ACTION PREVIEW", "CONFIRMATION / APPLYING", "COMMAND PALETTE", "HELP", "SAFETY / STATE",
-		"C or Ctrl-l", "U                    clear all selected items", "s                    preview private Serve", "f                    preview public Funnel", "d                    preview Disable", "p                    add one named HTTP path", "choose among paths", "Ctrl-d/Page Down", "Ctrl-u/Page Up", "Home/End", "Funnel               remains public",
+		"C or Ctrl-l", "U                    clear all selected items", "s                    preview private Serve", "f                    preview public Funnel", "d                    preview Disable", "p                    add one named HTTP path", "choose among paths", "Ctrl-d/Page Down", "Ctrl-u/Page Up", "Home/End", "Funnel               remains public", "z                    zoom the focused pane", "CPU% / MEM",
 	} {
 		if !strings.Contains(help, text) {
 			t.Fatalf("help missing %q:\n%s", text, help)
@@ -1603,6 +1731,8 @@ func TestLocalURLUsesSelectedListenerPort(t *testing.T) {
 
 func TestWorkspaceVAndShiftVSelection(t *testing.T) {
 	m := workspaceFixture()
+	// Anchor the selection before adding a row that sorts before the current item.
+	m.selectedID = m.view.Items[0].ID
 	second := discovery.Listener{ID: "listener-two", Name: "api", Process: "node", PID: 4343, Target: targetmodel.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}, Scope: targetmodel.ScopeLoopback, Metadata: discovery.MetadataComplete}
 	m.view.Items = append(m.view.Items, exposure.ReconciledItem{ID: second.ID, Listener: &second, State: exposuredata.ExposureState("disabled"), Mode: exposuredata.ExposureDisabled})
 	m.Update(keyRune('v'))
@@ -1631,6 +1761,43 @@ func TestWorkspaceVAndShiftVSelection(t *testing.T) {
 	}
 }
 
+func TestWorkspaceZoomTogglesTheFocusedPane(t *testing.T) {
+	m := workspaceFixture()
+	m.width, m.height = 120, 30
+	if view := m.View(); !strings.Contains(view, "SERVICE LIST") || !strings.Contains(view, "DETAILS") {
+		t.Fatalf("workspace did not start in split view: %q", view)
+	}
+	m.Update(keyRune('z'))
+	zoomedList := m.View()
+	if !m.zoomed || !strings.Contains(zoomedList, "SERVICE LIST") || strings.Contains(zoomedList, "DETAILS") || !strings.Contains(m.transient, "List pane zoomed") {
+		t.Fatalf("z did not zoom the focused list pane or show zoom status: zoomed=%t view=%q", m.zoomed, zoomedList)
+	}
+	if lines := strings.Split(zoomedList, "\n"); len(lines) < 3 || lipgloss.Width(lines[2]) != m.width {
+		t.Fatalf("zoomed list did not fill terminal width %d: %q", m.width, zoomedList)
+	}
+	m.Update(keyType(tea.KeyRight))
+	zoomedDetails := m.View()
+	if !m.zoomed || !strings.Contains(zoomedDetails, "DETAILS") || strings.Contains(zoomedDetails, "SERVICE LIST") {
+		t.Fatalf("focus change did not display the focused pane while zoomed: zoomed=%t view=%q", m.zoomed, zoomedDetails)
+	}
+	if lines := strings.Split(zoomedDetails, "\n"); len(lines) < 3 || lipgloss.Width(lines[2]) != m.width {
+		t.Fatalf("zoomed details did not fill terminal width %d: %q", m.width, zoomedDetails)
+	}
+	m.Update(keyRune('z'))
+	if m.zoomed || !strings.Contains(m.View(), "SERVICE LIST") || !strings.Contains(m.View(), "DETAILS") {
+		t.Fatalf("z did not restore split view: zoomed=%t view=%q", m.zoomed, m.View())
+	}
+}
+
+func TestWorkspaceZoomRequiresSplitView(t *testing.T) {
+	m := workspaceFixture()
+	m.width, m.height = splitMinWidth-1, splitMinHeight
+	m.Update(keyRune('z'))
+	if m.zoomed || !strings.Contains(m.transient, "Zoom requires split view") {
+		t.Fatalf("zoom changed state without a split view: zoomed=%t transient=%q", m.zoomed, m.transient)
+	}
+}
+
 func TestVisualSelectionMarkerUsesColorWithoutDependingOnIt(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
 	item := workspaceFixture().view.Items[0]
@@ -1648,6 +1815,55 @@ func TestVisualSelectionMarkerUsesColorWithoutDependingOnIt(t *testing.T) {
 	row = listenerTableRow(item, 100, false, true, true, "dark")
 	if !strings.Contains(row, "[V]") || strings.Contains(row, "\x1b[") {
 		t.Fatalf("visual marker was not accessible without color: %q", row)
+	}
+}
+
+func TestListenerListShowsCPUAndResidentMemory(t *testing.T) {
+	m := workspaceFixture()
+	m.view.Items[0].Listener.Usage = &discovery.ProcessUsage{CPUPercent: 12.5, MemoryBytes: 42 * 1024 * 1024}
+	row := listenerTableRow(m.view.Items[0], 51, false, false, false, "")
+	if !strings.Contains(listenerTableHeader(51), "CPU%") || !strings.Contains(listenerTableHeader(51), "MEM") || !strings.Contains(row, "12.5%") || !strings.Contains(row, "42M") {
+		t.Fatalf("list omitted process resource usage at normal split width: header=%q row=%q", listenerTableHeader(51), row)
+	}
+	if view := m.View(); !strings.Contains(view, "12.5%") || !strings.Contains(view, "42M") {
+		t.Fatalf("normal workspace view hid process resource usage: %q", view)
+	}
+	details := m.renderDetails(100, 40)
+	if !strings.Contains(details, "CPU usage: 12.5% (ps %CPU)") || !strings.Contains(details, "memory (RSS): 42.0 MiB") {
+		t.Fatalf("details omitted source-labeled process usage: %q", details)
+	}
+}
+
+func TestListenerDetailsLabelPhysicalFootprintAndKeepLargeMemoryPrecision(t *testing.T) {
+	m := workspaceFixture()
+	m.view.Items[0].Listener.Usage = &discovery.ProcessUsage{
+		CPUPercent: 7.5, MemoryBytes: 13260138336,
+		MemorySource: discovery.ProcessMemoryPhysicalFootprint,
+	}
+	row := listenerTableRow(m.view.Items[0], 51, false, false, false, "")
+	if !strings.Contains(row, "12.3G") {
+		t.Fatalf("large physical footprint was not rendered precisely: %q", row)
+	}
+	details := m.renderDetails(100, 40)
+	if !strings.Contains(details, "memory (physical footprint): 12.35 GiB") {
+		t.Fatalf("details did not name the physical-footprint metric: %q", details)
+	}
+}
+
+func TestListenerListMarksUnavailableCPUAndMemory(t *testing.T) {
+	item := workspaceFixture().view.Items[0]
+	row := listenerTableRow(item, 100, false, false, false, "")
+	if strings.Count(row, "—") < 2 {
+		t.Fatalf("unavailable CPU and memory were not both marked: %q", row)
+	}
+}
+
+func TestProcessMemoryCellPreservesPrecisionForLargeFootprints(t *testing.T) {
+	if got := processMemoryCell(13260138336); got != "12.3G" {
+		t.Fatalf("large physical footprint cell = %q, want 12.3G", got)
+	}
+	if got := processMemoryCell(100*(1<<30) - 1); got != "100G" {
+		t.Fatalf("near-100-GiB memory cell = %q, want a compact value with its unit", got)
 	}
 }
 
@@ -1771,6 +1987,14 @@ func TestWorkspaceProcessTerminationSupportsSelectedBatch(t *testing.T) {
 	if m.modal != modalTerminateProcess || len(m.processBatch) != 2 || !strings.Contains(m.View(), "Selected processes: 2") {
 		t.Fatalf("x did not open multi-process confirmation: modal=%v batch=%d view=%q", m.modal, len(m.processBatch), m.View())
 	}
+	// A periodic listener refresh must validate every captured process in the
+	// batch, not compare the focused row only with the batch's first process.
+	// Resource changes alone are not process-identity changes.
+	m.view.Items[0].Listener.Usage = &discovery.ProcessUsage{CPUPercent: 7.5, MemoryBytes: 64 * 1024 * 1024}
+	m.invalidatePreviewIfChanged()
+	if m.modal != modalTerminateProcess || len(m.processBatch) != 2 {
+		t.Fatalf("refresh invalidated a valid multi-process confirmation: modal=%v batch=%d banner=%q", m.modal, len(m.processBatch), m.banner)
+	}
 	m.Update(keyType(tea.KeyTab))
 	_, cmd := m.Update(keyType(tea.KeyEnter))
 	if cmd == nil || !m.processBusy || !strings.Contains(m.renderList(100, 20), "TERMINATING") {
@@ -1785,6 +2009,24 @@ func TestWorkspaceProcessTerminationSupportsSelectedBatch(t *testing.T) {
 	_, _ = m.Update(message)
 	if m.processBusy || len(m.processBatch) != 0 || !strings.Contains(m.transient, "Terminated 2 process(es)") {
 		t.Fatalf("batch process did not finish: busy=%t batch=%d transient=%q", m.processBusy, len(m.processBatch), m.transient)
+	}
+}
+
+func TestWorkspaceProcessConfirmationClosesWhenAnyBatchIdentityChanges(t *testing.T) {
+	m := workspaceFixture()
+	second := discovery.Listener{ID: "listener-two", Name: "api", Process: "python", ProcessStart: "test:4343", PID: 4343, Target: targetmodel.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}, Scope: targetmodel.ScopeLoopback, Metadata: discovery.MetadataComplete}
+	m.view.Items = append(m.view.Items, exposure.ReconciledItem{ID: second.ID, Listener: &second, State: exposuredata.ExposureState("disabled"), Mode: exposuredata.ExposureDisabled})
+	m.Update(keyRune('v'))
+	m.Update(keyRune('j'))
+	m.Update(keyRune('v'))
+	m.Update(keyRune('x'))
+	if m.modal != modalTerminateProcess || len(m.processBatch) != 2 {
+		t.Fatalf("multi-process confirmation did not open: modal=%v batch=%d", m.modal, len(m.processBatch))
+	}
+	m.view.Items[1].Listener.ProcessStart = "test:changed"
+	m.invalidatePreviewIfChanged()
+	if m.modal != modalNone || len(m.processBatch) != 0 || !strings.Contains(m.banner, "Selection changed") {
+		t.Fatalf("changed batch process was not rejected: modal=%v batch=%d banner=%q", m.modal, len(m.processBatch), m.banner)
 	}
 }
 
