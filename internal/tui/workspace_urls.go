@@ -31,6 +31,7 @@ const unavailableOpenURLBanner = "No observed browser URL or Serve TCP preview i
 const unavailableCopyURLBanner = "No observed browser URL or Serve TCP preview is available to copy. Configure an HTTPS route with p or refresh Tailscale status."
 const insecureURLBanner = "Observed route URL is not HTTPS. Configure an explicit HTTPS route before opening or copying it."
 const magicDNSPreviewUnavailableBanner = "Tailscale did not report a valid MagicDNS name for this Serve TCP preview. Check Tailscale status and try again."
+const magicDNSStatusTimeout = 5 * time.Second
 const localURLUnavailableBanner = "No active local listener is available for the O browser shortcut."
 
 func (m *workspaceModel) clearStaleURLUnavailableBanner() {
@@ -38,20 +39,33 @@ func (m *workspaceModel) clearStaleURLUnavailableBanner() {
 		return
 	}
 	item, ok := m.selectedItem()
-	if !ok || len(observedHTTPSURLRoutes(item)) == 0 {
+	if !ok {
+		return
+	}
+	available := len(observedHTTPSURLRoutes(item)) > 0
+	if !available {
+		_, available = m.serveTCPPreviewPort(item)
+	}
+	if !available {
 		return
 	}
 	m.clearBannerNotice(unavailableURLBanner)
 	m.clearBannerNotice(unavailableOpenURLBanner)
 	m.clearBannerNotice(unavailableCopyURLBanner)
 	m.clearBannerNotice(insecureURLBanner)
+	m.clearBannerNotice(magicDNSPreviewUnavailableBanner)
+	for _, part := range strings.Split(m.banner, " | ") {
+		if strings.HasPrefix(part, "Could not read Tailscale MagicDNS status:") {
+			m.clearBannerNotice(part)
+		}
+	}
 }
 
 func (m *workspaceModel) urlShortcutStatus() string {
 	observed, insecure, tcpOnly := false, false, false
 	servePreview, localListener := false, false
 	if item, ok := m.selectedItem(); ok {
-		localListener = validLocalListenerPort(item) != 0
+		localListener = m.currentLocalListenerPort(item) != 0
 		for _, route := range item.Routes {
 			if _, ok := workspace.ObservedHTTPSRouteURL(route); ok {
 				observed = true
@@ -121,8 +135,17 @@ func validLocalListenerPort(item exposure.ReconciledItem) int {
 	return listener.Port
 }
 
+func (m *workspaceModel) currentLocalListenerPort(item exposure.ReconciledItem) int {
+	if !m.view.Listeners.Authoritative || m.view.Listeners.Stale || m.view.Listeners.Error != nil {
+		return 0
+	}
+	return validLocalListenerPort(item)
+}
+
 func (m *workspaceModel) serveTCPPreviewPort(item exposure.ReconciledItem) (int, bool) {
-	if item.Listener == nil || item.State != exposuredata.ExposureActive || !m.view.Listeners.Authoritative || m.view.Listeners.Stale || m.view.Listeners.Error != nil {
+	if item.Listener == nil || item.State != exposuredata.ExposureActive || m.viewErr != nil ||
+		!m.view.Listeners.Authoritative || m.view.Listeners.Stale || m.view.Listeners.Error != nil ||
+		!m.view.Exposures.Authoritative || m.view.Exposures.Stale || m.view.Exposures.Error != nil {
 		return 0, false
 	}
 	listener := item.Listener.Target.Normalized()
@@ -130,11 +153,14 @@ func (m *workspaceModel) serveTCPPreviewPort(item exposure.ReconciledItem) (int,
 		return 0, false
 	}
 	for _, route := range item.Routes {
-		if route.Mode != exposuredata.ExposureServe || route.State != exposuredata.ExposureActive || workspace.RouteTransport(route) != "tcp" {
+		if route.ID == "" || route.Kind != exposuredata.RouteKindRawTCP || route.Mode != exposuredata.ExposureServe ||
+			route.State != exposuredata.ExposureActive || workspace.RouteTransport(route) != "tcp" {
 			continue
 		}
 		selector, err := tailscale.ParseListenerSelector(route.ProviderKey, exposuredata.ExposureServe)
-		if err != nil || selector.Transport != "tcp" || selector.Port != listener.Port || !target.TargetsMatch(route.Target, listener) {
+		routeTarget := route.Target.Normalized()
+		if err != nil || selector.Transport != "tcp" || selector.Port != listener.Port || routeTarget.Validate() != nil ||
+			!target.TargetsMatch(routeTarget, listener) {
 			continue
 		}
 		return selector.Port, true
@@ -150,8 +176,22 @@ func magicDNSPreviewURL(dnsName string, port int) (string, error) {
 	return (&url.URL{Scheme: "http", Host: net.JoinHostPort(dnsName, strconv.Itoa(port)), Path: "/"}).String(), nil
 }
 
+func resolveMagicDNSPreviewURL(ctx context.Context, provider *tailscale.Adapter, port int) (string, string) {
+	statusCtx, cancel := context.WithTimeout(ctx, magicDNSStatusTimeout)
+	defer cancel()
+	status, err := provider.Status(statusCtx)
+	if err != nil {
+		return "", "Could not read Tailscale MagicDNS status: " + safeMessage(err)
+	}
+	previewURL, err := magicDNSPreviewURL(status.Self.DNSName, port)
+	if err != nil {
+		return "", safeMessage(err)
+	}
+	return previewURL, ""
+}
+
 func validMagicDNSName(name string) bool {
-	if name == "" || len(name) > 253 || !strings.Contains(name, ".") {
+	if name == "" || len(name) > 253 || !strings.Contains(name, ".") || net.ParseIP(name) != nil {
 		return false
 	}
 	for _, label := range strings.Split(name, ".") {
@@ -219,6 +259,7 @@ func (m *workspaceModel) openSelectedURL() tea.Cmd {
 		return nil
 	}
 	if port, ok := m.serveTCPPreviewPort(item); ok {
+		m.clearStaleURLUnavailableBanner()
 		return m.openServeTCPPreview(port)
 	}
 	if selector := workspace.RawTCPRouteSelector(item); selector != "" {
@@ -235,11 +276,12 @@ func (m *workspaceModel) openLocalURL() tea.Cmd {
 		m.setBanner("No service is selected", true)
 		return nil
 	}
-	port := validLocalListenerPort(item)
+	port := m.currentLocalListenerPort(item)
 	if port == 0 {
 		m.setBanner(localURLUnavailableBanner, true)
 		return nil
 	}
+	m.clearBannerNotice(localURLUnavailableBanner)
 	return m.launchBrowserURL((&url.URL{Scheme: "http", Host: net.JoinHostPort("localhost", strconv.Itoa(port)), Path: "/"}).String(), "local HTTP URL")
 }
 
@@ -256,13 +298,9 @@ func (m *workspaceModel) openServeTCPPreview(port int) tea.Cmd {
 	provider, ctx := m.provider, m.ctx
 	m.transient = "Resolving Serve TCP MagicDNS preview"
 	return func() tea.Msg {
-		status, err := provider.Status(ctx)
-		if err != nil {
-			return statusMsg{value: "Could not read Tailscale MagicDNS status: " + safeMessage(err), sticky: true}
-		}
-		previewURL, err := magicDNSPreviewURL(status.Self.DNSName, port)
-		if err != nil {
-			return statusMsg{value: safeMessage(err), sticky: true}
+		previewURL, failure := resolveMagicDNSPreviewURL(ctx, provider, port)
+		if failure != "" {
+			return statusMsg{value: failure, sticky: true}
 		}
 		return openBrowserStatus(ctx, browser, previewURL, "Serve TCP HTTP preview")
 	}
@@ -383,6 +421,7 @@ func (m *workspaceModel) copyURL() tea.Cmd {
 		return nil
 	}
 	if port, ok := m.serveTCPPreviewPort(item); ok {
+		m.clearStaleURLUnavailableBanner()
 		return m.copyServeTCPPreview(port)
 	}
 	if selector := workspace.RawTCPRouteSelector(item); selector != "" {
@@ -401,13 +440,9 @@ func (m *workspaceModel) copyServeTCPPreview(port int) tea.Cmd {
 	provider, ctx, clipboard := m.provider, m.ctx, m.clipboardOrOS()
 	m.transient = "Resolving Serve TCP MagicDNS preview"
 	return func() tea.Msg {
-		status, err := provider.Status(ctx)
-		if err != nil {
-			return statusMsg{value: "Could not read Tailscale MagicDNS status: " + safeMessage(err), sticky: true}
-		}
-		previewURL, err := magicDNSPreviewURL(status.Self.DNSName, port)
-		if err != nil {
-			return statusMsg{value: safeMessage(err), sticky: true}
+		previewURL, failure := resolveMagicDNSPreviewURL(ctx, provider, port)
+		if failure != "" {
+			return statusMsg{value: failure, sticky: true}
 		}
 		return copyPreviewURLStatus(previewURL, clipboard)
 	}

@@ -1654,6 +1654,7 @@ func rawServeTCPWorkspaceFixture() *workspaceModel {
 	route.ProviderKey = "serve:tcp=3000"
 	route.URL = ""
 	route.Mode = exposuredata.ExposureServe
+	route.Kind = exposuredata.RouteKindRawTCP
 	route.State = exposuredata.ExposureActive
 	m.view.Items[0].Routes = []exposuredata.ExposureRoute{route}
 	m.view.Exposures.Routes = []exposuredata.ExposureRoute{route}
@@ -1685,6 +1686,7 @@ func TestMagicDNSPreviewURLUsesProviderNameAndRejectsMalformedValues(t *testing.
 		{name: "device/path.tailnet.ts.net", port: 3000},
 		{name: "device@evil.tailnet.ts.net", port: 3000},
 		{name: "single-label", port: 3000},
+		{name: "100.64.0.1", port: 3000},
 		{name: "device.tailnet.ts.net", port: 0},
 		{name: "device.tailnet.ts.net", port: 65536},
 	} {
@@ -1715,6 +1717,41 @@ func TestOpenServeTCPPreviewUsesReportedMagicDNSAndExactPort(t *testing.T) {
 	}
 	if len(m.view.Items[0].Routes) != 1 || m.view.Items[0].Routes[0].ProviderKey != "serve:tcp=3000" {
 		t.Fatal("browser preview changed the observed route")
+	}
+}
+
+func TestServeTCPPreviewClearsStaleURLFailureFeedbackOnRetry(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		open   bool
+		banner string
+	}{
+		{name: "open unavailable", open: true, banner: unavailableOpenURLBanner},
+		{name: "copy unavailable", banner: unavailableCopyURLBanner},
+		{name: "missing MagicDNS", open: true, banner: magicDNSPreviewUnavailableBanner},
+		{name: "MagicDNS status error", banner: "Could not read Tailscale MagicDNS status: status timed out"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.open {
+				installTestBrowserLauncher(t)
+			}
+			m := rawServeTCPWorkspaceFixture()
+			m.provider = magicDNSStatusProvider(t, "device.tailnet.ts.net.")
+			m.clipboard = ClipboardFunc(func(context.Context, string) error { return nil })
+			m.banner, m.bannerSticky = test.banner, true
+			var command tea.Cmd
+			if test.open {
+				command = m.openSelectedURL()
+			} else {
+				command = m.copyURL()
+			}
+			if command == nil {
+				t.Fatalf("%s command was unavailable: %q", test.name, m.banner)
+			}
+			if m.banner != "" {
+				t.Fatalf("successful preview retry left stale feedback: %q", m.banner)
+			}
+		})
 	}
 }
 
@@ -1787,6 +1824,13 @@ func TestFunnelTCPPreviewRemainsUnavailable(t *testing.T) {
 	if !strings.Contains(m.banner, "TCP-only") {
 		t.Fatalf("Funnel TCP feedback omitted the TCP-only reason: %q", m.banner)
 	}
+	m.banner = ""
+	if command := m.copyURL(); command != nil {
+		t.Fatal("Funnel TCP route unexpectedly produced a copy command")
+	}
+	if !strings.Contains(m.banner, "TCP-only") {
+		t.Fatalf("Funnel TCP copy feedback omitted the TCP-only reason: %q", m.banner)
+	}
 }
 
 func installTestBrowserLauncher(t *testing.T) string {
@@ -1812,12 +1856,13 @@ printf '%s' "$1" > "$TAILGE_OPEN_URL_CAPTURE"
 func TestUppercaseOLocalBrowserShortcutOpensSelectedListener(t *testing.T) {
 	capture := installTestBrowserLauncher(t)
 	m := workspaceFixture()
+	m.banner, m.bannerSticky = localURLUnavailableBanner, true
 	model, command := m.Update(keyRune('O'))
 	if command == nil {
 		t.Fatal("uppercase O did not produce a local browser command")
 	}
-	if updated, ok := model.(*workspaceModel); !ok || updated.modal != modalNone {
-		t.Fatalf("uppercase O changed the workspace mode: %#v", model)
+	if updated, ok := model.(*workspaceModel); !ok || updated.modal != modalNone || updated.banner != "" {
+		t.Fatalf("uppercase O did not clear stale local-listener feedback or changed workspace mode: %#v", model)
 	}
 	message, ok := command().(statusMsg)
 	if !ok || message.value != "Opened local HTTP URL" {
@@ -1829,6 +1874,54 @@ func TestUppercaseOLocalBrowserShortcutOpensSelectedListener(t *testing.T) {
 	}
 	if string(opened) != "http://localhost:3000/" {
 		t.Fatalf("uppercase O opened %q; want the local listener convenience URL", opened)
+	}
+}
+
+func TestLocalBrowserShortcutRequiresFreshListenerSnapshot(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*workspaceModel)
+	}{
+		{name: "non-authoritative", mutate: func(m *workspaceModel) { m.view.Listeners.Authoritative = false }},
+		{name: "stale", mutate: func(m *workspaceModel) { m.view.Listeners.Stale = true }},
+		{name: "error", mutate: func(m *workspaceModel) {
+			m.view.Listeners.Error = &fault.SafeError{Code: fault.ErrUnknown, Message: "listener refresh failed"}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			capture := installTestBrowserLauncher(t)
+			m := workspaceFixture()
+			test.mutate(m)
+			if command := m.openLocalURL(); command != nil {
+				t.Fatal("stale listener snapshot unexpectedly produced a local browser command")
+			}
+			if !strings.Contains(m.banner, "No active local listener") || !strings.Contains(m.urlShortcutStatus(), "O local[off]") {
+				t.Fatalf("stale local listener was not refused or advertised: banner=%q status=%q", m.banner, m.urlShortcutStatus())
+			}
+			if _, err := os.Stat(capture); !os.IsNotExist(err) {
+				t.Fatalf("browser launched from a stale listener snapshot: stat err=%v", err)
+			}
+		})
+	}
+}
+
+func TestLocalBrowserShortcutWorksWhenOnlyExposureRefreshFailed(t *testing.T) {
+	capture := installTestBrowserLauncher(t)
+	m := workspaceFixture()
+	m.viewErr = errors.New("exposure status unavailable")
+	command := m.openLocalURL()
+	if command == nil {
+		t.Fatalf("fresh local listener was blocked by an exposure refresh error: %q", m.banner)
+	}
+	if _, ok := command().(statusMsg); !ok {
+		t.Fatal("local browser command returned an unexpected result")
+	}
+	opened, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(opened) != "http://localhost:3000/" {
+		t.Fatalf("local browser shortcut opened %q; want current local listener URL", opened)
 	}
 }
 
@@ -1925,6 +2018,74 @@ func TestServeTCPPreviewRequiresFreshAuthoritativeListenerSnapshot(t *testing.T)
 			}
 			if !strings.Contains(m.banner, "TCP-only") {
 				t.Fatalf("stale listener preview was not refused clearly: %q", m.banner)
+			}
+		})
+	}
+}
+
+func TestServeTCPPreviewRequiresFreshAuthoritativeExposureIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*workspaceModel)
+	}{
+		{name: "non-authoritative exposure", mutate: func(m *workspaceModel) { m.view.Exposures.Authoritative = false }},
+		{name: "stale exposure", mutate: func(m *workspaceModel) { m.view.Exposures.Stale = true }},
+		{name: "exposure error", mutate: func(m *workspaceModel) {
+			m.view.Exposures.Error = &fault.SafeError{Code: fault.ErrUnknown, Message: "exposure refresh failed"}
+		}},
+		{name: "view error", mutate: func(m *workspaceModel) { m.viewErr = errors.New("view refresh failed") }},
+		{name: "wrong route kind", mutate: func(m *workspaceModel) { m.view.Items[0].Routes[0].Kind = exposuredata.RouteKindHTTPPath }},
+		{name: "missing route id", mutate: func(m *workspaceModel) { m.view.Items[0].Routes[0].ID = "" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := rawServeTCPWorkspaceFixture()
+			test.mutate(m)
+			m.provider = &tailscale.Adapter{Binary: "tailscale", Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+				t.Fatalf("incomplete exposure identity must not query MagicDNS: %v", args)
+				return runner.Result{}, nil
+			})}
+			if command := m.openSelectedURL(); command != nil {
+				t.Fatal("incomplete exposure identity unexpectedly produced a browser preview")
+			}
+			if !strings.Contains(m.banner, "TCP-only") {
+				t.Fatalf("incomplete exposure identity was not refused clearly: %q", m.banner)
+			}
+		})
+	}
+}
+
+func TestServeTCPPreviewStatusLookupsAreBounded(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		open bool
+	}{
+		{name: "open"},
+		{name: "copy", open: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.open {
+				installTestBrowserLauncher(t)
+			}
+			m := rawServeTCPWorkspaceFixture()
+			m.clipboard = ClipboardFunc(func(context.Context, string) error { return nil })
+			m.provider = &tailscale.Adapter{Binary: "tailscale", Runner: runner.FuncRunner(func(ctx context.Context, _ string, args ...string) (runner.Result, error) {
+				deadline, ok := ctx.Deadline()
+				if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 5*time.Second {
+					t.Errorf("MagicDNS status lookup has no bounded deadline: deadline=%v present=%t", deadline, ok)
+				}
+				return runner.Result{Stdout: `{"Self":{"DNSName":"device.tailnet.ts.net."}}`}, nil
+			})}
+			var command tea.Cmd
+			if test.open {
+				command = m.openSelectedURL()
+			} else {
+				command = m.copyURL()
+			}
+			if command == nil {
+				t.Fatalf("%s command was unavailable: %q", test.name, m.banner)
+			}
+			if _, ok := command().(statusMsg); !ok {
+				t.Fatalf("%s command returned an unexpected result", test.name)
 			}
 		})
 	}
