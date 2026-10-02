@@ -326,7 +326,7 @@ func (a *Adapter) Set(ctx context.Context, change ExposureChange) (exposuredata.
 			(selected.Address == "::1" || selected.Address == "::") &&
 			(change.Backend == "" || HTTPPathBackendMatches(change.Backend, HTTPPathBackendArgument(selected))) &&
 			strings.Contains(strings.ToLower(result.Stderr), "unknown proxy destination") {
-			appErr.Remediation = "Refresh provider status and inspect the exact HTTPS handler. If it exists, disable that exact path or root first; then retry with `--localhost-backend` (or Ctrl+B in the `p` dialog). Hostname resolution weakens the exact IPv6 address guarantee."
+			appErr.Remediation = "Refresh provider status and inspect the exact HTTPS handler. If it exists, disable that exact path or root first; then retry with `--localhost-backend` (or Ctrl+B when previewing a TUI HTTPS root). Hostname resolution weakens the exact IPv6 address guarantee."
 		}
 		receipt.Error = ptr(appErr.Safe())
 		return receipt, appErr

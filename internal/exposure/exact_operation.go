@@ -80,6 +80,8 @@ type exactExposureOperation struct {
 	httpsPort             int
 	httpsRootIntent       bool
 	localhostBackendAlias bool
+	replaceRawTCP         bool
+	expectedRawTCPRouteID string
 	confirmFunnel         bool
 	confirmExternal       bool
 	timeout               time.Duration
@@ -131,6 +133,12 @@ func (op *exactExposureOperation) validate() error {
 		if err != nil || path != op.httpPath {
 			return fault.NewError(fault.ErrInvalidInput, "exposure", "named HTTP path is not a canonical service slug", false, "invalid", "Use one lowercase slug such as `api` or leave it blank to generate a stable name.")
 		}
+	}
+	if op.replaceRawTCP && !op.httpsRootIntent {
+		return fault.NewError(fault.ErrInvalidInput, "exposure", "raw-TCP replacement requires explicit HTTPS-root intent", false, "invalid", "Select a private HTTPS root before replacing a raw-TCP route.")
+	}
+	if op.expectedRawTCPRouteID != "" && !op.replaceRawTCP {
+		return fault.NewError(fault.ErrInvalidInput, "exposure", "an expected raw-TCP route identity requires replacement intent", false, "invalid", "Select an exact HTTPS-root conversion before binding a route identity.")
 	}
 	if op.localhostBackendAlias && !op.httpPathIntent && !op.httpsRootIntent {
 		return fault.NewError(fault.ErrInvalidInput, "exposure", "localhost backend alias requires an explicit HTTPS handler", false, "invalid", "Use the exact listener backend or explicitly select a named HTTPS path or root route.")
@@ -220,7 +228,7 @@ func (op exactExposureOperation) run(ctx context.Context) (receipt exposuredata.
 		if op.httpsRootIntent {
 			path = "/"
 		}
-		return c.applyHTTPPathRoute(operationCtx, target, path, op.httpsPort, op.httpsRootIntent, op.localhostBackendAlias, mode, candidates[0], exposures.Routes, operationID, operationStarted)
+		return c.applyHTTPPathRoute(operationCtx, target, path, op.httpsPort, op.httpsRootIntent, op.localhostBackendAlias, op.replaceRawTCP, op.expectedRawTCPRouteID, confirmExternal, mode, candidates[0], exposures.Routes, operationID, operationStarted)
 	}
 	if mode != exposuredata.ExposureDisabled {
 		for _, route := range exposures.Routes {
@@ -645,7 +653,7 @@ func matchingListeners(listeners []discovery.Listener, target targetmodel.Target
 	return result
 }
 
-func (c exactOperationDependencies) applyHTTPPathRoute(ctx context.Context, target targetmodel.Target, path string, httpsPort int, root, localhostBackendAlias bool, mode exposuredata.ExposureMode, listener discovery.Listener, routes []exposuredata.ExposureRoute, operationID string, operationStarted time.Time) (exposuredata.OperationReceipt, error) {
+func (c exactOperationDependencies) applyHTTPPathRoute(ctx context.Context, target targetmodel.Target, path string, httpsPort int, root, localhostBackendAlias, replaceRawTCP bool, expectedRawTCPRouteID string, confirmExternal bool, mode exposuredata.ExposureMode, listener discovery.Listener, routes []exposuredata.ExposureRoute, operationID string, operationStarted time.Time) (exposuredata.OperationReceipt, error) {
 	if listener.Target.Normalized().Key() != target.Normalized().Key() {
 		return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "HTTPS route requires the exact discovered listener address", false, "changed", "Refresh and select the exact local listener before configuring HTTPS.")
 	}
@@ -679,6 +687,8 @@ func (c exactOperationDependencies) applyHTTPPathRoute(ctx context.Context, targ
 		return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsupported, "exposure", string(mode)+" HTTPS routes are unsupported by the installed Tailscale client", false, "read_only", "Use a Tailscale version with exact HTTPS listener operations; existing handlers will not be reset.")
 	}
 	seenEndpointSelectors := make(map[string]struct{})
+	var rawTCPReplacement *exposuredata.ExposureRoute
+	endpointRouteCount := 0
 	for _, route := range routes {
 		selector, parseErr := tailscale.ParseListenerSelector(route.ProviderKey, route.Mode)
 		if route.ProviderKey == "" || parseErr != nil {
@@ -687,16 +697,43 @@ func (c exactOperationDependencies) applyHTTPPathRoute(ctx context.Context, targ
 		if selector.Port != httpsPort {
 			continue
 		}
+		endpointRouteCount++
 		selectorIdentity := routeRemovalSelectorIdentity(route)
 		if _, duplicate := seenEndpointSelectors[selectorIdentity]; duplicate {
 			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrAmbiguous, "exposure", "ambiguous HTTPS handler identity: multiple provider routes share one exact selector", false, "ambiguous", "Refresh and resolve the duplicate route identity before adding another handler.")
 		}
 		seenEndpointSelectors[selectorIdentity] = struct{}{}
 		if route.ID == "" || route.State != exposuredata.ExposureActive {
-			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnknown, "exposure", "an existing HTTPS handler has incomplete route identity", false, "read_only", "Refresh provider status; Tailge will not mutate an endpoint with incomplete handler state.")
+			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnknown, "exposure", "an existing endpoint handler has incomplete route identity", false, "read_only", "Refresh provider status; Tailge will not mutate an endpoint with incomplete handler state.")
 		}
 		if route.Mode != mode {
 			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "Serve and Funnel cannot be mixed on the shared HTTPS endpoint", false, "scope_conflict", "Every handler on this hostname and port shares one access scope.")
+		}
+		if selector.Transport == "tcp" || route.Kind == exposuredata.RouteKindRawTCP {
+			if !root || mode != exposuredata.ExposureServe || !replaceRawTCP {
+				return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "the HTTPS endpoint already has a non-HTTP handler (raw TCP); explicit private HTTPS-root conversion is required", false, "conflict", "Use an explicit private HTTPS-root conversion with `--replace-raw-tcp`; Tailge will not infer HTTP or replace raw TCP implicitly.")
+			}
+			if selector.Transport != "tcp" || route.Kind != exposuredata.RouteKindRawTCP || route.Service != "" || route.Path != "" {
+				return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnknown, "exposure", "the conflicting TCP route has incomplete exact identity", false, "read_only", "Refresh provider status; Tailge will not replace a route it cannot restore exactly.")
+			}
+			if route.Target.Normalized().Key() != target.Normalized().Key() || !tailscale.RawTCPBackendMatchesTarget(target, route.Backend) {
+				return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "the conflicting raw-TCP route does not match the exact selected listener (target or backend identity)", false, "conflict", "Select the exact listener served by the existing TCP route or choose another HTTPS port.")
+			}
+			if expectedRawTCPRouteID != "" && route.ID != expectedRawTCPRouteID {
+				return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "the selected raw-TCP route changed after preview", true, "changed", "Refresh and review the exact route before confirming conversion.")
+			}
+			if rawTCPReplacement != nil {
+				return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrAmbiguous, "exposure", "multiple raw-TCP routes occupy the requested HTTPS port", false, "ambiguous", "Resolve the exact route identity before converting this endpoint.")
+			}
+			if route.Ownership != exposuredata.OwnershipManaged && !confirmExternal {
+				return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "the conflicting raw-TCP route has unknown/external ownership", false, "external", "Review the exact route and repeat with `--confirm-external` to replace it.")
+			}
+			if !caps.ServeTCP || !exactRollbackSelector(route, caps) {
+				return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsupported, "exposure", "the conflicting raw-TCP route cannot be restored exactly with this provider", false, "read_only", "Leave it unchanged or use a Tailscale version with an exact Serve TCP selector.")
+			}
+			replacement := route
+			rawTCPReplacement = &replacement
+			continue
 		}
 		if selector.Transport != "https" || (route.Kind != exposuredata.RouteKindHTTPPath && route.Kind != exposuredata.RouteKindHTTPSRoot) {
 			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "the HTTPS endpoint already has a non-HTTP handler", false, "conflict", "Remove or move the exact existing endpoint handler before adding an HTTP route.")
@@ -704,12 +741,24 @@ func (c exactOperationDependencies) applyHTTPPathRoute(ctx context.Context, targ
 		if (route.Kind == exposuredata.RouteKindHTTPPath && route.Path == "") || (route.Kind == exposuredata.RouteKindHTTPSRoot && route.Path != "/") {
 			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnknown, "exposure", "an existing HTTPS handler has incomplete path identity", false, "read_only", "Refresh provider status; Tailge will not mutate a handler whose exact path is unknown.")
 		}
+		if !httpBackendMatchesTarget(route) {
+			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnknown, "exposure", "an existing HTTPS handler has incomplete backend identity", false, "read_only", "Refresh provider status; Tailge will not mutate an endpoint with an unidentified handler backend.")
+		}
 		if route.Path == path {
 			if route.Kind == pathKind && route.Mode == mode && route.ID != "" && route.State == exposuredata.ExposureActive && route.Target.Normalized().Key() == backendTarget.Normalized().Key() && tailscale.HTTPPathBackendMatches(route.Backend, backend) {
 				return exposuredata.OperationReceipt{ID: route.ID, StartedAt: operationStarted, FinishedAt: c.currentTime(), Verified: true}, nil
 			}
 			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "the requested HTTPS path is already configured for a different route identity", false, "conflict", "Choose another path or disable the exact existing handler first.")
 		}
+	}
+	if expectedRawTCPRouteID != "" && rawTCPReplacement == nil {
+		return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "the selected raw-TCP route is no longer present at this HTTPS port", true, "changed", "Refresh and review the exact route before confirming conversion.")
+	}
+	if rawTCPReplacement != nil {
+		if endpointRouteCount != 1 {
+			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrAmbiguous, "exposure", "the raw-TCP handler shares its port with other observed endpoint routes", false, "ambiguous", "Resolve every handler on this exact port before converting it.")
+		}
+		return c.replaceRawTCPWithHTTPSRoot(ctx, target, *rawTCPReplacement, path, httpsPort, localhostBackendAlias, backend, operationID, operationStarted)
 	}
 	if err := c.requireCurrentListener(ctx, target); err != nil {
 		return exposuredata.OperationReceipt{}, err
@@ -740,6 +789,249 @@ func (c exactOperationDependencies) applyHTTPPathRoute(ctx context.Context, targ
 	receipt.Verified = true
 	c.markManagedRoute(verifiedRoute)
 	return receipt, nil
+}
+
+func (c exactOperationDependencies) replaceRawTCPWithHTTPSRoot(ctx context.Context, target targetmodel.Target, previous exposuredata.ExposureRoute, path string, httpsPort int, localhostBackendAlias bool, backend, operationID string, operationStarted time.Time) (exposuredata.OperationReceipt, error) {
+	if path != "/" || previous.Mode != exposuredata.ExposureServe || previous.Target.Normalized().Key() != target.Normalized().Key() {
+		return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "raw-TCP conversion does not match one exact private HTTPS root", false, "changed", "Refresh and select the exact Serve TCP route and local listener before retrying.")
+	}
+	if err := c.requireCurrentListener(ctx, target); err != nil {
+		return exposuredata.OperationReceipt{}, err
+	}
+	var precondition tailscale.ExposurePrecondition
+	// Refresh all routes before removal so the provider receives a full-set
+	// precondition and the selected identity is revalidated at the mutation seam.
+	before, err := c.provider.List(ctx)
+	if err != nil || !before.Authoritative || before.Error != nil {
+		if err == nil {
+			err = fault.NewError(fault.ErrUnknown, "exposure", "provider route state is not authoritative before conversion", true, "unknown", "Refresh Tailscale state; the raw-TCP route was not changed.")
+		}
+		return exposuredata.OperationReceipt{}, err
+	}
+	currentMatches := 0
+	for _, route := range before.Routes {
+		if routeFingerprint(route) == routeFingerprint(previous) {
+			currentMatches++
+		}
+	}
+	if currentMatches != 1 {
+		return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "the exact raw-TCP route changed before conversion", true, "changed", "Refresh and review the current exact route before confirming conversion.")
+	}
+	precondition = tailscale.ExposurePrecondition{
+		RouteIDs:      RouteIDs(before.Routes, target),
+		RouteIDsHash:  RouteIDsHash(before.Routes, target),
+		AllRoutesHash: tailscale.RoutesHash(before.Routes),
+	}
+	removed, removeErr := c.provider.Remove(ctx, tailscale.RouteSelector{ID: previous.ProviderKey, Target: &target, Mode: previous.Mode, Service: previous.Service, Path: previous.Path, Backend: previous.Backend, AllRoutesHash: precondition.AllRoutesHash}, precondition.RouteIDsHash)
+	c.recordReceiptEvent(operationID, "remove-before-https-root", target, previous.Mode, removeErr)
+	if removeErr != nil {
+		rollbackErr := c.restoreRawTCPAfterHTTPSRootFailure(target, previous, httpsPort, backend, operationID, false)
+		c.recordReceiptEvent(operationID, "rollback-raw-tcp", target, previous.Mode, rollbackErr)
+		if rollbackErr != nil {
+			return removed, fault.WrapError(fault.ErrVerification, "exposure", "raw-TCP removal failed and exact route restoration could not be verified", false, "unverified", "Inspect the exact Serve route manually; Tailge did not apply a broad reset.", rollbackErr)
+		}
+		return removed, removeErr
+	}
+	absent, afterRemove, verifyRemoveErr := c.verifyAbsent(ctx, previous)
+	if verifyRemoveErr != nil || !absent {
+		if verifyRemoveErr == nil {
+			verifyRemoveErr = fault.NewError(fault.ErrVerification, "exposure", "raw-TCP removal could not be verified before HTTPS-root conversion", true, "unknown", "Refresh and inspect the exact route before retrying.")
+		}
+		rollbackErr := c.restoreRawTCPAfterHTTPSRootFailure(target, previous, httpsPort, backend, operationID, false)
+		c.recordReceiptEvent(operationID, "rollback-raw-tcp", target, previous.Mode, rollbackErr)
+		if rollbackErr != nil {
+			return removed, fault.WrapError(fault.ErrVerification, "exposure", "raw-TCP removal verification failed and exact route restoration could not be verified", false, "unverified", "Inspect the exact Serve route manually; Tailge did not apply a broad reset.", rollbackErr)
+		}
+		return removed, verifyRemoveErr
+	}
+	c.revokeManagedRoute(previous)
+	endpointRoutes, endpointErr := exactRoutesAtPort(afterRemove.Routes, httpsPort)
+	if endpointErr != nil || len(endpointRoutes) != 0 {
+		if endpointErr == nil {
+			endpointErr = fault.NewError(fault.ErrUnsafe, "exposure", "another handler appeared on the HTTPS port after raw-TCP removal", true, "changed", "Tailge will not overwrite the changed endpoint; inspect it and restore the raw route manually if needed.")
+		}
+		rollbackErr := c.restoreRawTCPAfterHTTPSRootFailure(target, previous, httpsPort, backend, operationID, false)
+		c.recordReceiptEvent(operationID, "rollback-raw-tcp", target, previous.Mode, rollbackErr)
+		if rollbackErr != nil {
+			return removed, fault.WrapError(fault.ErrVerification, "exposure", "HTTPS endpoint changed and exact raw-TCP restoration could not be verified", false, "unverified", "Inspect the exact Serve route manually; Tailge did not apply a broad reset.", rollbackErr)
+		}
+		return removed, endpointErr
+	}
+	if err := c.requireCurrentListener(ctx, target); err != nil {
+		rollbackErr := c.restoreRawTCPAfterHTTPSRootFailure(target, previous, httpsPort, backend, operationID, false)
+		c.recordReceiptEvent(operationID, "rollback-raw-tcp", target, previous.Mode, rollbackErr)
+		if rollbackErr != nil {
+			return removed, fault.WrapError(fault.ErrVerification, "exposure", "listener changed during HTTPS-root conversion and exact raw-TCP restoration failed", false, "unverified", "Inspect the exact Serve route manually; Tailge did not apply a broad reset.", rollbackErr)
+		}
+		return removed, err
+	}
+	precondition = tailscale.ExposurePrecondition{
+		RouteIDs:      RouteIDs(afterRemove.Routes, target),
+		RouteIDsHash:  RouteIDsHash(afterRemove.Routes, target),
+		AllRoutesHash: tailscale.RoutesHash(afterRemove.Routes),
+	}
+	if precondition.RouteIDsHash == "" || precondition.AllRoutesHash == "" {
+		rollbackErr := c.restoreRawTCPAfterHTTPSRootFailure(target, previous, httpsPort, backend, operationID, false)
+		c.recordReceiptEvent(operationID, "rollback-raw-tcp", target, previous.Mode, rollbackErr)
+		if rollbackErr != nil {
+			return removed, fault.WrapError(fault.ErrVerification, "exposure", "HTTPS-root preflight failed and exact raw-TCP restoration failed", false, "unverified", "Inspect the exact Serve route manually; Tailge did not apply a broad reset.", rollbackErr)
+		}
+		return removed, fault.NewError(fault.ErrUnsafe, "exposure", "HTTPS-root preflight after raw-TCP removal is incomplete", true, "unknown", "Refresh provider state before retrying; the exact raw-TCP route was restored.")
+	}
+	providerKey := "serve:https=" + strconv.Itoa(httpsPort)
+	setReceipt, setErr := c.provider.Set(ctx, tailscale.ExposureChange{Target: target, Mode: exposuredata.ExposureServe, ProviderKey: providerKey, Path: path, HTTPSPort: httpsPort, HTTPSRoot: true, Backend: backend, Preconditions: precondition})
+	c.recordReceiptEvent(operationID, "set-https-root", target, exposuredata.ExposureServe, setErr)
+	if setErr != nil {
+		rollbackErr := c.restoreRawTCPAfterHTTPSRootFailure(target, previous, httpsPort, backend, operationID, true)
+		c.recordReceiptEvent(operationID, "rollback-raw-tcp", target, previous.Mode, rollbackErr)
+		if rollbackErr != nil {
+			return setReceipt, fault.WrapError(fault.ErrVerification, "exposure", "HTTPS-root apply failed and exact raw-TCP restoration could not be verified", false, "unverified", "Inspect the exact Serve route manually; Tailge did not apply a broad reset.", rollbackErr)
+		}
+		return setReceipt, setErr
+	}
+	verifiedRoute, verifyErr := c.verifyHTTPSRoute(ctx, target, exposuredata.ExposureServe, providerKey, path, httpsPort, true, localhostBackendAlias, backend)
+	if verifyErr == nil && verifiedRoute.ID != "" {
+		verifyErr = c.verifySingleRouteAtPort(ctx, httpsPort, verifiedRoute)
+	}
+	c.recordVerificationEvent(operationID, target, exposuredata.ExposureServe, verifyErr)
+	if verifyErr != nil || verifiedRoute.ID == "" {
+		if verifyErr == nil {
+			verifyErr = fault.NewError(fault.ErrVerification, "exposure", "HTTPS root was not observed after raw-TCP conversion", true, "unknown", "Refresh and inspect Tailscale before retrying.")
+		}
+		rollbackErr := c.restoreRawTCPAfterHTTPSRootFailure(target, previous, httpsPort, backend, operationID, true)
+		c.recordReceiptEvent(operationID, "rollback-raw-tcp", target, previous.Mode, rollbackErr)
+		if rollbackErr != nil {
+			return setReceipt, fault.WrapError(fault.ErrVerification, "exposure", "HTTPS-root verification failed and exact raw-TCP restoration could not be verified", false, "unverified", "Inspect the exact Serve route manually; Tailge did not apply a broad reset.", rollbackErr)
+		}
+		return setReceipt, verifyErr
+	}
+	setReceipt.Verified = true
+	c.markManagedRoute(verifiedRoute)
+	return setReceipt, nil
+}
+
+func (c exactOperationDependencies) restoreRawTCPAfterHTTPSRootFailure(requested targetmodel.Target, previous exposuredata.ExposureRoute, httpsPort int, backend, operationID string, removePartialRoot bool) error {
+	requested = requested.Normalized()
+	if previous.Mode != exposuredata.ExposureServe || previous.Kind != exposuredata.RouteKindRawTCP || previous.Target.Normalized().Key() != requested.Key() || !tailscale.RawTCPBackendMatchesTarget(requested, previous.Backend) {
+		return fault.NewError(fault.ErrUnsafe, "exposure", "captured raw-TCP route no longer matches the selected private listener", false, "changed", "Inspect the exact Serve route manually; Tailge will not restore a different target.")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	snapshot, err := c.provider.List(ctx)
+	if err != nil {
+		return err
+	}
+	if !snapshot.Authoritative || snapshot.Error != nil {
+		return fault.NewError(fault.ErrUnknown, "exposure", "rollback route state is not authoritative", true, "unknown", "Inspect Tailscale manually; exact raw-TCP restoration was not attempted.")
+	}
+	endpointRoutes, err := exactRoutesAtPort(snapshot.Routes, httpsPort)
+	if err != nil {
+		return err
+	}
+	if len(endpointRoutes) == 1 && routeFingerprint(endpointRoutes[0]) == routeFingerprint(previous) {
+		if previous.Ownership == exposuredata.OwnershipManaged {
+			c.markManagedRoute(endpointRoutes[0])
+		}
+		return nil
+	}
+	if len(endpointRoutes) > 1 {
+		return fault.NewError(fault.ErrUnsafe, "exposure", "rollback found multiple handlers on the exact HTTPS port", false, "changed", "Inspect the endpoint manually; Tailge will not overwrite or reset shared handlers.")
+	}
+	if len(endpointRoutes) == 1 {
+		if !removePartialRoot {
+			return fault.NewError(fault.ErrUnsafe, "exposure", "an unexpected handler appeared before HTTPS-root apply", false, "changed", "Tailge will not remove a route it did not attempt to create; inspect the endpoint and restore raw TCP manually if needed.")
+		}
+		partial := endpointRoutes[0]
+		backendTarget, targetErr := targetmodel.ParseTarget(backend, "tcp")
+		if targetErr != nil || partial.ID == "" || partial.ProviderKey != "serve:https="+strconv.Itoa(httpsPort) || partial.Mode != exposuredata.ExposureServe || partial.Kind != exposuredata.RouteKindHTTPSRoot || partial.Path != "/" || partial.Service != "" || partial.State != exposuredata.ExposureActive || partial.Target.Normalized().Key() != backendTarget.Normalized().Key() || !tailscale.HTTPPathBackendMatches(partial.Backend, backend) {
+			return fault.NewError(fault.ErrUnsafe, "exposure", "rollback found an unexpected route on the HTTPS port", false, "changed", "Inspect the exact route manually; Tailge will not remove an unrecognized handler.")
+		}
+		precondition := tailscale.ExposurePrecondition{RouteIDs: RouteIDs(snapshot.Routes, partial.Target), RouteIDsHash: RouteIDsHash(snapshot.Routes, partial.Target), AllRoutesHash: tailscale.RoutesHash(snapshot.Routes)}
+		_, removeErr := c.provider.Remove(ctx, tailscale.RouteSelector{ID: partial.ProviderKey, Target: &partial.Target, Mode: partial.Mode, Service: partial.Service, Path: partial.Path, Backend: partial.Backend, AllRoutesHash: precondition.AllRoutesHash}, precondition.RouteIDsHash)
+		c.recordReceiptEvent(operationID, "remove-partial-https-root", partial.Target, partial.Mode, removeErr)
+		if removeErr != nil {
+			return removeErr
+		}
+		absent, afterRemove, verifyErr := c.verifyAbsent(ctx, partial)
+		if verifyErr != nil {
+			return verifyErr
+		}
+		if !absent {
+			return fault.NewError(fault.ErrVerification, "exposure", "partial HTTPS root removal could not be verified", true, "unknown", "Inspect Tailscale manually; exact raw-TCP restoration was not attempted.")
+		}
+		snapshot = afterRemove
+		endpointRoutes, err = exactRoutesAtPort(snapshot.Routes, httpsPort)
+		if err != nil {
+			return err
+		}
+		if len(endpointRoutes) != 0 {
+			return fault.NewError(fault.ErrUnsafe, "exposure", "the HTTPS port changed during rollback", false, "changed", "Inspect the exact endpoint manually; Tailge will not overwrite a concurrent route.")
+		}
+	}
+	caps, err := c.provider.Capabilities(ctx)
+	if err != nil {
+		return err
+	}
+	if !caps.Serve || !caps.ExactServe || !caps.ServeTCP || !exactRollbackSelector(previous, caps) {
+		return fault.NewError(fault.ErrUnsupported, "exposure", "the captured raw-TCP route cannot be restored with current exact Serve capabilities", false, "read_only", "Inspect Tailscale manually; Tailge will not use a broad reset.")
+	}
+	precondition := tailscale.ExposurePrecondition{RouteIDs: RouteIDs(snapshot.Routes, previous.Target), RouteIDsHash: RouteIDsHash(snapshot.Routes, previous.Target), AllRoutesHash: tailscale.RoutesHash(snapshot.Routes)}
+	_, setErr := c.provider.Set(ctx, tailscale.ExposureChange{Target: previous.Target, Mode: previous.Mode, ProviderKey: previous.ProviderKey, Service: previous.Service, Path: previous.Path, Backend: previous.Backend, Preconditions: precondition})
+	c.recordReceiptEvent(operationID, "restore-raw-tcp", previous.Target, previous.Mode, setErr)
+	verified, verifyErr := c.verifyMode(ctx, previous.Target, previous.Mode, previous.ProviderKey, previous.Service, previous.Path, previous.Backend)
+	if verifyErr != nil {
+		if setErr != nil {
+			return fault.WrapError(fault.ErrVerification, "exposure", "raw-TCP restoration failed", false, "unverified", "Inspect the exact route manually; restoration was not verified.", setErr)
+		}
+		return verifyErr
+	}
+	if err := c.verifySingleRouteAtPort(ctx, httpsPort, verified); err != nil {
+		return err
+	}
+	if previous.Ownership == exposuredata.OwnershipManaged {
+		c.markManagedRoute(verified)
+	}
+	return nil
+}
+
+func (c exactOperationDependencies) verifySingleRouteAtPort(ctx context.Context, port int, expected exposuredata.ExposureRoute) error {
+	snapshot, err := c.provider.List(ctx)
+	if err != nil {
+		return err
+	}
+	if !snapshot.Authoritative || snapshot.Error != nil {
+		return fault.NewError(fault.ErrUnknown, "exposure", "endpoint state is not authoritative after HTTPS-root mutation", true, "unknown", "Inspect Tailscale manually; Tailge cannot verify that the exact route set is restored.")
+	}
+	routes, err := exactRoutesAtPort(snapshot.Routes, port)
+	if err != nil {
+		return err
+	}
+	if len(routes) != 1 || routes[0].State != exposuredata.ExposureActive || !sameProviderRouteIdentity(routes[0], expected) {
+		return fault.NewError(fault.ErrVerification, "exposure", "the exact endpoint route set could not be verified", true, "unknown", "Inspect Tailscale manually; Tailge will not remove or overwrite a concurrent route.")
+	}
+	return nil
+}
+
+func sameProviderRouteIdentity(left, right exposuredata.ExposureRoute) bool {
+	return left.ProviderKey == right.ProviderKey && left.Kind == right.Kind && left.Service == right.Service && left.Path == right.Path &&
+		left.Target.Normalized().Key() == right.Target.Normalized().Key() && left.Mode == right.Mode && left.URL == right.URL && left.Backend == right.Backend
+}
+
+func exactRoutesAtPort(routes []exposuredata.ExposureRoute, port int) ([]exposuredata.ExposureRoute, error) {
+	matches := make([]exposuredata.ExposureRoute, 0)
+	for _, route := range routes {
+		if route.ProviderKey == "" {
+			return nil, fault.NewError(fault.ErrUnknown, "exposure", "a route has no exact provider selector during conversion", true, "unknown", "Inspect Tailscale manually; Tailge will not assume the endpoint is free.")
+		}
+		selector, err := tailscale.ParseListenerSelector(route.ProviderKey, route.Mode)
+		if err != nil {
+			return nil, fault.NewError(fault.ErrUnknown, "exposure", "a route has an unrecognized provider selector during conversion", true, "unknown", "Inspect Tailscale manually; Tailge will not assume the endpoint is free.")
+		}
+		if selector.Port == port {
+			matches = append(matches, route)
+		}
+	}
+	return matches, nil
 }
 
 func (c exactOperationDependencies) verifyHTTPSRoute(ctx context.Context, target targetmodel.Target, mode exposuredata.ExposureMode, providerKey, path string, httpsPort int, root, localhostBackendAlias bool, backend string) (exposuredata.ExposureRoute, error) {

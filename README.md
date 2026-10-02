@@ -1,6 +1,6 @@
 # Tailge
 
-Tailge is a local-first Tailscale exposure manager with an opinionated, keyboard-first workspace heavily inspired by Vim: `j`/`k` navigation, `gg`/`G` jumps, and `v`/`V` selection, alongside arrow-key navigation. It discovers local TCP listeners and lets you deliberately share selected services through exact raw-TCP routes or explicit HTTPS paths. This matters because a listening port alone does not tell Tailge whether a service speaks HTTP. Tailge never implicitly starts, stops, or restarts services; its TUI may send one explicitly confirmed SIGTERM to a revalidated local process.
+Tailge is a local-first Tailscale exposure manager with an opinionated, keyboard-first workspace heavily inspired by Vim: `j`/`k` navigation, `gg`/`G` jumps, and `v`/`V` selection, alongside arrow-key navigation. It discovers local TCP listeners and lets you deliberately share selected services through exact raw-TCP routes, explicit named HTTPS paths, or same-port private HTTPS roots for listeners the operator confirms speak HTTP. This matters because a listening port alone does not tell Tailge whether a service speaks HTTP. Tailge never implicitly starts, stops, or restarts services; its TUI may send one explicitly confirmed SIGTERM to a revalidated local process.
 
 ## How it works
 
@@ -60,8 +60,9 @@ tailge
 tailge doctor --tailscale
 tailge exposure status
 
-# If the selected listener actually speaks HTTP, add a private HTTPS path
-tailge exposure http serve 127.0.0.1:3000 --path app
+# If the selected listener actually speaks HTTP, choose a private HTTPS root on its same port
+# Example: local HTTP on :3000 remains unchanged; Tailscale serves HTTPS on :3000
+tailge exposure http serve 127.0.0.1:3000 --root --https-port 3000
 ```
 
 Open the provider-observed HTTPS URL shown by Tailge or `tailge exposure status`. For arbitrary non-web services, use the raw-TCP `tailge exposure serve` command shown below and connect with the service's own client.
@@ -84,14 +85,18 @@ tailge exposure http serve '[::1]:4321' --path api --localhost-backend
 tailge exposure http funnel '[::1]:4321' --path preview --confirm-public
 tailge exposure http disable '[::1]:4321' --path api --confirm-external
 
-# Explicit HTTPS root handler on a custom port (tailnet-private Serve)
-tailge exposure http serve '[::1]:4321' --root --https-port 4321 --localhost-backend
+# Private HTTPS root on the same port as the local HTTP listener
+# URL: https://<reported-MagicDNS>:4321/; backend remains http://[::1]:4321
+tailge exposure http serve '[::1]:4321' --root --https-port 4321
+# If that exact port currently has a raw-TCP Serve route, explicitly convert it
+# Unknown/external ownership also requires --confirm-external
+tailge exposure http serve '[::1]:4321' --root --https-port 4321 --replace-raw-tcp --confirm-external
 tailge exposure http disable '[::1]:4321' --root --https-port 4321 --confirm-external
 ```
 
 ## Exposure safety
 
-TCP listener discovery never implies HTTP: raw routes remain protocol-agnostic. `o` uses an observed HTTPS URL when available; for a Serve TCP route, it may open a UI-only HTTP preview using Tailscale-reported MagicDNS and the exact port. This does not change route identity or prove the service speaks HTTP. Mutations use exact route identity and fresh verification; Funnel requires explicit public confirmation. See the [usage guide](docs/usage.md#routes-and-safety) and [architecture guide](docs/architecture.md#named-https-path-routes) for transport and route-identity context.
+TCP listener discovery never implies HTTP: raw routes remain protocol-agnostic. Press `b` only after confirming the selected service speaks HTTP; Tailge then previews a private HTTPS root on the same port and exact backend. Replacing a conflicting Serve TCP route requires explicit conversion intent, fresh identity checks, and exact rollback on failure. `o` uses an observed HTTPS URL when available; for a Serve TCP route, it may open a UI-only HTTP preview using Tailscale-reported MagicDNS and the exact port. This does not change route identity or prove the service speaks HTTP. Funnel requires explicit public confirmation. See the [usage guide](docs/usage.md#routes-and-safety) and [architecture guide](docs/architecture.md#named-https-path-routes) for transport and route-identity context.
 
 ## Keyboard shortcuts
 
@@ -102,7 +107,7 @@ TCP listener discovery never implies HTTP: raw routes remain protocol-agnostic. 
 | `/` | Search the list |
 | `Tab` / `Shift-Tab` | Switch between list and details |
 | `s` / `f` / `d` | Open Serve / Funnel / Disable; press the same key in the selector to choose, then confirm separately |
-| `p` | Preview and add a named HTTPS path to an HTTP listener |
+| `b` | Preview a private HTTPS root on the selected TCP listener's exact port (explicit HTTP intent) |
 | `o` | Open an observed HTTPS URL, or preview a Serve TCP route via Tailscale MagicDNS |
 | `O` | Open the selected local listener at `http://localhost:<port>/` |
 | `y` | Copy an observed HTTPS URL or the same Serve TCP preview |

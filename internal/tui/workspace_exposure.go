@@ -9,6 +9,7 @@ import (
 
 	"github.com/arrokh/tailge/internal/exposure"
 	"github.com/arrokh/tailge/internal/exposuredata"
+	"github.com/arrokh/tailge/internal/readiness"
 	"github.com/arrokh/tailge/internal/tailscale"
 	"github.com/arrokh/tailge/internal/target"
 	"github.com/arrokh/tailge/internal/workspace"
@@ -48,7 +49,7 @@ func (m *workspaceModel) openAction(requested *exposuredata.ExposureMode) {
 		m.setBanner("No service is selected", true)
 		return
 	}
-	m.discardHTTPPathAction()
+	m.discardHTTPSRootAction()
 	m.modal = modalAction
 	target, _ := itemTarget(item)
 	mode := observedMode(item)
@@ -100,7 +101,7 @@ func (m *workspaceModel) invalidatePreviewIfChanged() {
 	// apply boundary rechecks refresh/readiness state and the preview before
 	// starting a mutation; closing confirmation here would turn a background
 	// refresh into an unsolicited operator action.
-	if m.modal != modalAction && m.modal != modalDisableRoute && m.modal != modalHTTPPath && !(m.httpPathAction && m.modal == modalConfirm) {
+	if m.modal != modalAction && m.modal != modalDisableRoute && !(m.httpsRootAction && m.modal == modalConfirm) {
 		return
 	}
 	if !m.actionSession.previewChanged(
@@ -112,7 +113,7 @@ func (m *workspaceModel) invalidatePreviewIfChanged() {
 		return
 	}
 	m.modal = modalNone
-	m.discardHTTPPathAction()
+	m.discardHTTPSRootAction()
 	m.setBanner("Selection changed — refresh required", true)
 }
 
@@ -140,9 +141,9 @@ func (m *workspaceModel) startOperation() tea.Cmd {
 	// refresh starts after confirmation opened, return to the selector and let
 	// the workspace update its supplied choices when fresh state arrives.
 	if m.refreshState.isPending() {
-		if m.httpPathAction {
-			m.modal = modalHTTPPath
-			m.setBanner("HTTP path preview paused while refresh is in progress; review it again after refresh", true)
+		if m.httpsRootAction {
+			m.modal = modalConfirm
+			m.setBanner("HTTPS root preview paused while refresh is in progress; review it again after refresh", true)
 		} else {
 			m.modal = modalAction
 			m.refreshActionModal()
@@ -154,20 +155,25 @@ func (m *workspaceModel) startOperation() tea.Cmd {
 	// changing route or listener fingerprints; confirmation must never bypass
 	// that newer workspace-owned safety decision.
 	availability := m.actionAvailability(m.actionSession.mode)
-	if m.httpPathAction {
+	if m.httpsRootAction {
 		availability = workspace.ActionAvailability{}
 		item, ok := m.actionAnchorItem()
 		if !ok {
 			availability = workspace.ActionAvailability{Disabled: true, Reason: "No exact listener is selected"}
-		} else if reason := m.httpPathBaseReason(item); reason != "" {
+		} else if reason := m.httpsRootBaseReason(item); reason != "" {
 			availability = workspace.ActionAvailability{Disabled: true, Reason: reason}
-		} else if status, message, remediation := workspace.HTTPPathStatus(m.readiness, m.httpPathMode); status != "ready" {
-			availability = workspace.ActionAvailability{Disabled: true, Reason: httpPathReadinessReason(m.httpPathMode, status, message, remediation)}
+		} else if status, message, remediation := workspace.HTTPPathStatus(m.readiness, exposuredata.ExposureServe); status != readiness.ReadinessReady {
+			availability = workspace.ActionAvailability{Disabled: true, Reason: httpsRootReadinessReason(status, message, remediation)}
+		} else if rawTCP, already, reason := httpsRootRouteConflict(m.view.Exposures.Routes, item.Listener.Target, m.httpsRootPort, m.httpsRootLocalhostBackend); reason != "" || already || (m.httpsRootReplaceRawTCP && (rawTCP == nil || rawTCP.ID != m.httpsRootRouteID)) || (!m.httpsRootReplaceRawTCP && rawTCP != nil) {
+			if reason == "" {
+				reason = "The exact HTTPS-root endpoint changed after preview"
+			}
+			availability = workspace.ActionAvailability{Disabled: true, Reason: reason}
 		}
 	}
 	if availability.Disabled {
-		if m.httpPathAction {
-			m.modal = modalHTTPPath
+		if m.httpsRootAction {
+			m.modal = modalConfirm
 		} else {
 			m.modal = modalAction
 			m.refreshActionModal()
@@ -217,9 +223,9 @@ func (m *workspaceModel) mutationApproval(item exposure.ReconciledItem, target t
 func (m *workspaceModel) startSingleOperation() tea.Cmd {
 	item, ok := m.actionAnchorItem()
 	if !ok || item.ID != m.actionSession.itemID {
-		if m.httpPathAction {
+		if m.httpsRootAction {
 			m.modal = modalNone
-			m.discardHTTPPathAction()
+			m.discardHTTPSRootAction()
 		}
 		m.setBanner("Selection changed — refresh required", true)
 		return nil
@@ -230,18 +236,19 @@ func (m *workspaceModel) startSingleOperation() tea.Cmd {
 		listenerFingerprint(m.view.Listeners, m.actionSession.target),
 		selectionFingerprint(m.actionItems()),
 	) {
-		if m.httpPathAction {
+		if m.httpsRootAction {
 			m.modal = modalNone
-			m.discardHTTPPathAction()
+			m.discardHTTPSRootAction()
 		}
 		m.setBanner("Selection changed — refresh required", true)
 		return nil
 	}
 	key := m.actionSession.target.Key()
-	if m.httpPathAction {
-		if len(m.actionItems()) != 1 || m.httpPath == "" {
-			m.modal = modalHTTPPath
-			m.setBanner("Named HTTP path preview is incomplete; enter a path and confirm again", true)
+	if m.httpsRootAction {
+		if len(m.actionItems()) != 1 || m.httpsRootPort != m.actionSession.target.Port {
+			m.modal = modalNone
+			m.discardHTTPSRootAction()
+			m.setBanner("HTTPS root preview is incomplete; refresh and select one exact listener", true)
 			return nil
 		}
 		if _, busy := m.activeOps[key]; busy {
@@ -252,14 +259,17 @@ func (m *workspaceModel) startSingleOperation() tea.Cmd {
 		m.activeOps[key] = cancel
 		m.markApplying(key)
 		target := m.actionSession.target
-		path, mode := m.httpPath, m.httpPathMode
-		options := exposure.HTTPPathOptions{LocalhostBackendAlias: m.httpPathLocalhostBackend}
+		options := exposure.HTTPSRootOptions{
+			HTTPSPort: m.httpsRootPort, LocalhostBackendAlias: m.httpsRootLocalhostBackend,
+			ReplaceRawTCP: m.httpsRootReplaceRawTCP, ConfirmExternal: m.httpsRootReplaceRawTCP,
+			ExpectedRawTCPRouteID: m.httpsRootRouteID,
+		}
 		controller, timeout := m.controller, m.cfg.OperationTimeout
 		approval := m.mutationApproval(item, target)
-		m.discardHTTPPathAction()
-		m.transient = "Applying HTTP path " + path + " to " + target.String()
+		m.discardHTTPSRootAction()
+		m.transient = "Applying private HTTPS root to " + target.String()
 		return func() tea.Msg {
-			receipt, err := controller.ApplyHTTPPathWithOptionsApproved(ctx, target, path, mode, mode == exposuredata.ExposureFunnel, options, timeout, approval)
+			receipt, err := controller.ApplyHTTPSRootWithOptionsApproved(ctx, target, options, timeout, approval)
 			return operationDoneMsg{targetKey: key, receipt: receipt, err: err}
 		}
 	}

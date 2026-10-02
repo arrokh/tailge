@@ -181,6 +181,16 @@ func parseHTTPPathBackend(value string) (nettarget.Target, bool) {
 	return parsed.Normalized(), true
 }
 
+// RawTCPBackendMatchesTarget reports whether an observed raw-TCP backend is the
+// exact selected listener address or the loopback covered by a wildcard bind.
+func RawTCPBackendMatchesTarget(selected nettarget.Target, observed string) bool {
+	if strings.TrimSpace(observed) == "" {
+		return false
+	}
+	_, err := rawTCPBackendArgument(selected, observed)
+	return err == nil
+}
+
 // rawTCPBackendArgument restores an observed raw-TCP backend without losing its
 // transport scheme. Scheme-less status values are accepted only when their
 // exact normalized target matches the selected listener (or its wildcard's

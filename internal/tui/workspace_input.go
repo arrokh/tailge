@@ -73,8 +73,8 @@ func (m *workspaceModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.openAction(ptrMode(exposuredata.ExposureFunnel))
 	case "d":
 		m.openAction(ptrMode(exposuredata.ExposureDisabled))
-	case "p":
-		m.openHTTPPathInput()
+	case "b":
+		m.openHTTPSRootPreview()
 	case "O":
 		return m, m.openLocalURL()
 	case "v":
@@ -273,36 +273,6 @@ func (m *workspaceModel) updateModal(msg tea.KeyMsg, key string) (tea.Model, tea
 		}
 		m.helpOffset = clamp(m.helpOffset, 0, m.helpMaxOffset())
 		return m, nil
-	case modalHTTPPath:
-		if key == "ctrl+b" {
-			item, ok := m.actionAnchorItem()
-			if ok && item.Listener != nil && supportsLocalhostBackendAlias(item.Listener.Target) {
-				m.httpPathLocalhostBackend = !m.httpPathLocalhostBackend
-			} else {
-				m.setBanner("localhost backend alias is only available for IPv6 listeners", true)
-			}
-			return m, nil
-		}
-		if key == "esc" {
-			m.modal = modalNone
-			m.discardHTTPPathAction()
-			return m, nil
-		}
-		if key == "tab" || key == "shift+tab" {
-			if m.httpPathMode == exposuredata.ExposureServe {
-				m.httpPathMode = exposuredata.ExposureFunnel
-			} else {
-				m.httpPathMode = exposuredata.ExposureServe
-			}
-			return m, nil
-		}
-		if key == "enter" {
-			m.submitHTTPPath()
-			return m, nil
-		}
-		updated, cmd := m.pathInput.Update(msg)
-		m.pathInput = updated
-		return m, cmd
 	case modalChooseURL:
 		return m.updateURLChoiceModal(msg, key)
 	case modalPalette:
@@ -469,10 +439,20 @@ func (m *workspaceModel) beginConfirmation(mode exposuredata.ExposureMode) (tea.
 }
 
 func (m *workspaceModel) updateConfirmModal(_ tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
+	if m.httpsRootAction && key == "ctrl+b" {
+		item, ok := m.actionAnchorItem()
+		if ok && item.Listener != nil && supportsLocalhostBackendAlias(item.Listener.Target) {
+			m.httpsRootLocalhostBackend = !m.httpsRootLocalhostBackend
+			m.transient = "HTTPS root backend alias toggled; review the exact address preview"
+		} else {
+			m.setBanner("localhost backend alias is only available for IPv6 listeners", true)
+		}
+		return m, nil
+	}
 	if key == "esc" {
 		m.modal = modalNone
-		if m.httpPathAction {
-			m.discardHTTPPathAction()
+		if m.httpsRootAction {
+			m.discardHTTPSRootAction()
 		}
 		return m, nil
 	}
@@ -483,8 +463,8 @@ func (m *workspaceModel) updateConfirmModal(_ tea.KeyMsg, key string) (tea.Model
 	if key == "enter" {
 		if !m.actionSession.confirm {
 			m.modal = modalNone
-			if m.httpPathAction {
-				m.discardHTTPPathAction()
+			if m.httpsRootAction {
+				m.discardHTTPSRootAction()
 			}
 			m.transient = "Cancelled; no changes made"
 			return m, nil

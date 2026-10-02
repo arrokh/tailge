@@ -809,16 +809,40 @@ func (c *Controller) ApplyHTTPPathWithOptionsApproved(ctx context.Context, targe
 	return c.applyHTTPPath(ctx, target, path, mode, confirmFunnel, options, timeout, &approval)
 }
 
+// HTTPSRootOptions carries explicit choices for a private HTTPS root. The
+// default preserves the exact discovered backend address and never replaces a
+// raw-TCP route. ReplaceRawTCP requires an exact active Serve TCP route on
+// HTTPSPort; ConfirmExternal is required for routes with unknown/external
+// ownership, and ExpectedRawTCPRouteID binds an interactive preview to it.
+type HTTPSRootOptions struct {
+	HTTPSPort             int
+	LocalhostBackendAlias bool
+	ReplaceRawTCP         bool
+	ConfirmExternal       bool
+	ExpectedRawTCPRouteID string
+}
+
 // ApplyHTTPSRoot explicitly maps the selected listener to the HTTPS root at the
 // requested Serve port. IPv6 listeners retain their numeric backend by default;
 // localhostBackendAlias opts into hostname resolution when an operator accepts
 // that weaker address guarantee.
 func (c *Controller) ApplyHTTPSRoot(ctx context.Context, target target.Target, httpsPort int, localhostBackendAlias bool, timeout time.Duration) (receipt exposuredata.OperationReceipt, applyErr error) {
-	return c.applyHTTPSRoot(ctx, target, httpsPort, localhostBackendAlias, timeout, nil)
+	return c.ApplyHTTPSRootWithOptions(ctx, target, HTTPSRootOptions{HTTPSPort: httpsPort, LocalhostBackendAlias: localhostBackendAlias}, timeout)
 }
 
 func (c *Controller) ApplyHTTPSRootApproved(ctx context.Context, target target.Target, httpsPort int, localhostBackendAlias bool, timeout time.Duration, approval MutationApproval) (receipt exposuredata.OperationReceipt, applyErr error) {
-	return c.applyHTTPSRoot(ctx, target, httpsPort, localhostBackendAlias, timeout, &approval)
+	return c.ApplyHTTPSRootWithOptionsApproved(ctx, target, HTTPSRootOptions{HTTPSPort: httpsPort, LocalhostBackendAlias: localhostBackendAlias}, timeout, approval)
+}
+
+// ApplyHTTPSRootWithOptions applies a private root with explicit route-replacement intent.
+func (c *Controller) ApplyHTTPSRootWithOptions(ctx context.Context, target target.Target, options HTTPSRootOptions, timeout time.Duration) (receipt exposuredata.OperationReceipt, applyErr error) {
+	return c.applyHTTPSRoot(ctx, target, options, timeout, nil)
+}
+
+// ApplyHTTPSRootWithOptionsApproved binds root replacement to the exact route
+// and listener observations shown to an interactive operator.
+func (c *Controller) ApplyHTTPSRootWithOptionsApproved(ctx context.Context, target target.Target, options HTTPSRootOptions, timeout time.Duration, approval MutationApproval) (receipt exposuredata.OperationReceipt, applyErr error) {
+	return c.applyHTTPSRoot(ctx, target, options, timeout, &approval)
 }
 
 func (c *Controller) applyRoute(ctx context.Context, target target.Target, providerKey string, confirmExternal bool, timeout time.Duration, approval *MutationApproval) (receipt exposuredata.OperationReceipt, applyErr error) {

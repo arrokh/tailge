@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/arrokh/tailge/internal/exposuredata"
-	"github.com/arrokh/tailge/internal/readiness"
 	"github.com/arrokh/tailge/internal/workspace"
 	"github.com/charmbracelet/lipgloss"
 	ansi "github.com/charmbracelet/x/ansi"
@@ -89,45 +88,6 @@ func (m *workspaceModel) modalView() string {
 			lines = append(lines, marker+command)
 		}
 		lines = append(lines, "", "↑/↓ select · Enter run · Esc cancel")
-	case modalHTTPPath:
-		title = "ADD NAMED HTTP PATH"
-		item, ok := m.actionAnchorItem()
-		if ok && item.Listener != nil {
-			lines = append(lines, "Listener: "+item.Listener.Target.String())
-			backend := httpPathBackend(item.Listener.Target, m.httpPathLocalhostBackend)
-			lines = append(lines, "Backend: "+backend)
-			if supportsLocalhostBackendAlias(item.Listener.Target) {
-				aliasState := "off"
-				if m.httpPathLocalhostBackend {
-					aliasState = "on"
-					lines = append(lines, "WARNING: hostname resolution weakens the exact IPv6 address guarantee")
-				} else {
-					lines = append(lines, "If numeric IPv6 fails, disable its exact route before retrying with Ctrl+B")
-				}
-				lines = append(lines, "Ctrl+B toggles explicit localhost backend alias ["+aliasState+"]")
-			}
-			process := item.Listener.Process
-			if process == "" {
-				process = item.Listener.Name
-			}
-			generated, _ := exposuredata.GeneratedHTTPPath(process, item.Listener.Target.Port)
-			lines = append(lines, "Blank path generates and persists: "+generated)
-		}
-		serveStatus, serveMessage, _ := workspace.HTTPPathStatus(m.readiness, exposuredata.ExposureServe)
-		funnelStatus, funnelMessage, _ := workspace.HTTPPathStatus(m.readiness, exposuredata.ExposureFunnel)
-		lines = append(lines, "Serve: "+string(serveStatus), "Funnel: "+string(funnelStatus))
-		if m.httpPathMode == exposuredata.ExposureServe {
-			lines = append(lines, "Requested: Serve (private to the tailnet)")
-			if serveMessage != "" && serveStatus != readiness.ReadinessReady {
-				lines = append(lines, "Unavailable: "+serveMessage)
-			}
-		} else {
-			lines = append(lines, "Requested: Funnel (public internet)")
-			if funnelMessage != "" && funnelStatus != readiness.ReadinessReady {
-				lines = append(lines, "Unavailable: "+funnelMessage)
-			}
-		}
-		lines = append(lines, "HTTPS endpoint: standard port 443", "Path slug (one segment):", "  "+pathInputView(m.pathInput), "The existing app stays on local HTTP; Tailscale strips the path prefix.", "", "Tab switches Serve/Funnel · Enter previews · Esc cancels")
 	case modalChooseURL:
 		title = "CHOOSE OBSERVED HTTPS URL"
 		lines = append(lines, "Select one exact provider-observed HTTPS URL:")
@@ -220,12 +180,30 @@ func (m *workspaceModel) modalView() string {
 			lines = append(lines, fmt.Sprintf("Selected: %d services", count))
 		}
 		lines = append(lines, "Target: "+m.actionSession.target.String(), "Requested: "+string(m.actionSession.mode))
-		if m.httpPathAction {
-			lines = append(lines, "Named HTTP path: "+m.httpPath, "Provider endpoint: standard HTTPS port 443", "Local HTTP backend: "+httpPathBackend(m.actionSession.target, m.httpPathLocalhostBackend))
-			if m.httpPathLocalhostBackend {
-				lines = append(lines, "WARNING: localhost uses hostname resolution; the exact IPv6 address guarantee is weakened")
+		if m.httpsRootAction {
+			lines = append(lines,
+				fmt.Sprintf("Browser URL: https://<Tailscale DNS>:%d/", m.httpsRootPort),
+				fmt.Sprintf("Provider selector: serve:https=%d", m.httpsRootPort),
+				"Local HTTP backend: "+httpsRootBackend(m.actionSession.target, m.httpsRootLocalhostBackend),
+				"Only use when this selected TCP listener actually speaks HTTP",
+				"Serve stays private to authenticated tailnet devices; no app or process changes",
+			)
+			if m.httpsRootReplaceRawTCP {
+				ownership := "unknown"
+				if item, ok := m.actionAnchorItem(); ok {
+					if route := workspace.PreviewRoute(item, m.httpsRootRouteID); route != nil && route.Ownership != "" {
+						ownership = string(route.Ownership)
+					}
+				}
+				lines = append(lines, "Replacing exact raw-TCP route: serve:tcp="+fmt.Sprint(m.httpsRootPort)+" (ownership="+ownership+")", "Route conversion may briefly interrupt tailnet access")
 			}
-			lines = append(lines, "Tailscale removes the mount prefix; application health is not checked")
+			if item, ok := m.actionAnchorItem(); ok && item.Listener != nil && supportsLocalhostBackendAlias(item.Listener.Target) {
+				if m.httpsRootLocalhostBackend {
+					lines = append(lines, "WARNING: hostname resolution weakens the exact IPv6 address guarantee")
+				} else {
+					lines = append(lines, "Ctrl+B opts into localhost backend alias for IPv6")
+				}
+			}
 		}
 		if item, ok := m.actionAnchorItem(); ok {
 			if item.Warning != "" {
@@ -246,12 +224,8 @@ func (m *workspaceModel) modalView() string {
 			}
 		}
 		if m.actionSession.mode == exposuredata.ExposureFunnel {
-			if m.httpPathAction {
-				lines = append(lines, "WARNING: Funnel makes EVERY path on this shared HTTPS endpoint public")
-			} else {
-				lines = append(lines, "WARNING: public internet exposure")
-			}
-		} else if m.httpPathAction {
+			lines = append(lines, "WARNING: public internet exposure")
+		} else if m.httpsRootAction {
 			lines = append(lines, "Serve remains private to authenticated tailnet access")
 		}
 		if m.externalPreview() {
@@ -396,7 +370,7 @@ func helpLines() []string {
 		"  s                    preview private Serve for the selection",
 		"  f                    preview public Funnel for the selection",
 		"  d                    preview Disable for the selection",
-		"  p                    add one named HTTP path to the selected listener",
+		"  b                    preview a private HTTPS root on the selected listener's exact port",
 		"  v/V selection        action previews apply sequentially to selected items; each target is verified independently",
 		"  j/k or Up/Down       choose an action",
 		"  Enter                continue to route selection/confirmation or show a no-op",
@@ -417,8 +391,9 @@ func helpLines() []string {
 		"  Funnel               remains public; review the warning and explicitly focus Confirm",
 		"  Disable               uses exact-route selection plus focused Confirm",
 		"  Disable with multiple routes opens an exact-route chooser; only the selected route is removed",
-		"  p                    explicitly configure a local listener as an HTTP path; blank slug is generated from process name and port",
-		"  HTTP path Funnel     makes every path on the shared HTTPS endpoint public; readiness and provider support are shown before confirmation",
+		"  b                    explicitly treat one selected TCP listener as HTTP and configure a private HTTPS root on that same port",
+		"  HTTPS root           replaces only the exact conflicting Serve TCP route after a Cancel-first confirmation; brief interruption is possible",
+		"  Ctrl+B               opts into localhost hostname resolution for an IPv6 backend and warns that exact-address guarantees weaken",
 		"  Serve                remains private, but exact readiness,",
 		"                       target identity, confirmation, and verification remain",
 		"                       required so a stale or ambiguous route is never changed",

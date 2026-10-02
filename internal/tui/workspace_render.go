@@ -189,7 +189,7 @@ func footerSortLabel(sortKey string) string {
 	}
 }
 
-func compactFooterStatus(width int, focus, sortKey, pathStatus, progress string) string {
+func compactFooterStatus(width int, focus, sortKey, httpsRootStatus, progress string) string {
 	if progress != "" {
 		return progress
 	}
@@ -197,12 +197,12 @@ func compactFooterStatus(width int, focus, sortKey, pathStatus, progress string)
 	if width >= 40 {
 		parts = append(parts, compactSortLabel(sortKey))
 	}
-	parts = append(parts, strings.Replace(pathStatus, "p HTTP path", "p", 1))
+	parts = append(parts, strings.Replace(httpsRootStatus, "b HTTPS root", "b", 1))
 	return strings.Join(parts, " ")
 }
 
-func compactFooterStatusWithShortcuts(width int, focus, sortKey, pathStatus, urlStatus, progress string) string {
-	return compactFooterStatus(width, focus, sortKey, pathStatus, progress) + " " + compactURLShortcutStatus(urlStatus)
+func compactFooterStatusWithShortcuts(width int, focus, sortKey, httpsRootStatus, urlStatus, progress string) string {
+	return compactFooterStatus(width, focus, sortKey, httpsRootStatus, progress) + " " + compactURLShortcutStatus(urlStatus)
 }
 
 func footerKeyHints(width int, focus paneFocus, searching, zoomed, canZoom bool, urlStatus string) string {
@@ -236,7 +236,7 @@ func footerKeyHints(width int, focus paneFocus, searching, zoomed, canZoom bool,
 	if focus == focusDetails {
 		switch {
 		case width >= 120:
-			return "↑↓ Scroll · Tab List · v/V Select · s/f/d Routes · x Term · p Path · e/S Sort · / Find" + zoomHint + " · ? Help · q Quit"
+			return "↑↓ Scroll · Tab List · v/V Select · s/f/d Routes · b HTTPS · x Term · e/S Sort · / Find" + zoomHint + " · ? Help · q Quit"
 		case width >= 100:
 			return "↑↓ Scroll · Tab List · e/S Sort · / Find · ? Help · q Quit" + zoomHint
 		case width >= 72:
@@ -249,7 +249,7 @@ func footerKeyHints(width int, focus paneFocus, searching, zoomed, canZoom bool,
 	}
 	switch {
 	case width >= 120:
-		return "↑↓ Move · Tab Focus · v/V Select · s/f/d Routes · x Term · p Path · e/S Sort · / Find" + zoomHint + " · ? Help · q Quit"
+		return "↑↓ Move · Tab Focus · v/V Select · s/f/d Routes · b HTTPS · x Term · e/S Sort · / Find" + zoomHint + " · ? Help · q Quit"
 	case width >= 100:
 		return "↑↓ Move · Tab Focus · v Mark · s/f/d Routes · e/S Sort · / Find · ? Help · q Quit" + zoomHint
 	case width >= 72:
@@ -294,7 +294,7 @@ func (m *workspaceModel) renderBottom() string {
 		selection = fmt.Sprintf("  selected:%d", count)
 	}
 	urlStatus := m.urlShortcutStatus()
-	status := fmt.Sprintf("Focus: %s  Sort: %s  %s  %s%s%s", focus, footerSortLabel(m.cfg.Sort), m.httpPathStatusLabel(), compactURLShortcutStatus(urlStatus), search, selection)
+	status := fmt.Sprintf("Focus: %s  Sort: %s  %s  %s%s%s", focus, footerSortLabel(m.cfg.Sort), m.httpsRootStatusLabel(), compactURLShortcutStatus(urlStatus), search, selection)
 	if progress != "" {
 		status += "  " + progress
 	}
@@ -302,9 +302,9 @@ func (m *workspaceModel) renderBottom() string {
 	statusWidth := maxInt(0, m.width-lipgloss.Width(identityText)-2)
 	if lipgloss.Width(status) > statusWidth {
 		if m.width < 60 {
-			status = compactFooterStatus(m.width, focus, m.cfg.Sort, m.httpPathStatusLabel(), progress)
+			status = compactFooterStatus(m.width, focus, m.cfg.Sort, m.httpsRootStatusLabel(), progress)
 		} else {
-			status = compactFooterStatusWithShortcuts(m.width, focus, m.cfg.Sort, m.httpPathStatusLabel(), urlStatus, progress)
+			status = compactFooterStatusWithShortcuts(m.width, focus, m.cfg.Sort, m.httpsRootStatusLabel(), urlStatus, progress)
 		}
 	}
 	status = ansi.Truncate(status, statusWidth, "...")
@@ -763,9 +763,9 @@ func (m *workspaceModel) renderDetails(width, height int) string {
 			lines = append(lines, "     selector: "+route.ProviderKey)
 		}
 		if route.Kind == exposuredata.RouteKindHTTPPath {
-			lines = append(lines, "     kind: named HTTP path", "     mount path: "+valueOr(route.Path, "/"))
+			lines = append(lines, "     kind: named HTTP path (configured outside the TUI)", "     mount path: "+valueOr(route.Path, "/"))
 		} else if route.Kind == exposuredata.RouteKindHTTPSRoot {
-			lines = append(lines, "     kind: explicit HTTPS root handler", "     mount path: /")
+			lines = append(lines, "     kind: private HTTPS root handler", "     mount path: /")
 		}
 		if route.URL != "" {
 			lines = append(lines, "     url: "+route.URL)
@@ -784,16 +784,16 @@ func (m *workspaceModel) renderDetails(width, height int) string {
 		for _, mode := range m.readiness.Modes {
 			owner := strings.ToUpper(string(mode.Mode))
 			lines = append(lines, fmt.Sprintf("  %s: %s  [%s]  [owner: %s]", mode.Mode, mode.Status, readinessBadgeText(mode.Status), owner))
-			pathStatus := mode.HTTPPathStatus
-			if pathStatus != "" || mode.HTTPPathMessage != "" {
-				if pathStatus == "" {
-					pathStatus = readinessmodel.ReadinessUnknown
+			handlerStatus := mode.HTTPPathStatus
+			if handlerStatus != "" || mode.HTTPPathMessage != "" {
+				if handlerStatus == "" {
+					handlerStatus = readinessmodel.ReadinessUnknown
 				}
-				lines = append(lines, fmt.Sprintf("  %s HTTPS paths: %s", mode.Mode, pathStatus))
-				if mode.HTTPPathMessage != "" && pathStatus != readinessmodel.ReadinessReady {
-					lines = append(lines, "  ["+owner+"] HTTP path reason: "+mode.HTTPPathMessage)
+				lines = append(lines, fmt.Sprintf("  %s HTTPS handlers: %s", mode.Mode, handlerStatus))
+				if mode.HTTPPathMessage != "" && handlerStatus != readinessmodel.ReadinessReady {
+					lines = append(lines, "  ["+owner+"] HTTPS handler reason: "+mode.HTTPPathMessage)
 					if mode.HTTPPathRemediation != "" {
-						lines = append(lines, "  ["+owner+"] HTTP path next: "+mode.HTTPPathRemediation)
+						lines = append(lines, "  ["+owner+"] HTTPS handler next: "+mode.HTTPPathRemediation)
 					}
 				}
 			}

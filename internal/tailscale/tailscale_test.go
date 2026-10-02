@@ -551,6 +551,29 @@ func TestRawTCPBackendArgumentPreservesRestoredAddressAndTransport(t *testing.T)
 	}
 }
 
+func TestRawTCPBackendMatchesExactSelectedTarget(t *testing.T) {
+	cases := []struct {
+		name     string
+		selected target.Target
+		backend  string
+		want     bool
+	}{
+		{name: "exact loopback", selected: target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}, backend: "tcp://127.0.0.1:3000", want: true},
+		{name: "scheme-less status", selected: target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}, backend: "127.0.0.1:3000", want: true},
+		{name: "covered wildcard loopback", selected: target.Target{Address: "0.0.0.0", Port: 3000, Protocol: "tcp"}, backend: "tcp://127.0.0.1:3000", want: true},
+		{name: "different address", selected: target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}, backend: "tcp://127.0.0.2:3000", want: false},
+		{name: "different port", selected: target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}, backend: "tcp://127.0.0.1:3001", want: false},
+		{name: "missing backend identity", selected: target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}, backend: "", want: false},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if got := RawTCPBackendMatchesTarget(test.selected, test.backend); got != test.want {
+				t.Fatalf("RawTCPBackendMatchesTarget(%#v, %q) = %t, want %t", test.selected, test.backend, got, test.want)
+			}
+		})
+	}
+}
+
 func TestHTTPBackendArgumentSupportsListenerAddressFamilies(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -795,6 +818,45 @@ func TestSetRestoresExplicitHTTPSRootOnExactProviderListener(t *testing.T) {
 	}
 	if calls[len(calls)-1] != "serve --bg --yes --set-path=/ --https=443 http://127.0.0.1:3000" {
 		t.Fatalf("restore selector was not preserved: %v", calls)
+	}
+}
+
+func TestSetUsesSameHTTPSPortAndBackendPortForExplicitRoot(t *testing.T) {
+	calls := []string{}
+	adapter := &Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+		command := strings.Join(args, " ")
+		calls = append(calls, command)
+		switch command {
+		case "version":
+			return runner.Result{Stdout: "1.102.4\n"}, nil
+		case "serve --help":
+			return runner.Result{Stdout: "status clear --https --tcp --set-path value"}, nil
+		case "funnel --help":
+			return runner.Result{Stdout: "status reset --https --tcp"}, nil
+		case "serve status --json", "funnel status --json":
+			return runner.Result{Stdout: `{}`}, nil
+		case "serve --bg --yes --set-path=/ --https=3000 http://127.0.0.1:3000":
+			return runner.Result{}, nil
+		default:
+			return runner.Result{}, errors.New("unexpected command: " + command)
+		}
+	})}
+	target := target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}.Normalized()
+	_, err := adapter.Set(context.Background(), ExposureChange{
+		Target: target, Mode: exposuredata.ExposureServe, ProviderKey: "serve:https=3000",
+		Path: "/", HTTPSPort: 3000, HTTPSRoot: true, Backend: "http://127.0.0.1:3000",
+		Preconditions: ExposurePrecondition{RouteIDsHash: hashIDs(nil), AllRoutesHash: RoutesHash(nil)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls[len(calls)-1] != "serve --bg --yes --set-path=/ --https=3000 http://127.0.0.1:3000" {
+		t.Fatalf("same-port HTTPS root changed the listener or backend port: %v", calls)
+	}
+	for _, command := range calls {
+		if strings.HasPrefix(command, "funnel ") && command != "funnel --help" && command != "funnel status --json" {
+			t.Fatalf("private root setup invoked a Funnel mutation: %v", calls)
+		}
 	}
 }
 

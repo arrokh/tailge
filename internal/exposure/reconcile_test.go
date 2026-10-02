@@ -60,21 +60,22 @@ func (d *sequencedDiscoverer) List(context.Context) (discovery.ListenerSnapshot,
 }
 
 type fakeProvider struct {
-	mu             sync.Mutex
-	snapshot       exposuredata.ExposureSnapshot
-	caps           tailscale.Capabilities
-	readiness      readinessmodel.Readiness
-	readinessErr   error
-	sets           []tailscale.ExposureChange
-	removes        []tailscale.RouteSelector
-	setErr         error
-	setErrMode     exposuredata.ExposureMode
-	setProviderKey string
-	removeErr      error
-	setStarted     chan struct{}
-	releaseSet     chan struct{}
-	setOnce        sync.Once
-	blockList      <-chan struct{}
+	mu               sync.Mutex
+	snapshot         exposuredata.ExposureSnapshot
+	caps             tailscale.Capabilities
+	readiness        readinessmodel.Readiness
+	readinessErr     error
+	sets             []tailscale.ExposureChange
+	removes          []tailscale.RouteSelector
+	setErr           error
+	setErrMode       exposuredata.ExposureMode
+	setProviderKey   string
+	removeErr        error
+	afterRemoveRoute *exposuredata.ExposureRoute
+	setStarted       chan struct{}
+	releaseSet       chan struct{}
+	setOnce          sync.Once
+	blockList        <-chan struct{}
 }
 
 func (f *fakeProvider) Capabilities(context.Context) (tailscale.Capabilities, error) {
@@ -144,6 +145,10 @@ func (f *fakeProvider) Remove(_ context.Context, selector tailscale.RouteSelecto
 			f.snapshot.Routes = append(f.snapshot.Routes[:i], f.snapshot.Routes[i+1:]...)
 			break
 		}
+	}
+	if f.afterRemoveRoute != nil {
+		f.snapshot.Routes = append(f.snapshot.Routes, *f.afterRemoveRoute)
+		f.afterRemoveRoute = nil
 	}
 	return exposuredata.OperationReceipt{ID: "remove-" + selector.ID}, nil
 }
@@ -812,6 +817,203 @@ func TestApplyHTTPSRootUsesExplicitPrivateCustomPortAndExactRemoval(t *testing.T
 	}
 	if len(provider.removes) != 1 || provider.removes[0].ID != "serve:https=4321" || provider.removes[0].Path != "/" {
 		t.Fatalf("root removal did not select exact HTTPS port/path: %#v", provider.removes)
+	}
+}
+
+func TestApplyHTTPSRootReplacesExactServeTCPRouteOnlyAfterExplicitConfirmation(t *testing.T) {
+	target := targetmodel.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
+	raw := exposuredata.ExposureRoute{ID: "raw-id", ProviderKey: "serve:tcp=4321", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:4321", Target: target, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive}
+	provider := &fakeProvider{snapshot: exposuredata.ExposureSnapshot{Authoritative: true, Routes: []exposuredata.ExposureRoute{raw}}, caps: tailscale.Capabilities{Serve: true, ExactServe: true, ServeTCP: true, ServeHTTPS: true, ServePath: true}, readiness: ready()}
+	discoverer := &fakeDiscoverer{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{testListener(target, "node")}}}
+	controller := NewController(discoverer, provider)
+	options := HTTPSRootOptions{HTTPSPort: target.Port, ReplaceRawTCP: true, ExpectedRawTCPRouteID: raw.ID}
+	if _, err := controller.ApplyHTTPSRootWithOptions(context.Background(), target, options, time.Second); err == nil {
+		t.Fatal("unknown-owned raw TCP route was replaced without explicit external confirmation")
+	}
+	if len(provider.removes) != 0 || len(provider.sets) != 0 {
+		t.Fatalf("provider mutated before confirmation: removes=%#v sets=%#v", provider.removes, provider.sets)
+	}
+
+	options.ConfirmExternal = true
+	receipt, err := controller.ApplyHTTPSRootWithOptions(context.Background(), target, options, time.Second)
+	if err != nil || !receipt.Verified {
+		t.Fatalf("confirmed HTTPS-root conversion failed: receipt=%#v err=%v", receipt, err)
+	}
+	if len(provider.removes) != 1 || provider.removes[0].ID != raw.ProviderKey || provider.removes[0].Mode != exposuredata.ExposureServe || provider.removes[0].Backend != raw.Backend {
+		t.Fatalf("conversion did not remove the exact prior TCP route: %#v", provider.removes)
+	}
+	if len(provider.sets) != 1 || provider.sets[0].Mode != exposuredata.ExposureServe || provider.sets[0].ProviderKey != "serve:https=4321" || !provider.sets[0].HTTPSRoot || provider.sets[0].Backend != "http://127.0.0.1:4321" {
+		t.Fatalf("conversion did not configure a private same-port HTTPS root: %#v", provider.sets)
+	}
+	if len(provider.snapshot.Routes) != 1 || provider.snapshot.Routes[0].Kind != exposuredata.RouteKindHTTPSRoot || provider.snapshot.Routes[0].URL != "https://dev.example.ts.net:4321/" {
+		t.Fatalf("converted root route was not the sole verified route: %#v", provider.snapshot.Routes)
+	}
+}
+
+func TestApplyHTTPSRootDoesNotRemoveConcurrentRootBeforeApplying(t *testing.T) {
+	target := targetmodel.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
+	raw := exposuredata.ExposureRoute{ID: "raw-id", ProviderKey: "serve:tcp=4321", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:4321", Target: target, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive}
+	concurrentRoot := exposuredata.ExposureRoute{ID: "concurrent-root", ProviderKey: "serve:https=4321", Kind: exposuredata.RouteKindHTTPSRoot, Path: "/", Backend: "http://127.0.0.1:4321", Target: target, Mode: exposuredata.ExposureServe, URL: "https://dev.example.ts.net:4321/", State: exposuredata.ExposureActive}
+	base := &fakeProvider{snapshot: exposuredata.ExposureSnapshot{Authoritative: true, Routes: []exposuredata.ExposureRoute{raw}}, caps: tailscale.Capabilities{Serve: true, ExactServe: true, ServeTCP: true, ServeHTTPS: true, ServePath: true}, readiness: ready(), afterRemoveRoute: &concurrentRoot}
+	discoverer := &fakeDiscoverer{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{testListener(target, "node")}}}
+	controller := NewController(discoverer, base)
+	_, err := controller.ApplyHTTPSRootWithOptions(context.Background(), target, HTTPSRootOptions{HTTPSPort: target.Port, ReplaceRawTCP: true, ConfirmExternal: true, ExpectedRawTCPRouteID: raw.ID}, time.Second)
+	if err == nil || fault.AsAppError(err).State != "unverified" {
+		t.Fatalf("concurrent endpoint change was not surfaced as unverified: %v", err)
+	}
+	if len(base.removes) != 1 || base.removes[0].ID != raw.ProviderKey || len(base.sets) != 0 {
+		t.Fatalf("Tailge mutated a route that appeared before its HTTPS-root apply: removes=%#v sets=%#v", base.removes, base.sets)
+	}
+	if len(base.snapshot.Routes) != 1 || base.snapshot.Routes[0].ID != concurrentRoot.ID {
+		t.Fatalf("concurrent handler was not left untouched: %#v", base.snapshot.Routes)
+	}
+}
+
+type applyThenFailRootProvider struct {
+	*fakeProvider
+	mutateBackend string
+}
+
+func (p *applyThenFailRootProvider) Set(ctx context.Context, change tailscale.ExposureChange) (exposuredata.OperationReceipt, error) {
+	receipt, err := p.fakeProvider.Set(ctx, change)
+	if err != nil {
+		return receipt, err
+	}
+	if change.HTTPSRoot {
+		if p.mutateBackend != "" {
+			p.mu.Lock()
+			for i := range p.snapshot.Routes {
+				if p.snapshot.Routes[i].Kind == exposuredata.RouteKindHTTPSRoot {
+					p.snapshot.Routes[i].Backend = p.mutateBackend
+				}
+			}
+			p.mu.Unlock()
+		}
+		return receipt, errors.New("simulated post-write failure")
+	}
+	return receipt, nil
+}
+
+func TestApplyHTTPSRootConversionRemovesPartialRootAndRestoresExactTCPRoute(t *testing.T) {
+	target := targetmodel.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
+	raw := exposuredata.ExposureRoute{ID: "raw-id", ProviderKey: "serve:tcp=4321", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:4321", Target: target, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive}
+	base := &fakeProvider{snapshot: exposuredata.ExposureSnapshot{Authoritative: true, Routes: []exposuredata.ExposureRoute{raw}}, caps: tailscale.Capabilities{Serve: true, ExactServe: true, ServeTCP: true, ServeHTTPS: true, ServePath: true}, readiness: ready()}
+	provider := &applyThenFailRootProvider{fakeProvider: base}
+	discoverer := &fakeDiscoverer{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{testListener(target, "node")}}}
+	controller := NewController(discoverer, provider)
+	_, err := controller.ApplyHTTPSRootWithOptions(context.Background(), target, HTTPSRootOptions{HTTPSPort: target.Port, ReplaceRawTCP: true, ConfirmExternal: true, ExpectedRawTCPRouteID: raw.ID}, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "simulated post-write failure") {
+		t.Fatalf("expected the requested root operation failure, got %v", err)
+	}
+	if len(base.removes) != 2 || base.removes[0].ID != raw.ProviderKey || base.removes[1].ID != "serve:https=4321" {
+		t.Fatalf("partial HTTPS root was not removed by its exact selector: %#v", base.removes)
+	}
+	if len(base.sets) != 2 || !base.sets[0].HTTPSRoot || base.sets[1].HTTPSRoot || base.sets[1].ProviderKey != raw.ProviderKey || base.sets[1].Backend != raw.Backend {
+		t.Fatalf("rollback did not restore the captured raw TCP route: %#v", base.sets)
+	}
+	if len(base.snapshot.Routes) != 1 || base.snapshot.Routes[0].ProviderKey != raw.ProviderKey || base.snapshot.Routes[0].Kind != exposuredata.RouteKindRawTCP || base.snapshot.Routes[0].Backend != raw.Backend {
+		t.Fatalf("exact previous route was not restored after the partial root: %#v", base.snapshot.Routes)
+	}
+}
+
+func TestApplyHTTPSRootConversionDoesNotOverwriteUnexpectedPartialRoot(t *testing.T) {
+	target := targetmodel.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
+	raw := exposuredata.ExposureRoute{ID: "raw-id", ProviderKey: "serve:tcp=4321", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:4321", Target: target, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive}
+	base := &fakeProvider{snapshot: exposuredata.ExposureSnapshot{Authoritative: true, Routes: []exposuredata.ExposureRoute{raw}}, caps: tailscale.Capabilities{Serve: true, ExactServe: true, ServeTCP: true, ServeHTTPS: true, ServePath: true}, readiness: ready()}
+	provider := &applyThenFailRootProvider{fakeProvider: base, mutateBackend: "http://127.0.0.1:9999"}
+	discoverer := &fakeDiscoverer{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{testListener(target, "node")}}}
+	controller := NewController(discoverer, provider)
+	_, err := controller.ApplyHTTPSRootWithOptions(context.Background(), target, HTTPSRootOptions{HTTPSPort: target.Port, ReplaceRawTCP: true, ConfirmExternal: true, ExpectedRawTCPRouteID: raw.ID}, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "could not be verified") {
+		t.Fatalf("unexpected partial root state was not reported as an unverified rollback: %v", err)
+	}
+	if appErr := fault.AsAppError(err); appErr.Code != fault.ErrVerification || appErr.State != "unverified" || controller.operationStates[target.Key()] != exposuredata.ExposureUnverified {
+		t.Fatalf("unproven rollback was not surfaced as Unverified: error=%#v operation=%q", appErr, controller.operationStates[target.Key()])
+	}
+	if len(base.removes) != 1 || base.removes[0].ID != raw.ProviderKey || len(base.sets) != 1 {
+		t.Fatalf("rollback touched a route that no longer matched the confirmed request: removes=%#v sets=%#v", base.removes, base.sets)
+	}
+	if len(base.snapshot.Routes) != 1 || base.snapshot.Routes[0].Backend != "http://127.0.0.1:9999" {
+		t.Fatalf("unexpected state was overwritten instead of left for inspection: %#v", base.snapshot.Routes)
+	}
+}
+
+func TestApplyHTTPSRootRejectsRawRouteOnSamePortWithDifferentTarget(t *testing.T) {
+	target := targetmodel.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
+	other := targetmodel.Target{Address: "127.0.0.2", Port: 4321, Protocol: "tcp"}.Normalized()
+	raw := exposuredata.ExposureRoute{ID: "raw-id", ProviderKey: "serve:tcp=4321", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.2:4321", Target: other, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipManaged, State: exposuredata.ExposureActive}
+	provider := &fakeProvider{snapshot: exposuredata.ExposureSnapshot{Authoritative: true, Routes: []exposuredata.ExposureRoute{raw}}, caps: tailscale.Capabilities{Serve: true, ExactServe: true, ServeHTTPS: true, ServePath: true}, readiness: ready()}
+	discoverer := &fakeDiscoverer{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{testListener(target, "node")}}}
+	controller := NewController(discoverer, provider)
+	_, err := controller.ApplyHTTPSRootWithOptions(context.Background(), target, HTTPSRootOptions{HTTPSPort: target.Port, ReplaceRawTCP: true, ConfirmExternal: true}, time.Second)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "exact selected listener") {
+		t.Fatalf("same-port route for a different listener was not rejected: %v", err)
+	}
+	if len(provider.removes) != 0 || len(provider.sets) != 0 {
+		t.Fatalf("different listener route was mutated: removes=%#v sets=%#v", provider.removes, provider.sets)
+	}
+}
+
+func TestApplyHTTPSRootRejectsUnsafeRawTCPConversionCases(t *testing.T) {
+	target := targetmodel.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
+	raw := exposuredata.ExposureRoute{ID: "raw-id", ProviderKey: "serve:tcp=4321", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:4321", Target: target, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive}
+	cases := []struct {
+		name        string
+		routes      []exposuredata.ExposureRoute
+		options     HTTPSRootOptions
+		wantMessage string
+	}{
+		{name: "no conversion intent", routes: []exposuredata.ExposureRoute{raw}, options: HTTPSRootOptions{HTTPSPort: target.Port, ConfirmExternal: true}, wantMessage: "explicit private HTTPS-root conversion"},
+		{name: "unknown owner not confirmed", routes: []exposuredata.ExposureRoute{raw}, options: HTTPSRootOptions{HTTPSPort: target.Port, ReplaceRawTCP: true}, wantMessage: "unknown/external ownership"},
+		{name: "preview route changed", routes: []exposuredata.ExposureRoute{raw}, options: HTTPSRootOptions{HTTPSPort: target.Port, ReplaceRawTCP: true, ConfirmExternal: true, ExpectedRawTCPRouteID: "stale-id"}, wantMessage: "changed after preview"},
+		{name: "raw backend targets a different address", routes: []exposuredata.ExposureRoute{{ID: raw.ID, ProviderKey: raw.ProviderKey, Kind: raw.Kind, Backend: "tcp://127.0.0.2:4321", Target: target, Mode: raw.Mode, Ownership: raw.Ownership, State: raw.State}}, options: HTTPSRootOptions{HTTPSPort: target.Port, ReplaceRawTCP: true, ConfirmExternal: true}, wantMessage: "exact selected listener"},
+		{name: "sibling handler shares endpoint", routes: []exposuredata.ExposureRoute{raw, {ID: "sibling", ProviderKey: "serve:https=4321", Kind: exposuredata.RouteKindHTTPPath, Path: "/docs", Backend: "http://127.0.0.1:4321", Target: target, Mode: exposuredata.ExposureServe, State: exposuredata.ExposureActive}}, options: HTTPSRootOptions{HTTPSPort: target.Port, ReplaceRawTCP: true, ConfirmExternal: true}, wantMessage: "shares its port"},
+		{name: "public funnel route shares endpoint", routes: []exposuredata.ExposureRoute{{ID: "public", ProviderKey: "funnel:tcp=4321", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:4321", Target: target, Mode: exposuredata.ExposureFunnel, Ownership: exposuredata.OwnershipManaged, State: exposuredata.ExposureActive}}, options: HTTPSRootOptions{HTTPSPort: target.Port, ReplaceRawTCP: true, ConfirmExternal: true}, wantMessage: "cannot be mixed"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			provider := &fakeProvider{snapshot: exposuredata.ExposureSnapshot{Authoritative: true, Routes: test.routes}, caps: tailscale.Capabilities{Serve: true, ExactServe: true, ServeTCP: true, ServeHTTPS: true, ServePath: true, Funnel: true, ExactFunnel: true}, readiness: ready()}
+			discoverer := &fakeDiscoverer{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{testListener(target, "node")}}}
+			controller := NewController(discoverer, provider)
+			_, err := controller.ApplyHTTPSRootWithOptions(context.Background(), target, test.options, time.Second)
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(test.wantMessage)) {
+				t.Fatalf("unsafe conversion case was accepted or unclear: err=%v want=%q", err, test.wantMessage)
+			}
+			if len(provider.removes) != 0 || len(provider.sets) != 0 {
+				t.Fatalf("provider mutated in unsafe conversion case: removes=%#v sets=%#v", provider.removes, provider.sets)
+			}
+		})
+	}
+}
+
+func TestApplyHTTPSRootRejectsIncompleteSiblingHandlerIdentity(t *testing.T) {
+	target := targetmodel.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
+	sibling := exposuredata.ExposureRoute{ID: "docs", ProviderKey: "serve:https=4321", Kind: exposuredata.RouteKindHTTPPath, Path: "/docs", Target: target, Mode: exposuredata.ExposureServe, State: exposuredata.ExposureActive}
+	provider := &fakeProvider{snapshot: exposuredata.ExposureSnapshot{Authoritative: true, Routes: []exposuredata.ExposureRoute{sibling}}, caps: tailscale.Capabilities{Serve: true, ExactServe: true, ServeHTTPS: true, ServePath: true}, readiness: ready()}
+	discoverer := &fakeDiscoverer{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{testListener(target, "node")}}}
+	controller := NewController(discoverer, provider)
+	if _, err := controller.ApplyHTTPSRoot(context.Background(), target, target.Port, false, time.Second); err == nil || !strings.Contains(err.Error(), "incomplete backend identity") {
+		t.Fatalf("incomplete sibling backend was accepted for a new root: %v", err)
+	}
+	if len(provider.sets) != 0 || len(provider.removes) != 0 {
+		t.Fatalf("endpoint was mutated despite incomplete sibling identity: sets=%#v removes=%#v", provider.sets, provider.removes)
+	}
+}
+
+func TestApplyHTTPSRootRejectsStaleApprovedRouteBeforeConversion(t *testing.T) {
+	target := targetmodel.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
+	raw := exposuredata.ExposureRoute{ID: "raw-id", ProviderKey: "serve:tcp=4321", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:4321", Target: target, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive}
+	provider := &fakeProvider{snapshot: exposuredata.ExposureSnapshot{Authoritative: true, Routes: []exposuredata.ExposureRoute{raw}}, caps: tailscale.Capabilities{Serve: true, ExactServe: true, ServeTCP: true, ServeHTTPS: true, ServePath: true}, readiness: ready()}
+	discoverer := &fakeDiscoverer{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{testListener(target, "node")}}}
+	controller := NewController(discoverer, provider)
+	approval := MutationApproval{Target: target, RouteIDsHash: RouteIDsHash(provider.snapshot.Routes, target), TargetRoutesHash: RouteIdentityHash(provider.snapshot.Routes, target), AllRoutesHash: tailscale.RoutesHash(provider.snapshot.Routes), ListenerID: "node", ListenerPID: 10, ListenerProcess: "node", ListenerTarget: target}
+	provider.snapshot.Routes[0].Backend = "tcp://127.0.0.1:9999"
+	_, err := controller.ApplyHTTPSRootWithOptionsApproved(context.Background(), target, HTTPSRootOptions{HTTPSPort: target.Port, ReplaceRawTCP: true, ConfirmExternal: true, ExpectedRawTCPRouteID: raw.ID}, time.Second, approval)
+	if err == nil || !strings.Contains(err.Error(), "changed after confirmation") {
+		t.Fatalf("stale raw-TCP route approval was accepted: %v", err)
+	}
+	if len(provider.removes) != 0 || len(provider.sets) != 0 {
+		t.Fatalf("provider mutated after stale approval: removes=%#v sets=%#v", provider.removes, provider.sets)
 	}
 }
 

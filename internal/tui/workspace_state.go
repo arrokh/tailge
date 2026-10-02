@@ -46,25 +46,26 @@ type workspaceState struct {
 	listScroll        int
 	detailOffset      int
 
-	modal                    modalKind
-	disableRouteIndex        int
-	modalItemID              string
-	modalTarget              target.Target
-	modalProcess             discovery.Listener
-	modalProcessFingerprint  string
-	actionSession            exposureActionSession
-	httpPathAction           bool
-	httpPath                 string
-	httpPathMode             exposuredata.ExposureMode
-	httpPathLocalhostBackend bool
-	urlAction                string
-	urlItemID                string
-	urlRoutesFingerprint     string
-	urlRouteIndex            int
-	confirmFocus             bool
-	modalChoice              bool
-	helpOffset               int
-	paletteIndex             int
+	modal                     modalKind
+	disableRouteIndex         int
+	modalItemID               string
+	modalTarget               target.Target
+	modalProcess              discovery.Listener
+	modalProcessFingerprint   string
+	actionSession             exposureActionSession
+	httpsRootAction           bool
+	httpsRootPort             int
+	httpsRootRouteID          string
+	httpsRootReplaceRawTCP    bool
+	httpsRootLocalhostBackend bool
+	urlAction                 string
+	urlItemID                 string
+	urlRoutesFingerprint      string
+	urlRouteIndex             int
+	confirmFocus              bool
+	modalChoice               bool
+	helpOffset                int
+	paletteIndex              int
 
 	refreshState        refreshCoordinator
 	hasView             bool
