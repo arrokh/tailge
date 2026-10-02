@@ -165,7 +165,7 @@ tailge config set sort name
 tailge config set color_theme dark
 ```
 
-`sort` accepts `name` (default, ascending), `name-desc`, `none`, `port`, `address`, and `exposure`. In the workspace, `S` cycles `name` → `name-desc` → `none` and saves the preference. Existing explicit settings such as `port` remain respected. Other supported settings include `show_system_listeners` and `show_inactive_configured_ports`. `color_theme` accepts `auto` (the default), `dark`, and `light`. `config validate` checks an existing file without creating a missing one. Invalid or unsafe configuration is preserved and mutations fail closed.
+`sort` accepts `name` (default, ascending), `name-desc`, `none`, `port`, `address`, and `exposure`. In the workspace, `e` or `S` cycles `name` → `name-desc` → `none` and saves the preference. Existing explicit settings such as `port` remain respected. Other supported settings include `show_system_listeners` and `show_inactive_configured_ports`. `color_theme` accepts `auto` (the default), `dark`, and `light`. `config validate` checks an existing file without creating a missing one. Invalid or unsafe configuration is preserved and mutations fail closed.
 
 In the TUI, `s`, `f`, and `d` open explicitly labeled Serve, Funnel, and Disabled previews; no provider mutation occurs until confirmation. `C` or `Ctrl-l` clears an accepted filter; `/` edits it and `Ctrl-u` clears the active search text.
 
@@ -196,7 +196,7 @@ The workspace uses Bubble Tea's alternate screen and raw keyboard mode only afte
 | `j` / `k`, `n` / `N`, arrows | Navigate the list or scroll details |
 | `Tab` / `Shift-Tab`, `h` / `l` | Change pane focus |
 | `z` | Zoom the focused pane; press again to restore the split |
-| `S` | Cycle name ascending → name descending → unsorted; saves the preference |
+| `e` / `S` | Cycle name ascending → name descending → unsorted; saves the preference |
 | `Enter` | Focus or expand details; never mutates |
 | `gg`, `G`, `Home`, `End` | First or last item |
 | `/` | Incremental search; `Enter` accepts, `Esc` cancels, `Ctrl-u` clears |

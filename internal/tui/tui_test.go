@@ -123,10 +123,14 @@ func TestSortShortcutCyclesAndPreservesSelectedIdentity(t *testing.T) {
 	)
 	m.selectedID = "listener-app"
 	m.reselect(m.selectedID, m.selectedIdx)
-	for _, sortKey := range []string{"name-desc", "none", "name"} {
-		m.Update(keyRune('S'))
+	for index, sortKey := range []string{"name-desc", "none", "name"} {
+		key := rune('e')
+		if index == 1 {
+			key = 'S'
+		}
+		m.Update(keyRune(key))
 		if m.cfg.Sort != sortKey {
-			t.Fatalf("sort after S = %q, want %q", m.cfg.Sort, sortKey)
+			t.Fatalf("sort after e/S = %q, want %q", m.cfg.Sort, sortKey)
 		}
 		if m.selectedID != "listener-app" {
 			t.Fatalf("sort %q changed selected identity to %q", sortKey, m.selectedID)
@@ -512,7 +516,7 @@ func TestFooterShowsBuildCommitAndLinkedRepository(t *testing.T) {
 	if width := lipgloss.Width(lines[0]); width > m.width {
 		t.Fatalf("footer identity line exceeds width: got %d, want <= %d: %q", width, m.width, lines[0])
 	}
-	if !strings.Contains(lines[1], "↑↓ Move") || !strings.Contains(lines[1], "S Sort") || !strings.Contains(lines[1], "? Help") {
+	if !strings.Contains(lines[1], "↑↓ Move") || !strings.Contains(lines[1], "e/S Sort") || !strings.Contains(lines[1], "? Help") {
 		t.Fatalf("build identity displaced grouped navigation hints: %q", lines[1])
 	}
 }
@@ -523,9 +527,9 @@ func TestFooterUsesGroupedHintsThatAdaptToWidth(t *testing.T) {
 		width int
 		want  []string
 	}{
-		{120, []string{"↑↓ Move", "Tab Focus", "v/V Select", "s/f/d Routes", "x Term", "p Path", "S Sort", "/ Find", "z Zoom", "? Help", "q Quit"}},
-		{100, []string{"↑↓ Move", "Tab Focus", "v Mark", "s/f/d Routes", "S Sort", "/ Find", "z Zoom", "? Help", "q Quit"}},
-		{72, []string{"↑↓ Move", "Tab Focus", "S Sort", "/ Find", "? Help", "q Quit"}},
+		{120, []string{"↑↓ Move", "Tab Focus", "v/V Select", "s/f/d Routes", "x Term", "p Path", "e/S Sort", "/ Find", "z Zoom", "? Help", "q Quit"}},
+		{100, []string{"↑↓ Move", "Tab Focus", "v Mark", "s/f/d Routes", "e/S Sort", "/ Find", "z Zoom", "? Help", "q Quit"}},
+		{72, []string{"↑↓ Move", "Tab Focus", "e/S Sort", "/ Find", "? Help", "q Quit"}},
 		{30, []string{"o:off", "O:ok", "y:off", "? Help"}},
 	} {
 		m.width = test.width
@@ -724,7 +728,7 @@ func TestHelpDocumentsShortcutGroups(t *testing.T) {
 	help := strings.Join(helpLines(), "\n")
 	for _, text := range []string{
 		"WORKSPACE / NAVIGATION", "SEARCH / FILTER", "ACTION PREVIEW", "CONFIRMATION / APPLYING", "COMMAND PALETTE", "HELP", "SAFETY / STATE",
-		"C or Ctrl-l", "U                    clear all selected items", "s                    preview private Serve", "f                    preview public Funnel", "d                    preview Disable", "p                    add one named HTTP path", "choose among paths", "Ctrl-d/Page Down", "Ctrl-u/Page Up", "Home/End", "Funnel               remains public", "z                    zoom the focused pane", "CPU% / MEM",
+		"C or Ctrl-l", "U                    clear all selected items", "s                    preview private Serve", "f                    preview public Funnel", "d                    preview Disable", "p                    add one named HTTP path", "choose among paths", "Ctrl-d/Page Down", "Ctrl-u/Page Up", "Home/End", "Funnel               remains public", "z                    zoom the focused pane", "e/S                  cycle Name ↑, Name ↓, and unsorted order", "CPU% / MEM",
 	} {
 		if !strings.Contains(help, text) {
 			t.Fatalf("help missing %q:\n%s", text, help)

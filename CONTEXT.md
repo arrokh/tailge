@@ -155,7 +155,7 @@ _Avoid_: global mutation shortcuts, typing-triggered action
 _Avoid_: bulk exposure, broad disable
 
 **Name-first order**:
-Within each visual service section, items default to case-insensitive ascending service name, then address, port, and stable identity. `S` cycles Name ascending, Name descending, and unsorted observation order; existing explicit port/address/exposure preferences remain configurable. Sorting never changes target identity.
+Within each visual service section, items default to case-insensitive ascending service name, then address, port, and stable identity. `e` or `S` cycles Name ascending, Name descending, and unsorted observation order; existing explicit port/address/exposure preferences remain configurable. Sorting never changes target identity.
 _Avoid_: unstable refresh order
 
 **Visible system listener**:

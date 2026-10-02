@@ -65,7 +65,7 @@ func (m *workspaceModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "space", " ":
 		m.openAction(nil)
-	case "S":
+	case "e", "S":
 		return m, m.cycleSort()
 	case "s":
 		m.openAction(ptrMode(exposuredata.ExposureServe))

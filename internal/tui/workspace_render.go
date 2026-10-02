@@ -236,11 +236,11 @@ func footerKeyHints(width int, focus paneFocus, searching, zoomed, canZoom bool,
 	if focus == focusDetails {
 		switch {
 		case width >= 120:
-			return "↑↓ Scroll · Tab List · v/V Select · s/f/d Routes · x Term · p Path · S Sort · / Find" + zoomHint + " · ? Help · q Quit"
+			return "↑↓ Scroll · Tab List · v/V Select · s/f/d Routes · x Term · p Path · e/S Sort · / Find" + zoomHint + " · ? Help · q Quit"
 		case width >= 100:
-			return "↑↓ Scroll · Tab List · S Sort · / Find · ? Help · q Quit" + zoomHint
+			return "↑↓ Scroll · Tab List · e/S Sort · / Find · ? Help · q Quit" + zoomHint
 		case width >= 72:
-			return "↑↓ Scroll · Tab List · S Sort · ? Help · q Quit" + zoomHint
+			return "↑↓ Scroll · Tab List · e/S Sort · ? Help · q Quit" + zoomHint
 		case width >= 48:
 			return "↑↓ Scroll · Tab List · ? Help"
 		default:
@@ -249,13 +249,13 @@ func footerKeyHints(width int, focus paneFocus, searching, zoomed, canZoom bool,
 	}
 	switch {
 	case width >= 120:
-		return "↑↓ Move · Tab Focus · v/V Select · s/f/d Routes · x Term · p Path · S Sort · / Find" + zoomHint + " · ? Help · q Quit"
+		return "↑↓ Move · Tab Focus · v/V Select · s/f/d Routes · x Term · p Path · e/S Sort · / Find" + zoomHint + " · ? Help · q Quit"
 	case width >= 100:
-		return "↑↓ Move · Tab Focus · v Mark · s/f/d Routes · S Sort · / Find · ? Help · q Quit" + zoomHint
+		return "↑↓ Move · Tab Focus · v Mark · s/f/d Routes · e/S Sort · / Find · ? Help · q Quit" + zoomHint
 	case width >= 72:
-		return "↑↓ Move · Tab Focus · S Sort · / Find · ? Help · q Quit"
+		return "↑↓ Move · Tab Focus · e/S Sort · / Find · ? Help · q Quit"
 	case width >= 48:
-		return "↑↓ Move · Tab Focus · S Sort · ? Help"
+		return "↑↓ Move · Tab Focus · e/S Sort · ? Help"
 	default:
 		return "↑↓ Move · ? Help"
 	}

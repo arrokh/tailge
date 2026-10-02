@@ -366,7 +366,7 @@ func helpLines() []string {
 		"  n/N                  next/previous item in normal workspace mode",
 		"  h/l or Left/Right    focus list/details; Tab toggles; Shift-Tab reverses",
 		"  z                    zoom the focused pane; z restores the split",
-		"  S                    cycle Name ↑, Name ↓, and unsorted order",
+		"  e/S                  cycle Name ↑, Name ↓, and unsorted order",
 		"  Enter                focus/expand details; never mutates",
 		"  Home/End             first/last item",
 		"  gg/G                 first/last item; lone g waits briefly",

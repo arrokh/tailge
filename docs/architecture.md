@@ -242,7 +242,7 @@ Each parser and policy module remains directly fixture-testable without starting
 `internal/tui/workspace_snapshot.go` is the presentation seam for reconciled observations. `workspaceSnapshot.Items` applies the shared rules for:
 
 1. presentation preferences and visibility rules;
-2. configured ordering (case-insensitive name ascending by default; `S` cycles ascending, descending, and unsorted) and visual sections;
+2. configured ordering (case-insensitive name ascending by default; `e` or `S` cycles ascending, descending, and unsorted) and visual sections;
 3. same-port identity collapse with merged exposure routes;
 4. accepted filter applied to the merged row text.
 
