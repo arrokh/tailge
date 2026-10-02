@@ -1625,41 +1625,167 @@ func TestURLShortcutStatusUsesTerminalClipboardTransport(t *testing.T) {
 }
 
 func TestURLShortcutStatusMarksHTTPSOnlyAvailability(t *testing.T) {
-	if got := formatURLShortcutStatus(false, false, false, false, false); got != "o HTTPS[off]  y copy[off]" {
+	if got := formatURLShortcutStatus(false, false, false, false, false, false); got != "o HTTPS[off]  y copy[off]" {
 		t.Fatalf("unavailable shortcut status = %q", got)
 	}
-	if got := formatURLShortcutStatus(true, false, false, true, false); got != "o HTTPS[ok]  y copy[URL-only]" {
+	if got := formatURLShortcutStatus(true, false, false, false, true, false); got != "o HTTPS[ok]  y copy[URL-only]" {
 		t.Fatalf("URL-only shortcut status = %q", got)
 	}
-	if got := formatURLShortcutStatus(true, false, false, true, true); got != "o HTTPS[ok]  y copy[ok]" {
+	if got := formatURLShortcutStatus(true, false, false, false, true, true); got != "o HTTPS[ok]  y copy[ok]" {
 		t.Fatalf("available shortcut status = %q", got)
 	}
-	if got := formatURLShortcutStatus(false, true, false, true, false); got != "o HTTPS[HTTPS-only]  y copy[HTTPS-only]" {
+	if got := formatURLShortcutStatus(false, true, false, false, true, false); got != "o HTTPS[HTTPS-only]  y copy[HTTPS-only]" {
 		t.Fatalf("insecure route status = %q", got)
 	}
-	if got := formatURLShortcutStatus(false, false, true, true, false); got != "o HTTPS[TCP-only]  y copy[off]" {
+	if got := formatURLShortcutStatus(false, false, true, false, true, false); got != "o HTTPS[TCP-only]  y copy[off]" {
 		t.Fatalf("TCP-only shortcut status = %q", got)
+	}
+	if got := formatURLShortcutStatus(false, false, true, true, true, true); got != "o HTTP-preview[ok]  y copy[ok]" {
+		t.Fatalf("Serve TCP preview shortcut status = %q", got)
+	}
+	if got := compactURLShortcutStatus("o HTTP-preview[ok]  y copy[ok]  O local[ok]"); got != "o:ok  y:ok  O:ok" {
+		t.Fatalf("compact browser shortcut status = %q", got)
 	}
 }
 
-func TestCopyURLDoesNotResolveRawTCPIntoHTTP(t *testing.T) {
+func rawServeTCPWorkspaceFixture() *workspaceModel {
 	m := workspaceFixture()
-	m.view.Items[0].Routes[0].ProviderKey = "serve:tcp=4321"
-	m.view.Items[0].Routes[0].URL = ""
-	m.provider = &tailscale.Adapter{Binary: "tailscale", Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
-		t.Fatalf("raw TCP browser shortcut queried provider status: %v", args)
-		return runner.Result{}, nil
+	route := m.view.Items[0].Routes[0]
+	route.ProviderKey = "serve:tcp=3000"
+	route.URL = ""
+	route.Mode = exposuredata.ExposureServe
+	route.State = exposuredata.ExposureActive
+	m.view.Items[0].Routes = []exposuredata.ExposureRoute{route}
+	m.view.Exposures.Routes = []exposuredata.ExposureRoute{route}
+	m.view.Items[0].Mode = exposuredata.ExposureServe
+	m.view.Items[0].State = exposuredata.ExposureActive
+	return m
+}
+
+func magicDNSStatusProvider(t *testing.T, dnsName string) *tailscale.Adapter {
+	t.Helper()
+	return &tailscale.Adapter{Binary: "tailscale", Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+		if strings.Join(args, " ") != "status --json" {
+			t.Errorf("MagicDNS preview made unexpected provider call: %v", args)
+		}
+		return runner.Result{Stdout: fmt.Sprintf(`{"Self":{"DNSName":%q}}`, dnsName)}, nil
 	})}
+}
+
+func TestMagicDNSPreviewURLUsesProviderNameAndRejectsMalformedValues(t *testing.T) {
+	got, err := magicDNSPreviewURL("device.tailnet.ts.net.", 3000)
+	if err != nil || got != "http://device.tailnet.ts.net:3000/" {
+		t.Fatalf("MagicDNS preview URL = %q, %v", got, err)
+	}
+	for _, test := range []struct {
+		name string
+		port int
+	}{
+		{name: "", port: 3000},
+		{name: "device/path.tailnet.ts.net", port: 3000},
+		{name: "device@evil.tailnet.ts.net", port: 3000},
+		{name: "single-label", port: 3000},
+		{name: "device.tailnet.ts.net", port: 0},
+		{name: "device.tailnet.ts.net", port: 65536},
+	} {
+		if got, err := magicDNSPreviewURL(test.name, test.port); err == nil {
+			t.Errorf("invalid MagicDNS preview %q:%d produced %q", test.name, test.port, got)
+		}
+	}
+}
+
+func TestOpenServeTCPPreviewUsesReportedMagicDNSAndExactPort(t *testing.T) {
+	capture := installTestBrowserLauncher(t)
+	m := rawServeTCPWorkspaceFixture()
+	m.provider = magicDNSStatusProvider(t, "device.tailnet.ts.net.")
+	command := m.openSelectedURL()
+	if command == nil {
+		t.Fatalf("o did not resolve a Serve TCP preview: banner=%q", m.banner)
+	}
+	message, ok := command().(statusMsg)
+	if !ok || message.value != "Opened Serve TCP HTTP preview" {
+		t.Fatalf("Serve TCP preview returned an unexpected browser result: %#v", message)
+	}
+	opened, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(opened) != "http://device.tailnet.ts.net:3000/" {
+		t.Fatalf("o opened %q; want provider MagicDNS name and exact listener port", opened)
+	}
+	if len(m.view.Items[0].Routes) != 1 || m.view.Items[0].Routes[0].ProviderKey != "serve:tcp=3000" {
+		t.Fatal("browser preview changed the observed route")
+	}
+}
+
+func TestOpenServeTCPPreviewFailsClosedWithoutReportedMagicDNS(t *testing.T) {
+	capture := installTestBrowserLauncher(t)
+	m := rawServeTCPWorkspaceFixture()
+	m.provider = magicDNSStatusProvider(t, "")
+	command := m.openSelectedURL()
+	if command == nil {
+		t.Fatalf("missing MagicDNS name was not checked asynchronously: banner=%q", m.banner)
+	}
+	message, ok := command().(statusMsg)
+	if !ok || !message.sticky || !strings.Contains(message.value, "valid MagicDNS name") {
+		t.Fatalf("missing MagicDNS name did not produce actionable failure feedback: %#v", message)
+	}
+	m.Update(message)
+	if m.transient != "" || !strings.Contains(m.banner, "valid MagicDNS name") {
+		t.Fatalf("failed preview left stale progress or lost its banner: transient=%q banner=%q", m.transient, m.banner)
+	}
+	if _, err := os.Stat(capture); !os.IsNotExist(err) {
+		t.Fatalf("browser launched without a reported MagicDNS name: stat err=%v", err)
+	}
+}
+
+func TestURLShortcutStatusAdvertisesServePreviewAndLocalO(t *testing.T) {
+	installTestBrowserLauncher(t)
+	m := rawServeTCPWorkspaceFixture()
+	m.provider = magicDNSStatusProvider(t, "device.tailnet.ts.net.")
+	m.clipboard = ClipboardFunc(func(context.Context, string) error { return nil })
+	status := m.urlShortcutStatus()
+	for _, want := range []string{"o HTTP-preview[ok]", "y copy[ok]", "O local[ok]"} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("browser shortcut status omitted %q: %q", want, status)
+		}
+	}
+}
+
+func TestCopyServeTCPPreviewUsesSameMagicDNSAndExactPort(t *testing.T) {
+	m := rawServeTCPWorkspaceFixture()
+	m.provider = magicDNSStatusProvider(t, "device.tailnet.ts.net.")
 	var copied string
 	m.clipboard = ClipboardFunc(func(_ context.Context, value string) error {
 		copied = value
 		return nil
 	})
-	if command := m.copyURL(); command != nil {
-		t.Fatal("raw TCP route produced a browser URL copy command")
+	command := m.copyURL()
+	if command == nil {
+		t.Fatalf("y did not resolve the Serve TCP preview: banner=%q", m.banner)
 	}
-	if copied != "" || !strings.Contains(m.banner, "TCP-only") || !strings.Contains(m.banner, "HTTPS") {
-		t.Fatalf("raw TCP copy was not safely refused: copied=%q banner=%q", copied, m.banner)
+	if _, ok := command().(statusMsg); !ok {
+		t.Fatal("Serve TCP preview copy returned an unexpected message")
+	}
+	if copied != "http://device.tailnet.ts.net:3000/" {
+		t.Fatalf("y copied %q; want the same provider MagicDNS preview as o", copied)
+	}
+}
+
+func TestFunnelTCPPreviewRemainsUnavailable(t *testing.T) {
+	m := rawServeTCPWorkspaceFixture()
+	m.view.Items[0].Routes[0].ProviderKey = "funnel:tcp=3000"
+	m.view.Items[0].Routes[0].Mode = exposuredata.ExposureFunnel
+	m.view.Items[0].Mode = exposuredata.ExposureFunnel
+	m.provider = &tailscale.Adapter{Binary: "tailscale", Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+		t.Fatalf("Funnel TCP action should not query DNS for an HTTP preview: %v", args)
+		return runner.Result{}, nil
+	})}
+	if command := m.openSelectedURL(); command != nil {
+		t.Fatal("Funnel TCP route unexpectedly produced a browser preview")
+	}
+	if !strings.Contains(m.banner, "TCP-only") {
+		t.Fatalf("Funnel TCP feedback omitted the TCP-only reason: %q", m.banner)
 	}
 }
 
@@ -1683,19 +1809,26 @@ printf '%s' "$1" > "$TAILGE_OPEN_URL_CAPTURE"
 	return capture
 }
 
-func TestUppercaseOLocalBrowserShortcutDoesNothing(t *testing.T) {
+func TestUppercaseOLocalBrowserShortcutOpensSelectedListener(t *testing.T) {
 	capture := installTestBrowserLauncher(t)
 	m := workspaceFixture()
-	initialBanner, initialTransient := m.banner, m.transient
 	model, command := m.Update(keyRune('O'))
-	if command != nil {
-		t.Fatal("uppercase O unexpectedly produced a browser command")
+	if command == nil {
+		t.Fatal("uppercase O did not produce a local browser command")
 	}
-	if updated, ok := model.(*workspaceModel); !ok || updated.modal != modalNone || updated.banner != initialBanner || updated.transient != initialTransient {
-		t.Fatalf("uppercase O changed workspace state: %#v", model)
+	if updated, ok := model.(*workspaceModel); !ok || updated.modal != modalNone {
+		t.Fatalf("uppercase O changed the workspace mode: %#v", model)
 	}
-	if _, err := os.Stat(capture); !os.IsNotExist(err) {
-		t.Fatalf("uppercase O invoked the browser launcher: stat err=%v", err)
+	message, ok := command().(statusMsg)
+	if !ok || message.value != "Opened local HTTP URL" {
+		t.Fatalf("uppercase O returned an unexpected browser result: %#v", message)
+	}
+	opened, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(opened) != "http://localhost:3000/" {
+		t.Fatalf("uppercase O opened %q; want the local listener convenience URL", opened)
 	}
 }
 
@@ -1722,22 +1855,22 @@ func TestOpenShortcutLaunchesObservedHTTPSPathWithoutCreatingRoutes(t *testing.T
 	}
 }
 
-func TestOpenShortcutExplainsPathSetupWithoutCreatingRoutes(t *testing.T) {
+func TestOpenShortcutExplainsHTTPSSetupWithoutCreatingRoutes(t *testing.T) {
 	m := workspaceFixture()
 	m.view.Items[0].Routes = nil
 	m.view.Exposures.Routes = nil
 	if command := m.openSelectedURL(); command != nil {
-		t.Fatal("o unexpectedly created or opened a route without an observed URL")
+		t.Fatal("o unexpectedly created or opened a route without an observed URL or Serve TCP route")
 	}
-	if !strings.Contains(m.banner, "o only opens observed HTTPS routes") || !strings.Contains(m.banner, "p to configure") {
-		t.Fatalf("missing URL feedback did not explain the HTTPS-only open contract and setup action: %q", m.banner)
+	if !strings.Contains(m.banner, "No observed browser URL or Serve TCP preview") || !strings.Contains(m.banner, "Configure an HTTPS route") {
+		t.Fatalf("missing URL feedback did not explain the HTTPS setup action: %q", m.banner)
 	}
 	m.banner = ""
 	if command := m.copyURL(); command != nil {
-		t.Fatal("y unexpectedly copied a URL without an observed route")
+		t.Fatal("y unexpectedly copied a URL without an observed route or Serve TCP route")
 	}
-	if !strings.Contains(m.banner, "y only copies observed HTTPS routes") || !strings.Contains(m.banner, "p to configure") {
-		t.Fatalf("missing observed URL feedback did not explain the copy-only contract and setup action: %q", m.banner)
+	if !strings.Contains(m.banner, "No observed browser URL or Serve TCP preview") || !strings.Contains(m.banner, "Configure an HTTPS route") {
+		t.Fatalf("missing URL feedback did not explain the copy setup action: %q", m.banner)
 	}
 }
 
@@ -1754,19 +1887,44 @@ func TestOpenSelectedObservedURLClearsStaleMissingURLBanner(t *testing.T) {
 	}
 }
 
-func TestOpenSelectedURLExplainsTCPOnlyRoutesWithoutGuessingHTTPS(t *testing.T) {
-	for _, mode := range []exposuredata.ExposureMode{exposuredata.ExposureServe, exposuredata.ExposureFunnel} {
-		t.Run(string(mode), func(t *testing.T) {
-			m := workspaceFixture()
-			m.view.Items[0].Routes[0].ProviderKey = string(mode) + ":tcp=10000"
-			m.view.Items[0].Routes[0].Mode = mode
-			m.view.Items[0].Routes[0].URL = ""
-			m.selectedID = m.view.Items[0].ID
+func TestServeTCPPreviewRequiresExactActiveListenerPort(t *testing.T) {
+	m := rawServeTCPWorkspaceFixture()
+	m.view.Items[0].Routes[0].ProviderKey = "serve:tcp=3001"
+	m.provider = &tailscale.Adapter{Binary: "tailscale", Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+		t.Fatalf("mismatched listener port must not query MagicDNS: %v", args)
+		return runner.Result{}, nil
+	})}
+	if command := m.openSelectedURL(); command != nil {
+		t.Fatal("Serve route with a mismatched public port unexpectedly produced a browser command")
+	}
+	if !strings.Contains(m.banner, "TCP-only") || !strings.Contains(m.banner, "exact active Serve listener") {
+		t.Fatalf("mismatched route did not fail closed with actionable feedback: %q", m.banner)
+	}
+}
+
+func TestServeTCPPreviewRequiresFreshAuthoritativeListenerSnapshot(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*workspaceModel)
+	}{
+		{name: "non-authoritative", mutate: func(m *workspaceModel) { m.view.Listeners.Authoritative = false }},
+		{name: "stale", mutate: func(m *workspaceModel) { m.view.Listeners.Stale = true }},
+		{name: "error", mutate: func(m *workspaceModel) {
+			m.view.Listeners.Error = &fault.SafeError{Code: fault.ErrUnknown, Message: "listener refresh failed"}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := rawServeTCPWorkspaceFixture()
+			test.mutate(m)
+			m.provider = &tailscale.Adapter{Binary: "tailscale", Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+				t.Fatalf("untrusted listener state must not query MagicDNS: %v", args)
+				return runner.Result{}, nil
+			})}
 			if command := m.openSelectedURL(); command != nil {
-				t.Fatal("raw TCP route unexpectedly produced a browser command")
+				t.Fatal("untrusted listener state unexpectedly produced a browser preview")
 			}
-			if !strings.Contains(m.banner, "TCP-only") || !strings.Contains(m.banner, "HTTPS") {
-				t.Fatalf("TCP-only observed URL action was unclear: %q", m.banner)
+			if !strings.Contains(m.banner, "TCP-only") {
+				t.Fatalf("stale listener preview was not refused clearly: %q", m.banner)
 			}
 		})
 	}
@@ -1777,7 +1935,7 @@ func TestObservedHTTPSURLMayBelongToExactTCPRoute(t *testing.T) {
 	if got, ok := workspace.ObservedHTTPSRouteURL(route); !ok || got != route.URL {
 		t.Fatalf("explicit HTTPS URL was rejected for TCP selector: got=%q ok=%t", got, ok)
 	}
-	if got := formatURLShortcutStatus(true, false, true, true, false); got != "o HTTPS[ok]  y copy[URL-only]" {
+	if got := formatURLShortcutStatus(true, false, true, false, true, false); got != "o HTTPS[ok]  y copy[URL-only]" {
 		t.Fatalf("observed HTTPS URL shortcut status = %q", got)
 	}
 }

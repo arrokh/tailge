@@ -75,6 +75,8 @@ func (m *workspaceModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.openAction(ptrMode(exposuredata.ExposureDisabled))
 	case "p":
 		m.openHTTPPathInput()
+	case "O":
+		return m, m.openLocalURL()
 	case "v":
 		m.toggleCurrentSelection()
 	case "z":

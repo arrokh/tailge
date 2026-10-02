@@ -6,25 +6,32 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/arrokh/tailge/internal/exposure"
 	"github.com/arrokh/tailge/internal/exposuredata"
+	"github.com/arrokh/tailge/internal/tailscale"
+	"github.com/arrokh/tailge/internal/target"
 	"github.com/arrokh/tailge/internal/workspace"
 	osc52 "github.com/aymanbagabas/go-osc52/v2"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 const unavailableURLBanner = "No observed HTTPS URL is available"
-const unavailableOpenURLBanner = "No observed HTTPS URL is available. o only opens observed HTTPS routes; use p to configure one."
-const unavailableCopyURLBanner = "No observed HTTPS URL is available. y only copies observed HTTPS routes; use p to configure one."
+const unavailableOpenURLBanner = "No observed browser URL or Serve TCP preview is available. Configure an HTTPS route with p or refresh Tailscale status."
+const unavailableCopyURLBanner = "No observed browser URL or Serve TCP preview is available to copy. Configure an HTTPS route with p or refresh Tailscale status."
 const insecureURLBanner = "Observed route URL is not HTTPS. Configure an explicit HTTPS route before opening or copying it."
+const magicDNSPreviewUnavailableBanner = "Tailscale did not report a valid MagicDNS name for this Serve TCP preview. Check Tailscale status and try again."
+const localURLUnavailableBanner = "No active local listener is available for the O browser shortcut."
 
 func (m *workspaceModel) clearStaleURLUnavailableBanner() {
 	if m.banner == "" {
@@ -42,7 +49,9 @@ func (m *workspaceModel) clearStaleURLUnavailableBanner() {
 
 func (m *workspaceModel) urlShortcutStatus() string {
 	observed, insecure, tcpOnly := false, false, false
+	servePreview, localListener := false, false
 	if item, ok := m.selectedItem(); ok {
+		localListener = validLocalListenerPort(item) != 0
 		for _, route := range item.Routes {
 			if _, ok := workspace.ObservedHTTPSRouteURL(route); ok {
 				observed = true
@@ -55,25 +64,41 @@ func (m *workspaceModel) urlShortcutStatus() string {
 				tcpOnly = true
 			}
 		}
+		if !observed && !insecure && m.provider != nil {
+			_, servePreview = m.serveTCPPreviewPort(item)
+		}
 	}
 	clipboard := m.clipboard != nil
 	if !clipboard {
 		clipboard = clipboardAvailable()
 	}
-	return formatURLShortcutStatus(observed, insecure, tcpOnly, browserCommandAvailable(), clipboard)
+	browser := browserCommandAvailable()
+	status := formatURLShortcutStatus(observed, insecure, tcpOnly, servePreview, browser, clipboard)
+	localStatus := "off"
+	if localListener && browser {
+		localStatus = "ok"
+	}
+	return status + "  O local[" + localStatus + "]"
 }
 
-func formatURLShortcutStatus(observed, insecure, tcpOnly, browser, clipboard bool) string {
-	openStatus := "off"
-	if observed && browser {
-		openStatus = "ok"
-	} else if !observed && insecure {
+func formatURLShortcutStatus(observed, insecure, tcpOnly, servePreview, browser, clipboard bool) string {
+	openStatus, openKind := "off", "HTTPS"
+	if observed {
+		if browser {
+			openStatus = "ok"
+		}
+	} else if servePreview {
+		openKind = "HTTP-preview"
+		if browser {
+			openStatus = "ok"
+		}
+	} else if insecure {
 		openStatus = "HTTPS-only"
-	} else if !observed && tcpOnly {
+	} else if tcpOnly {
 		openStatus = "TCP-only"
 	}
 	copyStatus := "off"
-	if observed {
+	if observed || servePreview {
 		if clipboard {
 			copyStatus = "ok"
 		} else {
@@ -82,7 +107,73 @@ func formatURLShortcutStatus(observed, insecure, tcpOnly, browser, clipboard boo
 	} else if insecure {
 		copyStatus = "HTTPS-only"
 	}
-	return fmt.Sprintf("o HTTPS[%s]  y copy[%s]", openStatus, copyStatus)
+	return fmt.Sprintf("o %s[%s]  y copy[%s]", openKind, openStatus, copyStatus)
+}
+
+func validLocalListenerPort(item exposure.ReconciledItem) int {
+	if item.Listener == nil {
+		return 0
+	}
+	listener := item.Listener.Target.Normalized()
+	if listener.Validate() != nil {
+		return 0
+	}
+	return listener.Port
+}
+
+func (m *workspaceModel) serveTCPPreviewPort(item exposure.ReconciledItem) (int, bool) {
+	if item.Listener == nil || item.State != exposuredata.ExposureActive || !m.view.Listeners.Authoritative || m.view.Listeners.Stale || m.view.Listeners.Error != nil {
+		return 0, false
+	}
+	listener := item.Listener.Target.Normalized()
+	if listener.Validate() != nil {
+		return 0, false
+	}
+	for _, route := range item.Routes {
+		if route.Mode != exposuredata.ExposureServe || route.State != exposuredata.ExposureActive || workspace.RouteTransport(route) != "tcp" {
+			continue
+		}
+		selector, err := tailscale.ParseListenerSelector(route.ProviderKey, exposuredata.ExposureServe)
+		if err != nil || selector.Transport != "tcp" || selector.Port != listener.Port || !target.TargetsMatch(route.Target, listener) {
+			continue
+		}
+		return selector.Port, true
+	}
+	return 0, false
+}
+
+func magicDNSPreviewURL(dnsName string, port int) (string, error) {
+	dnsName = strings.TrimSuffix(strings.TrimSpace(dnsName), ".")
+	if port < 1 || port > 65535 || !validMagicDNSName(dnsName) {
+		return "", fmt.Errorf("%s", magicDNSPreviewUnavailableBanner)
+	}
+	return (&url.URL{Scheme: "http", Host: net.JoinHostPort(dnsName, strconv.Itoa(port)), Path: "/"}).String(), nil
+}
+
+func validMagicDNSName(name string) bool {
+	if name == "" || len(name) > 253 || !strings.Contains(name, ".") {
+		return false
+	}
+	for _, label := range strings.Split(name, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, char := range label {
+			if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isMagicDNSPreviewURL(value string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.Path != "/" || parsed.RawQuery != "" || parsed.Fragment != "" || !validMagicDNSName(parsed.Hostname()) {
+		return false
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	return err == nil && port >= 1 && port <= 65535
 }
 
 func browserCommand() string {
@@ -127,12 +218,54 @@ func (m *workspaceModel) openSelectedURL() tea.Cmd {
 		m.setBanner(insecureURLBanner, true)
 		return nil
 	}
+	if port, ok := m.serveTCPPreviewPort(item); ok {
+		return m.openServeTCPPreview(port)
+	}
 	if selector := workspace.RawTCPRouteSelector(item); selector != "" {
-		m.setBanner("Observed route "+selector+" is TCP-only; no HTTPS URL exists. Use a TCP client or configure an HTTPS route.", true)
+		m.setBanner("Observed route "+selector+" is TCP-only; a browser preview is available only for an exact active Serve listener. Use a TCP client or configure an HTTPS route.", true)
 		return nil
 	}
 	m.setBanner(unavailableOpenURLBanner, true)
 	return nil
+}
+
+func (m *workspaceModel) openLocalURL() tea.Cmd {
+	item, ok := m.selectedItem()
+	if !ok {
+		m.setBanner("No service is selected", true)
+		return nil
+	}
+	port := validLocalListenerPort(item)
+	if port == 0 {
+		m.setBanner(localURLUnavailableBanner, true)
+		return nil
+	}
+	return m.launchBrowserURL((&url.URL{Scheme: "http", Host: net.JoinHostPort("localhost", strconv.Itoa(port)), Path: "/"}).String(), "local HTTP URL")
+}
+
+func (m *workspaceModel) openServeTCPPreview(port int) tea.Cmd {
+	if m.provider == nil {
+		m.setBanner("Tailscale status is unavailable; cannot resolve the Serve TCP MagicDNS preview.", true)
+		return nil
+	}
+	browser := browserCommand()
+	if browser == "" {
+		m.setBanner("Opening URLs is unsupported or unavailable on "+runtime.GOOS, true)
+		return nil
+	}
+	provider, ctx := m.provider, m.ctx
+	m.transient = "Resolving Serve TCP MagicDNS preview"
+	return func() tea.Msg {
+		status, err := provider.Status(ctx)
+		if err != nil {
+			return statusMsg{value: "Could not read Tailscale MagicDNS status: " + safeMessage(err), sticky: true}
+		}
+		previewURL, err := magicDNSPreviewURL(status.Self.DNSName, port)
+		if err != nil {
+			return statusMsg{value: safeMessage(err), sticky: true}
+		}
+		return openBrowserStatus(ctx, browser, previewURL, "Serve TCP HTTP preview")
+	}
 }
 
 func observedHTTPSURLRoutes(item exposure.ReconciledItem) []exposuredata.ExposureRoute {
@@ -196,6 +329,10 @@ func (m *workspaceModel) openURL(url, label string) tea.Cmd {
 		m.setBanner("Only valid HTTPS URLs can be opened from Tailge", true)
 		return nil
 	}
+	return m.launchBrowserURL(url, label)
+}
+
+func (m *workspaceModel) launchBrowserURL(url, label string) tea.Cmd {
 	name := browserCommand()
 	if name == "" {
 		m.setBanner("Opening URLs is unsupported or unavailable on "+runtime.GOOS, true)
@@ -203,16 +340,19 @@ func (m *workspaceModel) openURL(url, label string) tea.Cmd {
 	}
 	m.transient = "Opening " + label
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
-		defer cancel()
-		command := exec.CommandContext(ctx, name, url)
-		command.WaitDelay = 2 * time.Second
-		err := command.Run()
-		if err != nil {
-			return statusMsg{value: "Could not open URL: " + safeMessage(err), sticky: true}
-		}
-		return statusMsg{value: "Opened " + label, sticky: false}
+		return openBrowserStatus(m.ctx, name, url, label)
 	}
+}
+
+func openBrowserStatus(parent context.Context, name, url, label string) statusMsg {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, name, url)
+	command.WaitDelay = 2 * time.Second
+	if err := command.Run(); err != nil {
+		return statusMsg{value: "Could not open URL: " + safeMessage(err), sticky: true}
+	}
+	return statusMsg{value: "Opened " + label, sticky: false}
 }
 
 type statusMsg struct {
@@ -242,12 +382,35 @@ func (m *workspaceModel) copyURL() tea.Cmd {
 		m.setBanner(insecureURLBanner, true)
 		return nil
 	}
+	if port, ok := m.serveTCPPreviewPort(item); ok {
+		return m.copyServeTCPPreview(port)
+	}
 	if selector := workspace.RawTCPRouteSelector(item); selector != "" {
-		m.setBanner("Observed route "+selector+" is TCP-only; no HTTPS URL exists to copy", true)
+		m.setBanner("Observed route "+selector+" is TCP-only; a browser preview is available only for an exact active Serve listener.", true)
 		return nil
 	}
 	m.setBanner(unavailableCopyURLBanner, true)
 	return nil
+}
+
+func (m *workspaceModel) copyServeTCPPreview(port int) tea.Cmd {
+	if m.provider == nil {
+		m.setBanner("Tailscale status is unavailable; cannot resolve the Serve TCP MagicDNS preview.", true)
+		return nil
+	}
+	provider, ctx, clipboard := m.provider, m.ctx, m.clipboardOrOS()
+	m.transient = "Resolving Serve TCP MagicDNS preview"
+	return func() tea.Msg {
+		status, err := provider.Status(ctx)
+		if err != nil {
+			return statusMsg{value: "Could not read Tailscale MagicDNS status: " + safeMessage(err), sticky: true}
+		}
+		previewURL, err := magicDNSPreviewURL(status.Self.DNSName, port)
+		if err != nil {
+			return statusMsg{value: safeMessage(err), sticky: true}
+		}
+		return copyPreviewURLStatus(previewURL, clipboard)
+	}
 }
 
 func (m *workspaceModel) clipboardOrOS() Clipboard {
@@ -272,14 +435,24 @@ func (m *workspaceModel) copyURLCommand(url string) tea.Cmd {
 func copyURLStatus(url string, clipboard Clipboard) statusMsg {
 	var out, errOut strings.Builder
 	copyURLValue(&out, &errOut, url, clipboard)
-	if text := strings.TrimSpace(errOut.String()); text != "" {
-		value := strings.TrimSpace(out.String())
+	return copyStatusResult(out.String(), errOut.String())
+}
+
+func copyPreviewURLStatus(url string, clipboard Clipboard) statusMsg {
+	var out, errOut strings.Builder
+	copyPreviewURLValue(&out, &errOut, url, clipboard)
+	return copyStatusResult(out.String(), errOut.String())
+}
+
+func copyStatusResult(output, errorOutput string) statusMsg {
+	if text := strings.TrimSpace(errorOutput); text != "" {
+		value := strings.TrimSpace(output)
 		if value != "" {
 			value += " "
 		}
 		return statusMsg{value: value + text, sticky: true}
 	}
-	return statusMsg{value: strings.TrimSpace(out.String())}
+	return statusMsg{value: strings.TrimSpace(output)}
 }
 
 func copySelectedURL(out, errOut io.Writer, items []exposure.ReconciledItem, selected int, clipboard Clipboard) {
@@ -303,13 +476,25 @@ func copyURLValue(out, errOut io.Writer, url string, clipboard Clipboard) {
 		fmt.Fprintln(errOut, "only valid HTTPS URLs may be copied")
 		return
 	}
-	fmt.Fprintf(out, "HTTPS URL: %s\n", url)
+	copyValueToClipboard(out, errOut, "HTTPS URL", url, clipboard)
+}
+
+func copyPreviewURLValue(out, errOut io.Writer, url string, clipboard Clipboard) {
+	if !isMagicDNSPreviewURL(url) {
+		fmt.Fprintln(errOut, "only a valid Tailscale HTTP preview URL may be copied")
+		return
+	}
+	copyValueToClipboard(out, errOut, "HTTP preview URL", url, clipboard)
+}
+
+func copyValueToClipboard(out, errOut io.Writer, label, value string, clipboard Clipboard) {
+	fmt.Fprintf(out, "%s: %s\n", label, value)
 	if clipboard == nil {
 		fmt.Fprintln(errOut, "clipboard unavailable: no clipboard integration is configured.\nCopy the visible URL with normal terminal text selection.")
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	err := clipboard.Copy(ctx, url)
+	err := clipboard.Copy(ctx, value)
 	cancel()
 	if err != nil {
 		fmt.Fprintf(errOut, "clipboard unavailable: %s\nCopy the visible URL with normal terminal text selection.\n", err)

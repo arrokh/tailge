@@ -1,8 +1,8 @@
-# tailge
+# Tailge
 
-`tailge` discovers local TCP listeners and manages explicitly selected Tailscale Serve and Funnel routes. It never implicitly starts, stops, or restarts services; the TUI may send one explicitly confirmed SIGTERM to a revalidated local process.
+Tailge is a local-first Tailscale exposure manager with an opinionated, keyboard-first workspace heavily inspired by Vim: `j`/`k` navigation, `gg`/`G` jumps, and `v`/`V` selection, alongside arrow-key navigation. It discovers local TCP listeners and lets you deliberately share selected services through exact raw-TCP routes or explicit HTTPS paths. This matters because a listening port alone does not tell Tailge whether a service speaks HTTP. Tailge never implicitly starts, stops, or restarts services; its TUI may send one explicitly confirmed SIGTERM to a revalidated local process.
 
-## System overview
+## How it works
 
 Tailge is a local control and observation plane. Application traffic flows through Tailscale directly to the selected local service.
 
@@ -28,23 +28,43 @@ flowchart LR
     Tailscale -->|Funnel: public| Internet(("Public internet"))
 ```
 
-## Requirements
+## Prerequisites
 
-- Go 1.25.10+ to build from source
+- Go 1.25.10+ and `make` to build from source
 - macOS or Linux for listener discovery
-- An installed and logged-in Tailscale client for exposure features
-- An interactive TTY for the TUI; CLI commands work in scripts and CI
+- An installed and logged-in Tailscale client for exposure features (optional for local scans)
+- An interactive TTY for the workspace; CLI commands also work in scripts and CI
 
-## Install
+## Installation
+
+From a terminal, clone the repository, download its Go dependencies, and install the binary:
 
 ```sh
+git clone https://github.com/arrokh/tailge.git
+cd tailge
+go mod download
 make setup
-
-tailge scan
-tailge
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-`make setup` installs the binary in `$HOME/.local/bin`. Add that directory to `PATH` if needed. Use `make build` to build `./tailge` locally.
+`make setup` installs `tailge` in `$HOME/.local/bin`; add the `PATH` line to your shell profile to keep it available in new terminals. To build without installing, run `make build` and use `./tailge` from the repository root.
+
+## Quick start
+
+```sh
+# Inspect local listeners, then open the interactive workspace
+tailge scan
+tailge
+
+# Check Tailscale readiness and current routes
+tailge doctor --tailscale
+tailge exposure status
+
+# If the selected listener actually speaks HTTP, add a private HTTPS path
+tailge exposure http serve 127.0.0.1:3000 --path app
+```
+
+Open the provider-observed HTTPS URL shown by Tailge or `tailge exposure status`. For arbitrary non-web services, use the raw-TCP `tailge exposure serve` command shown below and connect with the service's own client.
 
 ## Common commands
 
@@ -69,11 +89,30 @@ tailge exposure http serve '[::1]:4321' --root --https-port 4321 --localhost-bac
 tailge exposure http disable '[::1]:4321' --root --https-port 4321 --confirm-external
 ```
 
-Named HTTP paths use Tailscale HTTPS on standard port 443; an explicit `--root --https-port PORT` route maps `/` on a custom HTTPS port and prints the observed URL including that port. Both forward HTTPS-terminated traffic to an existing local HTTP listener; TCP discovery never implies HTTP. Raw listener exposure uses explicit Tailscale `--tcp` routes with `tcp://` backends, remains protocol-agnostic, and is not advertised as a browser URL. Legacy Funnel clients without exact `--tcp` support remain read-only for raw services; Tailge never falls back to inferred HTTP. For either transport, Tailge preserves a specific bind address; wildcard binds are translated only to loopback addresses necessarily included by that wildcard (`0.0.0.0` → `127.0.0.1`, `::` → `::1`) because wildcard addresses cannot be dialed. Specific numeric IPv6 HTTP backends remain the default; if Tailscale responds with `unknown proxy destination`, first disable the exact handler, then explicitly choose `--localhost-backend` (or `Ctrl+B` in the `p` dialog) when recreating it. This uses hostname resolution and weakens exact-address guarantees; Tailge never substitutes it silently. Provider status verification confirms configuration, not that the backend proxy works, so open the provider-observed HTTPS URL to smoke-test delivery. Funnel makes every named path on the shared endpoint public and requires confirmation. In the workspace, `p` previews and creates a named path, `o` opens only an explicitly observed valid HTTPS URL, and `y` copies only that HTTPS URL (both ask which URL when several exist). Raw TCP without an observed HTTPS URL remains TCP-only; Tailge does not synthesize HTTP previews or expose a local `O` browser shortcut.
+## Exposure safety
 
-Exposure mutations require an exact target, explicit confirmation where applicable, and fresh verification. Multiple complete, distinct routes for one listener display as active with mode `MULTI`; choose Disable in the exposure selector to open an exact-route chooser, while aggregate mode changes remain blocked. Unknown, stale, ambiguous, unavailable, unsupported, or external route identity fails closed. See the [usage guide](docs/usage.md) for commands, TUI shortcuts, configuration, safety rules, and exit codes.
+TCP listener discovery never implies HTTP: raw routes remain protocol-agnostic. `o` uses an observed HTTPS URL when available; for a Serve TCP route, it may open a UI-only HTTP preview using Tailscale-reported MagicDNS and the exact port. This does not change route identity or prove the service speaks HTTP. Mutations use exact route identity and fresh verification; Funnel requires explicit public confirmation. See the [usage guide](docs/usage.md#routes-and-safety) and [architecture guide](docs/architecture.md#named-https-path-routes) for transport and route-identity context.
 
-In the workspace, `s`/`f`/`d` opens the exposure selector focused on Serve, Funnel, or Disable; press the same key again inside the selector to choose it directly, or use arrows plus Enter. This advances only to the separate Cancel-focused confirmation, never directly to mutation. `d` then lets you choose one exact route when multiple routes exist. `v`/`V` multi-selection applies to exposure previews and guarded process termination (`x`); termination confirms once, revalidates every selected process, and sends SIGTERM sequentially. Listener rows show CPU and memory when available: macOS physical footprint (falling back to RSS), or Linux RSS. Details show the process working directory when available. New installations sort by service name ascending; `e` or `S` cycles ascending, descending, and unsorted. The grouped footer adapts its navigation hints to terminal width. Press `z` to zoom the focused list or details pane to the full workspace area, then press it again to restore the split.
+## Keyboard shortcuts
+
+| Key | Action |
+|---|---|
+| `j` / `k`, arrows | Navigate the service list |
+| `gg` / `G` | Jump to the first / last service |
+| `/` | Search the list |
+| `Tab` / `Shift-Tab` | Switch between list and details |
+| `s` / `f` / `d` | Open Serve / Funnel / Disable; press the same key in the selector to choose, then confirm separately |
+| `p` | Preview and add a named HTTPS path to an HTTP listener |
+| `o` | Open an observed HTTPS URL, or preview a Serve TCP route via Tailscale MagicDNS |
+| `O` | Open the selected local listener at `http://localhost:<port>/` |
+| `y` | Copy an observed HTTPS URL or the same Serve TCP preview |
+| `v` / `V` | Toggle an item / enter Vim-style visual-line selection |
+| `x` | Confirm process termination; identity is revalidated and only SIGTERM is sent |
+| `e` / `S` | Cycle sort order |
+| `z` | Zoom the focused pane; press again to restore the split |
+| `?` | Open help |
+
+See the [interactive workspace guide](docs/usage.md#interactive-workspace) for the full shortcut reference, process metrics, and modal behavior.
 
 ## Documentation
 
@@ -89,3 +128,7 @@ make check
 make quality FUZZTIME=1s
 make cross-build
 ```
+
+## License
+
+Tailge is licensed under the [MIT License](LICENSE).
