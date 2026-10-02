@@ -2,7 +2,7 @@ package workspace
 
 import (
 	"fmt"
-	"net"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -11,7 +11,6 @@ import (
 	"github.com/arrokh/tailge/internal/exposuredata"
 	"github.com/arrokh/tailge/internal/fault"
 	"github.com/arrokh/tailge/internal/readiness"
-	"github.com/arrokh/tailge/internal/tailscale"
 )
 
 // ActionAvailability is the workspace mutation gate result. Wait distinguishes
@@ -261,11 +260,19 @@ func ExternalPreview(item exposure.ReconciledItem, routeKey string) bool {
 	return len(item.Routes) == 1 && item.Routes[0].Ownership != exposuredata.OwnershipManaged
 }
 
-// ObservedRouteURL returns only an explicitly observed HTTP(S) route URL.
-func ObservedRouteURL(route exposuredata.ExposureRoute) (string, bool) {
-	url := strings.TrimSpace(route.URL)
-	if strings.HasPrefix(strings.ToLower(url), "http://") || strings.HasPrefix(strings.ToLower(url), "https://") {
-		return url, true
+// IsHTTPSURL accepts only absolute HTTPS URLs with a host and no credentials.
+// Browser actions use it as a fail-closed boundary, including for direct callers.
+func IsHTTPSURL(value string) bool {
+	value = strings.TrimSpace(value)
+	parsed, err := url.Parse(value)
+	return err == nil && strings.EqualFold(parsed.Scheme, "https") && parsed.Hostname() != "" && parsed.User == nil && parsed.Opaque == ""
+}
+
+// ObservedHTTPSRouteURL returns only an explicitly observed HTTPS route URL.
+func ObservedHTTPSRouteURL(route exposuredata.ExposureRoute) (string, bool) {
+	value := strings.TrimSpace(route.URL)
+	if IsHTTPSURL(value) {
+		return value, true
 	}
 	return "", false
 }
@@ -294,21 +301,6 @@ func RawTCPRouteSelector(item exposure.ReconciledItem) string {
 		}
 	}
 	return ""
-}
-
-// ServeTCPBrowserURL resolves a UI-only HTTP preview for an observed Serve TCP
-// route. It never changes route identity or mutation selectors.
-func ServeTCPBrowserURL(status tailscale.Status, route exposuredata.ExposureRoute) (string, error) {
-	selector, err := tailscale.ParseListenerSelector(route.ProviderKey, route.Mode)
-	if err != nil || route.Mode != exposuredata.ExposureServe || selector.Transport != "tcp" {
-		return "", fmt.Errorf("route is not an exact serve TCP listener")
-	}
-	host := strings.TrimSuffix(strings.TrimSpace(status.Self.DNSName), ".")
-	if host == "" || strings.ContainsAny(host, "/?#\\: \t\r\n") {
-		return "", fmt.Errorf("tailscale did not report a safe DNS name")
-	}
-	endpoint := net.JoinHostPort(host, strconv.Itoa(selector.Port))
-	return "http://" + endpoint + "/", nil
 }
 
 // ProcessFingerprint identifies the selected process and its listener without

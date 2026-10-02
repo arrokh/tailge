@@ -115,7 +115,7 @@ Mutations are bounded, serialized per target, protected by fresh route fingerpri
 
 ### Add HTTPS routes to local HTTP services
 
-Listener discovery proves TCP only, so the existing `exposure serve` and `exposure funnel` commands remain raw-TCP operations. Use the explicit `exposure http` subcommands to opt in to Tailscale's HTTPS reverse proxy:
+Listener discovery proves TCP only, so the existing `exposure serve` and `exposure funnel` commands remain raw-TCP operations and do not imply an HTTP service. Managed raw-TCP routes use Tailscale's explicit `--tcp` listener selector with a `tcp://` backend; observed scheme-less raw backends are restored with that scheme only after exact address/port matching. A Tailscale client exposing only legacy Funnel `{on|off}` syntax remains read-only for raw-TCP setup; Tailge will not fall back to an inferred HTTP service. For raw TCP and named HTTPS paths, Tailge preserves a specific listener bind address as the backend. Wildcard addresses cannot be dialed, so `0.0.0.0` is translated to `127.0.0.1` and `::` to `::1`, addresses necessarily covered by those wildcard binds. Use the explicit `exposure http` subcommands to opt in to Tailscale's HTTPS reverse proxy:
 
 ```sh
 # Private tailnet URL; app continues listening on local HTTP
@@ -149,7 +149,7 @@ tailge exposure http disable '[::1]:4321' --path blog --confirm-external
 tailge exposure http serve '[::1]:4321' --path blog --localhost-backend
 ```
 
-In the TUI `p` path dialog, `Ctrl+B` toggles this alias for IPv6 listeners; the confirmation preview warns that hostname resolution weakens the exact-address guarantee. Tailge never substitutes it silently. The `o` shortcut only opens an observed URL; it does not configure routes. Remove a custom root with `--root --https-port PORT`; `--confirm-external` is required when ownership is unknown. Serve remains private to authenticated tailnet users. Funnel applies to the shared hostname and HTTPS port, so every sibling path on that endpoint becomes public. Tailge rejects duplicate paths and mixed Serve/Funnel scope, preserves sibling handlers, and removes only the exact selected route. Provider route verification does not test backend proxy reachability or application health; open the printed URL to smoke-test actual delivery.
+In the TUI `p` path dialog, `Ctrl+B` toggles this alias for IPv6 listeners; the confirmation preview warns that hostname resolution weakens the exact-address guarantee. Tailge never substitutes it silently. The `o` shortcut only opens an explicitly observed absolute HTTPS URL; `y` only copies one. Non-HTTPS observed URLs and raw TCP without an observed HTTPS URL are not browser actions, and Tailge does not synthesize HTTP previews from provider DNS and listener ports. Remove a custom root with `--root --https-port PORT`; `--confirm-external` is required when ownership is unknown. Serve remains private to authenticated tailnet users. Funnel applies to the shared hostname and HTTPS port, so every sibling path on that endpoint becomes public. Tailge rejects duplicate paths and mixed Serve/Funnel scope, preserves sibling handlers, and removes only the exact selected route. Provider route verification does not test backend proxy reachability or application health; open the printed HTTPS URL to smoke-test actual delivery.
 
 ### Configure preferences
 
@@ -167,7 +167,7 @@ tailge config set color_theme dark
 
 `sort` accepts `name` (default, ascending), `name-desc`, `none`, `port`, `address`, and `exposure`. In the workspace, `e` or `S` cycles `name` → `name-desc` → `none` and saves the preference. Existing explicit settings such as `port` remain respected. Other supported settings include `show_system_listeners` and `show_inactive_configured_ports`. `color_theme` accepts `auto` (the default), `dark`, and `light`. `config validate` checks an existing file without creating a missing one. Invalid or unsafe configuration is preserved and mutations fail closed.
 
-In the TUI, `s`, `f`, and `d` open explicitly labeled Serve, Funnel, and Disabled previews; no provider mutation occurs until confirmation. `C` or `Ctrl-l` clears an accepted filter; `/` edits it and `Ctrl-u` clears the active search text.
+In the TUI, `s`, `f`, and `d` open the exposure selector focused on Serve, Funnel, and Disable. From the selector, pressing `s`, `f`, or `d` again chooses that action and advances directly to its Cancel-focused confirmation; arrow/j/k selection plus Enter remains available. No provider mutation occurs until the separate confirmation is explicitly focused and accepted. `C` or `Ctrl-l` clears an accepted filter; `/` edits it and `Ctrl-u` clears the active search text.
 
 ### Shell completion
 
@@ -200,17 +200,16 @@ The workspace uses Bubble Tea's alternate screen and raw keyboard mode only afte
 | `Enter` | Focus or expand details; never mutates |
 | `gg`, `G`, `Home`, `End` | First or last item |
 | `/` | Incremental search; `Enter` accepts, `Esc` cancels, `Ctrl-u` clears |
-| `s` / `f` / `d` | Open Serve, Funnel, or Disable preview |
-| `Space` | Open the exposure action selector |
+| `s` / `f` / `d` | Open the selector focused on Serve, Funnel, or Disable; press the same key in the selector to choose it directly |
+| `Space` | Open the exposure selector; press `d`, `s`, or `f` to choose, or use arrows/j/k plus Enter |
 | `v` | Toggle the current item |
 | `V` | Enter or exit Vim-style visual-line selection |
 | `r` / `R` | Refresh / fresh retry preview after failure |
 | `C` / `Ctrl-l` | Clear the accepted filter |
 | `c` | Open confirmed cancellation for an Applying operation |
 | `p` | Preview and add one named HTTPS path for the selected HTTP listener; `Ctrl+B` explicitly toggles localhost backend alias on IPv6 |
-| `o` | Open an observed exposure URL; choose an exact path if several are present |
-| `O` | Open `http://localhost:<port>/` for the selected listener |
-| `y` | Copy an observed URL through terminal OSC 52; choose an exact path if several are present |
+| `o` | Open a provider-observed HTTPS URL; choose an exact route if several are present |
+| `y` | Copy a provider-observed HTTPS URL through terminal OSC 52; choose an exact route if several are present |
 | `x` | Confirm termination of current local process(es) |
 | `U` | Clear all selected items |
 | `X` | Dismiss visible feedback |
@@ -226,15 +225,13 @@ Action previews default to Cancel. Funnel displays a public-internet warning and
 
 ### URLs, transport, and process actions
 
-`o` opens an explicitly observed HTTP/HTTPS URL. If several HTTPS path URLs are present, the workspace asks which exact observed URL to open; `y` offers the same picker before copying. For a Serve `tcp=` route without an observed URL, an explicit `o` may use the provider-reported Tailscale DNS name and exact listener port as an HTTP preview. This is a UI convenience only: it never changes route identity or mutation behavior. Funnel TCP without an observed URL remains `TCP-only` and cannot be copied.
+`o` opens only an explicitly observed, absolute HTTPS URL. If several HTTPS URLs are present, the workspace asks which exact route URL to open; `y` offers the same picker before copying. A provider-observed URL using HTTP or another non-HTTPS scheme is refused. Raw TCP without an observed HTTPS URL remains `TCP-only` in both Serve and Funnel: Tailge does not synthesize a browser preview from DNS and a port, and it does not provide a local `O` browser shortcut.
 
-`O` opens the local convenience URL `http://localhost:<port>/`. It is not evidence that a remote raw-TCP exposure speaks HTTP.
-
-`y` copies an observed URL through OSC 52, so SSH, Mosh, and multiplexer sessions update the attached terminal client's clipboard. For Serve TCP without an observed URL it copies the same provider-DNS preview used by `o`.
+`y` copies only an explicitly observed HTTPS URL through OSC 52, so SSH, Mosh, and multiplexer sessions update the attached terminal client's clipboard. URL status distinguishes unavailable routes, raw TCP, non-HTTPS observed URLs, and URLs that cannot be copied because clipboard transport is unavailable.
 
 `x` only terminates currently discovered, identity-revalidated local processes. It opens one focused confirmation for the marked selection, then revalidates each captured PID/listener/process identity before sending SIGTERM sequentially; it never escalates to SIGKILL. A refresh keeps confirmation open while every captured process remains valid and cancels it if any identity changes. An inactive configured route has no process to terminate; use `d` to disable the route.
 
-Where space allows, the bottom bar shows the selected sort mode, whether `p` named HTTP paths are ready, and `ok`, `off`, `TCP-only`, or `URL-only` availability for `o`, `O`, and `y`; constrained layouts compact these labels. Grouped keyboard hints adapt to terminal width so the primary navigation, sort, and help keys remain easy to scan. It also displays the running build's short SHA for checked-out `HEAD` and a link to the Tailge repository; builds without injected commit metadata show `dev`. The commit is highlighted and the repository link is underlined according to the selected TUI theme; with `NO_COLOR=1`, written indicators remain visible without color and the hyperlink target is retained. The link label may compact to `GitHub` when space is limited; OSC 8-capable terminals make it clickable. On very narrow terminals, the footer prioritizes active progress or compact focus/path status. The SHA does not indicate whether local uncommitted changes were present when building.
+Where space allows, the bottom bar shows the selected sort mode, whether `p` named HTTP paths are ready, and `ok`, `off`, `TCP-only`, `HTTPS-only`, or `URL-only` availability for `o` and `y`; constrained layouts compact these labels. Grouped keyboard hints adapt to terminal width so the primary navigation, sort, and help keys remain easy to scan. It also displays the running build's short SHA for checked-out `HEAD` and a link to the Tailge repository; builds without injected commit metadata show `dev`. The commit is highlighted and the repository link is underlined according to the selected TUI theme; with `NO_COLOR=1`, written indicators remain visible without color and the hyperlink target is retained. The link label may compact to `GitHub` when space is limited; OSC 8-capable terminals make it clickable. On very narrow terminals, the footer prioritizes active progress or compact focus/path status. The SHA does not indicate whether local uncommitted changes were present when building.
 
 ### Refresh and operation state
 

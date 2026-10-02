@@ -530,7 +530,7 @@ func TestFooterUsesGroupedHintsThatAdaptToWidth(t *testing.T) {
 		{120, []string{"↑↓ Move", "Tab Focus", "v/V Select", "s/f/d Routes", "x Term", "p Path", "e/S Sort", "/ Find", "z Zoom", "? Help", "q Quit"}},
 		{100, []string{"↑↓ Move", "Tab Focus", "v Mark", "s/f/d Routes", "e/S Sort", "/ Find", "z Zoom", "? Help", "q Quit"}},
 		{72, []string{"↑↓ Move", "Tab Focus", "e/S Sort", "/ Find", "? Help", "q Quit"}},
-		{30, []string{"o:off", "O:ok", "y:off", "? Help"}},
+		{30, []string{"o:off", "y:off", "? Help"}},
 	} {
 		m.width = test.width
 		lines := strings.Split(m.renderBottom(), "\n")
@@ -576,7 +576,7 @@ func TestFooterShowsSortModeAndLargeOperationsKeepPriority(t *testing.T) {
 	m.width, m.searching, m.transient = 30, true, ""
 	lines := strings.Split(m.renderBottom(), "\n")
 	visible := ansi.Strip(lines[1])
-	for _, hint := range []string{"Enter/Esc", "o:off", "O:ok", "y:off"} {
+	for _, hint := range []string{"Enter/Esc", "o:off", "y:off"} {
 		if !strings.Contains(visible, hint) {
 			t.Errorf("narrow search footer omitted %q: %q", hint, visible)
 		}
@@ -728,7 +728,7 @@ func TestHelpDocumentsShortcutGroups(t *testing.T) {
 	help := strings.Join(helpLines(), "\n")
 	for _, text := range []string{
 		"WORKSPACE / NAVIGATION", "SEARCH / FILTER", "ACTION PREVIEW", "CONFIRMATION / APPLYING", "COMMAND PALETTE", "HELP", "SAFETY / STATE",
-		"C or Ctrl-l", "U                    clear all selected items", "s                    preview private Serve", "f                    preview public Funnel", "d                    preview Disable", "p                    add one named HTTP path", "choose among paths", "Ctrl-d/Page Down", "Ctrl-u/Page Up", "Home/End", "Funnel               remains public", "z                    zoom the focused pane", "e/S                  cycle Name ↑, Name ↓, and unsorted order", "CPU% / MEM",
+		"C or Ctrl-l", "U                    clear all selected items", "s                    preview private Serve", "f                    preview public Funnel", "d                    preview Disable", "p                    add one named HTTP path", "choose among exact paths", "Ctrl-d/Page Down", "Ctrl-u/Page Up", "Home/End", "Funnel               remains public", "z                    zoom the focused pane", "e/S                  cycle Name ↑, Name ↓, and unsorted order", "CPU% / MEM",
 	} {
 		if !strings.Contains(help, text) {
 			t.Fatalf("help missing %q:\n%s", text, help)
@@ -1037,7 +1037,7 @@ func TestWorkspaceRefreshDoesNotPaintTransientActionWarning(t *testing.T) {
 	if strings.Contains(view, "refresh is in progress") {
 		t.Fatalf("refresh warning leaked into action choices: %q", view)
 	}
-	if strings.Contains(view, "Serve (tailnet only) [unavailable]") || strings.Contains(view, "Funnel (public internet) [unavailable]") {
+	if strings.Contains(view, "Serve (s, tailnet only) [unavailable]") || strings.Contains(view, "Funnel (f, public internet) [unavailable]") {
 		t.Fatalf("refresh-waiting actions were presented as unavailable: %q", view)
 	}
 	availability := m.actionAvailability(exposuredata.ExposureFunnel)
@@ -1054,7 +1054,7 @@ func TestWorkspaceActionModalLabelsGenuineUnavailableChoice(t *testing.T) {
 	m := workspaceFixture()
 	m.readiness.Modes[1].Status = readiness.ReadinessReadOnly
 	m.openAction(ptrMode(exposuredata.ExposureFunnel))
-	if view := m.View(); !strings.Contains(view, "Funnel (public internet) [unavailable]") {
+	if view := m.View(); !strings.Contains(view, "Funnel (f, public internet) [unavailable]") {
 		t.Fatalf("genuinely unavailable action lost its label: %q", view)
 	}
 }
@@ -1174,6 +1174,74 @@ func TestWorkspaceDirectActionKeysOpenPreview(t *testing.T) {
 			t.Fatalf("key %q opened action state but did not render the modal: %q", test.key, view)
 		}
 	}
+}
+
+func TestWorkspaceActionModalKeysChooseWithoutArrowAndEnter(t *testing.T) {
+	for _, test := range []struct {
+		key  rune
+		mode exposuredata.ExposureMode
+	}{
+		{key: 'd', mode: exposuredata.ExposureDisabled},
+		{key: 's', mode: exposuredata.ExposureServe},
+		{key: 'f', mode: exposuredata.ExposureFunnel},
+	} {
+		t.Run(string(test.key), func(t *testing.T) {
+			m := workspaceFixture()
+			if test.mode != exposuredata.ExposureDisabled {
+				m.view.Items[0].Routes = nil
+				m.view.Items[0].State = exposuredata.ExposureState("disabled")
+				m.view.Items[0].Mode = exposuredata.ExposureDisabled
+				m.view.Exposures.Routes = nil
+			}
+			m.Update(keyRune(' '))
+			if m.modal != modalAction {
+				t.Fatalf("space did not open action selector: modal=%v", m.modal)
+			}
+			view := m.View()
+			for _, label := range []string{"Disabled (d)", "Serve (s, tailnet only)", "Funnel (f, public internet)", "d/s/f choose"} {
+				if !strings.Contains(view, label) {
+					t.Fatalf("action selector omitted shortcut %q: %q", label, view)
+				}
+			}
+
+			m.Update(keyRune(test.key))
+			if m.modal != modalConfirm || m.actionSession.mode != test.mode {
+				t.Fatalf("shortcut %q did not advance to the matching confirmation: modal=%v mode=%q", test.key, m.modal, m.actionSession.mode)
+			}
+			if m.actionSession.confirm || len(m.activeOps) != 0 {
+				t.Fatalf("shortcut %q bypassed the Cancel-focused confirmation: confirm=%t active=%d", test.key, m.actionSession.confirm, len(m.activeOps))
+			}
+			if test.mode == exposuredata.ExposureFunnel && !strings.Contains(m.View(), "WARNING: public internet exposure") {
+				t.Fatalf("Funnel shortcut omitted public exposure warning: %q", m.View())
+			}
+			if test.mode == exposuredata.ExposureDisabled && (m.actionSession.routeID != "route-app" || m.actionSession.routeKey != "tcp:3000") {
+				t.Fatalf("Disable shortcut lost exact route identity: routeID=%q selector=%q", m.actionSession.routeID, m.actionSession.routeKey)
+			}
+		})
+	}
+}
+
+func TestWorkspaceActionModalShortcutRespectsUnavailableAndWaitingChoices(t *testing.T) {
+	t.Run("unavailable", func(t *testing.T) {
+		m := workspaceFixture()
+		m.readiness.Modes[1].Status = readiness.ReadinessReadOnly
+		m.Update(keyRune(' '))
+		reason := m.actionSession.choices[2].reason
+		m.Update(keyRune('f'))
+		if m.modal != modalNone || m.banner != reason || len(m.activeOps) != 0 {
+			t.Fatalf("Funnel shortcut bypassed its unavailable state: modal=%v banner=%q active=%d wantReason=%q", m.modal, m.banner, len(m.activeOps), reason)
+		}
+	})
+
+	t.Run("waiting for refresh", func(t *testing.T) {
+		m := workspaceFixture()
+		m.refreshState.pending = true
+		m.Update(keyRune(' '))
+		m.Update(keyRune('f'))
+		if m.modal != modalAction || len(m.activeOps) != 0 {
+			t.Fatalf("Funnel shortcut bypassed its refresh wait: modal=%v active=%d", m.modal, len(m.activeOps))
+		}
+	})
 }
 
 func TestWorkspaceDisableChoosesOneExactRoute(t *testing.T) {
@@ -1410,7 +1478,7 @@ func TestWorkspaceNamedHTTPPathAllowsExplicitLocalhostBackendForIPv6(t *testing.
 		t.Fatalf("o did not open the observed HTTPS URL after p configured it: banner=%q", m.banner)
 	}
 	message, ok := openCommand().(statusMsg)
-	if !ok || message.value != "Opened observed URL" {
+	if !ok || message.value != "Opened observed HTTPS URL" {
 		t.Fatalf("o returned an unexpected browser result: %#v", message)
 	}
 	opened, err := os.ReadFile(capture)
@@ -1556,45 +1624,42 @@ func TestURLShortcutStatusUsesTerminalClipboardTransport(t *testing.T) {
 	}
 }
 
-func TestURLShortcutStatusMarksUnavailableActions(t *testing.T) {
-	item := workspaceFixture().view.Items[0]
-	if got := formatURLShortcutStatus(false, false, false, true, false, false); got != "o observed[off]  O localhost[off]  y copy[off]" {
+func TestURLShortcutStatusMarksHTTPSOnlyAvailability(t *testing.T) {
+	if got := formatURLShortcutStatus(false, false, false, false, false); got != "o HTTPS[off]  y copy[off]" {
 		t.Fatalf("unavailable shortcut status = %q", got)
 	}
-	item.Routes[0].URL = "https://dev.example.ts.net:3000"
-	if got := formatURLShortcutStatus(true, false, false, true, true, false); got != "o observed[ok]  O localhost[ok]  y copy[URL-only]" {
+	if got := formatURLShortcutStatus(true, false, false, true, false); got != "o HTTPS[ok]  y copy[URL-only]" {
 		t.Fatalf("URL-only shortcut status = %q", got)
 	}
-	if got := formatURLShortcutStatus(true, false, false, true, true, true); got != "o observed[ok]  O localhost[ok]  y copy[ok]" {
+	if got := formatURLShortcutStatus(true, false, false, true, true); got != "o HTTPS[ok]  y copy[ok]" {
 		t.Fatalf("available shortcut status = %q", got)
 	}
-	if got := formatURLShortcutStatus(false, true, false, true, true, false); got != "o observed[TCP-only]  O localhost[ok]  y copy[off]" {
-		t.Fatalf("TCP-only shortcut status = %q", got)
+	if got := formatURLShortcutStatus(false, true, false, true, false); got != "o HTTPS[HTTPS-only]  y copy[HTTPS-only]" {
+		t.Fatalf("insecure route status = %q", got)
 	}
-	if got := formatURLShortcutStatus(false, false, true, true, true, true); got != "o observed[ok]  O localhost[ok]  y copy[ok]" {
-		t.Fatalf("Serve TCP preview shortcut status = %q", got)
+	if got := formatURLShortcutStatus(false, false, true, true, false); got != "o HTTPS[TCP-only]  y copy[off]" {
+		t.Fatalf("TCP-only shortcut status = %q", got)
 	}
 }
 
-func TestCopyURLResolvesServeTCPPreview(t *testing.T) {
+func TestCopyURLDoesNotResolveRawTCPIntoHTTP(t *testing.T) {
 	m := workspaceFixture()
 	m.view.Items[0].Routes[0].ProviderKey = "serve:tcp=4321"
 	m.view.Items[0].Routes[0].URL = ""
 	m.provider = &tailscale.Adapter{Binary: "tailscale", Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
-		if strings.Join(args, " ") != "status --json" {
-			t.Fatalf("unexpected provider command: %v", args)
-		}
-		return runner.Result{Stdout: `{"Self":{"DNSName":"dev.tailnet.ts.net."}}`}, nil
+		t.Fatalf("raw TCP browser shortcut queried provider status: %v", args)
+		return runner.Result{}, nil
 	})}
 	var copied string
 	m.clipboard = ClipboardFunc(func(_ context.Context, value string) error {
 		copied = value
 		return nil
 	})
-	message := m.copyURL()()
-	status, ok := message.(statusMsg)
-	if !ok || !strings.Contains(status.value, "URL copied to clipboard") || copied != "http://dev.tailnet.ts.net:4321/" {
-		t.Fatalf("Serve TCP copy result=%#v copied=%q", message, copied)
+	if command := m.copyURL(); command != nil {
+		t.Fatal("raw TCP route produced a browser URL copy command")
+	}
+	if copied != "" || !strings.Contains(m.banner, "TCP-only") || !strings.Contains(m.banner, "HTTPS") {
+		t.Fatalf("raw TCP copy was not safely refused: copied=%q banner=%q", copied, m.banner)
 	}
 }
 
@@ -1618,6 +1683,22 @@ printf '%s' "$1" > "$TAILGE_OPEN_URL_CAPTURE"
 	return capture
 }
 
+func TestUppercaseOLocalBrowserShortcutDoesNothing(t *testing.T) {
+	capture := installTestBrowserLauncher(t)
+	m := workspaceFixture()
+	initialBanner, initialTransient := m.banner, m.transient
+	model, command := m.Update(keyRune('O'))
+	if command != nil {
+		t.Fatal("uppercase O unexpectedly produced a browser command")
+	}
+	if updated, ok := model.(*workspaceModel); !ok || updated.modal != modalNone || updated.banner != initialBanner || updated.transient != initialTransient {
+		t.Fatalf("uppercase O changed workspace state: %#v", model)
+	}
+	if _, err := os.Stat(capture); !os.IsNotExist(err) {
+		t.Fatalf("uppercase O invoked the browser launcher: stat err=%v", err)
+	}
+}
+
 func TestOpenShortcutLaunchesObservedHTTPSPathWithoutCreatingRoutes(t *testing.T) {
 	capture := installTestBrowserLauncher(t)
 	m := workspaceFixture()
@@ -1629,7 +1710,7 @@ func TestOpenShortcutLaunchesObservedHTTPSPathWithoutCreatingRoutes(t *testing.T
 		t.Fatalf("o did not launch the observed HTTPS URL: banner=%q", m.banner)
 	}
 	message, ok := command().(statusMsg)
-	if !ok || message.value != "Opened observed URL" {
+	if !ok || message.value != "Opened observed HTTPS URL" {
 		t.Fatalf("observed HTTPS URL launch failed: %#v", message)
 	}
 	opened, err := os.ReadFile(capture)
@@ -1648,14 +1729,14 @@ func TestOpenShortcutExplainsPathSetupWithoutCreatingRoutes(t *testing.T) {
 	if command := m.openSelectedURL(); command != nil {
 		t.Fatal("o unexpectedly created or opened a route without an observed URL")
 	}
-	if !strings.Contains(m.banner, "o only opens observed URLs") || !strings.Contains(m.banner, "p to configure") {
-		t.Fatalf("missing observed URL feedback did not explain the open-only contract and setup action: %q", m.banner)
+	if !strings.Contains(m.banner, "o only opens observed HTTPS routes") || !strings.Contains(m.banner, "p to configure") {
+		t.Fatalf("missing URL feedback did not explain the HTTPS-only open contract and setup action: %q", m.banner)
 	}
 	m.banner = ""
 	if command := m.copyURL(); command != nil {
 		t.Fatal("y unexpectedly copied a URL without an observed route")
 	}
-	if !strings.Contains(m.banner, "y only copies observed URLs") || !strings.Contains(m.banner, "p to configure") {
+	if !strings.Contains(m.banner, "y only copies observed HTTPS routes") || !strings.Contains(m.banner, "p to configure") {
 		t.Fatalf("missing observed URL feedback did not explain the copy-only contract and setup action: %q", m.banner)
 	}
 }
@@ -1673,33 +1754,31 @@ func TestOpenSelectedObservedURLClearsStaleMissingURLBanner(t *testing.T) {
 	}
 }
 
-func TestOpenSelectedURLExplainsTCPOnlyRoute(t *testing.T) {
-	m := workspaceFixture()
-	m.view.Items[0].Routes[0].ProviderKey = "funnel:tcp=10000"
-	m.view.Items[0].Routes[0].Mode = exposuredata.ExposureFunnel
-	m.selectedID = m.view.Items[0].ID
-	m.openSelectedURL()
-	if !strings.Contains(m.banner, "TCP-only") || !strings.Contains(m.banner, "funnel:tcp=10000") {
-		t.Fatalf("TCP-only observed URL action was unclear: %q", m.banner)
+func TestOpenSelectedURLExplainsTCPOnlyRoutesWithoutGuessingHTTPS(t *testing.T) {
+	for _, mode := range []exposuredata.ExposureMode{exposuredata.ExposureServe, exposuredata.ExposureFunnel} {
+		t.Run(string(mode), func(t *testing.T) {
+			m := workspaceFixture()
+			m.view.Items[0].Routes[0].ProviderKey = string(mode) + ":tcp=10000"
+			m.view.Items[0].Routes[0].Mode = mode
+			m.view.Items[0].Routes[0].URL = ""
+			m.selectedID = m.view.Items[0].ID
+			if command := m.openSelectedURL(); command != nil {
+				t.Fatal("raw TCP route unexpectedly produced a browser command")
+			}
+			if !strings.Contains(m.banner, "TCP-only") || !strings.Contains(m.banner, "HTTPS") {
+				t.Fatalf("TCP-only observed URL action was unclear: %q", m.banner)
+			}
+		})
 	}
 }
 
-func TestObservedURLWinsWhenTCPSelectorHasExplicitURL(t *testing.T) {
+func TestObservedHTTPSURLMayBelongToExactTCPRoute(t *testing.T) {
 	route := exposuredata.ExposureRoute{ProviderKey: "serve:tcp=4321", URL: "https://dev.example.ts.net:4321"}
-	if got, ok := workspace.ObservedRouteURL(route); !ok || got != route.URL {
-		t.Fatalf("explicit URL was rejected for TCP selector: got=%q ok=%t", got, ok)
+	if got, ok := workspace.ObservedHTTPSRouteURL(route); !ok || got != route.URL {
+		t.Fatalf("explicit HTTPS URL was rejected for TCP selector: got=%q ok=%t", got, ok)
 	}
-	if got := formatURLShortcutStatus(false, false, true, true, true, false); got != "o observed[ok]  O localhost[ok]  y copy[URL-only]" {
-		t.Fatalf("Serve TCP fallback shortcut status = %q", got)
-	}
-}
-
-func TestServeTCPBrowserURLUsesReportedDNSName(t *testing.T) {
-	status := tailscale.Status{}
-	status.Self.DNSName = "noors-macbook-pro.tail85727d.ts.net."
-	route := exposuredata.ExposureRoute{ProviderKey: "serve:tcp=4321", Mode: exposuredata.ExposureServe}
-	if got, err := workspace.ServeTCPBrowserURL(status, route); err != nil || got != "http://noors-macbook-pro.tail85727d.ts.net:4321/" {
-		t.Fatalf("Serve TCP browser URL=%q err=%v", got, err)
+	if got := formatURLShortcutStatus(true, false, true, true, false); got != "o HTTPS[ok]  y copy[URL-only]" {
+		t.Fatalf("observed HTTPS URL shortcut status = %q", got)
 	}
 }
 
@@ -1712,24 +1791,39 @@ func TestTerminateInactiveRouteExplainsNoProcess(t *testing.T) {
 	}
 }
 
-func TestServeTCPBrowserURLRejectsUnsafeDNSName(t *testing.T) {
-	status := tailscale.Status{}
-	status.Self.DNSName = "bad/host"
-	route := exposuredata.ExposureRoute{ProviderKey: "serve:tcp=4321", Mode: exposuredata.ExposureServe}
-	if _, err := workspace.ServeTCPBrowserURL(status, route); err == nil {
-		t.Fatal("unsafe Tailscale DNS name was accepted")
+func TestBrowserShortcutsRejectObservedHTTPURLs(t *testing.T) {
+	m := workspaceFixture()
+	m.view.Items[0].Routes[0].URL = "http://dev.example.ts.net:3000/"
+	if command := m.openSelectedURL(); command != nil || !strings.Contains(m.banner, "not HTTPS") {
+		t.Fatalf("HTTP URL was not blocked from opening: command=%t banner=%q", command != nil, m.banner)
+	}
+	var copied string
+	m.clipboard = ClipboardFunc(func(_ context.Context, value string) error {
+		copied = value
+		return nil
+	})
+	if command := m.copyURL(); command != nil || copied != "" || !strings.Contains(m.banner, "not HTTPS") {
+		t.Fatalf("HTTP URL was not blocked from copying: command=%t copied=%q banner=%q", command != nil, copied, m.banner)
 	}
 }
 
-func TestLocalURLUsesSelectedListenerPort(t *testing.T) {
+func TestURLEffectBoundariesRejectNonHTTPSURLs(t *testing.T) {
 	m := workspaceFixture()
-	url, ok := localURL(m.view.Items[0])
-	if !ok || url != "http://localhost:3000/" {
-		t.Fatalf("localURL = %q, %t; want http://localhost:3000/, true", url, ok)
+	if command := m.openURL("http://dev.example.ts.net", "test"); command != nil || !strings.Contains(m.banner, "HTTPS") {
+		t.Fatalf("direct openURL call accepted HTTP: command=%t banner=%q", command != nil, m.banner)
 	}
-	m.view.Items[0].Listener = nil
-	if url, ok := localURL(m.view.Items[0]); ok || url != "" {
-		t.Fatalf("localURL without listener = %q, %t; want empty, false", url, ok)
+	m.banner = ""
+	if command := m.copyURLCommand("http://dev.example.ts.net"); command != nil || !strings.Contains(m.banner, "HTTPS") {
+		t.Fatalf("direct copyURLCommand call accepted HTTP: command=%t banner=%q", command != nil, m.banner)
+	}
+	var out, errOut bytes.Buffer
+	var copied string
+	copyURLValue(&out, &errOut, "http://dev.example.ts.net", ClipboardFunc(func(_ context.Context, value string) error {
+		copied = value
+		return nil
+	}))
+	if out.Len() != 0 || copied != "" || !strings.Contains(errOut.String(), "HTTPS") {
+		t.Fatalf("copyURLValue did not fail closed: out=%q error=%q copied=%q", out.String(), errOut.String(), copied)
 	}
 }
 

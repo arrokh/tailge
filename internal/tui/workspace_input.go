@@ -352,17 +352,32 @@ func (m *workspaceModel) updateActionModal(_ tea.KeyMsg, key string) (tea.Model,
 		m.modal = modalNone
 		return m, nil
 	}
-	if key == "up" || key == "k" {
-		m.actionSession.index = (m.actionSession.index + 2) % 3
+	choiceCount := len(m.actionSession.choices)
+	switch key {
+	case "up", "k":
+		if choiceCount > 0 {
+			m.actionSession.index = (m.actionSession.index + choiceCount - 1) % choiceCount
+		}
+		return m, nil
+	case "down", "j":
+		if choiceCount > 0 {
+			m.actionSession.index = (m.actionSession.index + 1) % choiceCount
+		}
+		return m, nil
+	case "d":
+		m.actionSession.index = modeIndex(exposuredata.ExposureDisabled)
+	case "s":
+		m.actionSession.index = modeIndex(exposuredata.ExposureServe)
+	case "f":
+		m.actionSession.index = modeIndex(exposuredata.ExposureFunnel)
+	case "enter":
+	default:
 		return m, nil
 	}
-	if key == "down" || key == "j" {
-		m.actionSession.index = (m.actionSession.index + 1) % 3
-		return m, nil
-	}
-	if key != "enter" {
-		return m, nil
-	}
+	return m.chooseAction()
+}
+
+func (m *workspaceModel) chooseAction() (tea.Model, tea.Cmd) {
 	choice, ok := m.actionSession.selectedChoice()
 	if !ok {
 		m.modal = modalNone

@@ -276,12 +276,6 @@ func (m *workspaceModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		return m, nil
-	case resolvedObservedURLMsg:
-		if message.err != nil {
-			m.setBanner("Observed URL: "+safeMessage(message.err), true)
-			return m, nil
-		}
-		return m, m.openURL(message.url, "observed URL")
 	case statusMsg:
 		m.applyStatus(message)
 		return m, nil

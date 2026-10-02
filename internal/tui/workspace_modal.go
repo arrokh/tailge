@@ -129,10 +129,10 @@ func (m *workspaceModel) modalView() string {
 		}
 		lines = append(lines, "HTTPS endpoint: standard port 443", "Path slug (one segment):", "  "+pathInputView(m.pathInput), "The existing app stays on local HTTP; Tailscale strips the path prefix.", "", "Tab switches Serve/Funnel · Enter previews · Esc cancels")
 	case modalChooseURL:
-		title = "CHOOSE OBSERVED URL"
-		lines = append(lines, "Select one exact provider-observed browser URL:")
+		title = "CHOOSE OBSERVED HTTPS URL"
+		lines = append(lines, "Select one exact provider-observed HTTPS URL:")
 		if item, ok := m.selectedItem(); ok {
-			routes := observedHTTPURLRoutes(item)
+			routes := observedHTTPSURLRoutes(item)
 			for index, route := range routes {
 				marker := "  "
 				if index == m.urlRouteIndex {
@@ -167,7 +167,7 @@ func (m *workspaceModel) modalView() string {
 				}
 			}
 		}
-		lines = append(lines, "", "Choose one action:")
+		lines = append(lines, "", "Choose one action or press d, s, or f:")
 		choices := m.actionSession.choices
 		for i, choice := range choices {
 			marker := "  "
@@ -189,7 +189,7 @@ func (m *workspaceModel) modalView() string {
 			}
 			lines = append(lines, marker+label)
 		}
-		lines = append(lines, "", "↑/↓ or j/k select · Enter preview · Esc cancel")
+		lines = append(lines, "", "↑/↓ or j/k select · Enter preview · d/s/f choose · Esc cancel")
 	case modalDisableRoute:
 		title = "CHOOSE ROUTE TO DISABLE"
 		lines = append(lines, "Target: "+m.actionSession.target.String(), "Select exactly one observed route:")
@@ -400,10 +400,10 @@ func helpLines() []string {
 		"  v/V selection        action previews apply sequentially to selected items; each target is verified independently",
 		"  j/k or Up/Down       choose an action",
 		"  Enter                continue to route selection/confirmation or show a no-op",
+		"  s/f/d in selector    jump to Serve/Funnel/Disable without Enter; confirmation remains required",
 		"  Esc                  cancel the preview",
-		"  o                    open URL; choose among paths; Serve TCP uses HTTP preview",
-		"  O                    open the selected listener at localhost",
-		"  y                    copy URL; choose among paths; Serve TCP preview",
+		"  o                    open an observed HTTPS URL; choose among exact paths",
+		"  y                    copy an observed HTTPS URL; choose among exact paths",
 		"  c                    open confirmed cancellation for Applying",
 		"  x                    terminate selected process(es) sequentially (SIGTERM only)",
 		"  CPU% / MEM           per-process CPU and platform memory metric in the list",

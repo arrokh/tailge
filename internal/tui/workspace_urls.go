@@ -1,6 +1,6 @@
 package tui
 
-// Observed/local URL actions, browser launching, and clipboard transports.
+// Observed HTTPS URL actions, browser launching, and clipboard transports.
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,68 +21,68 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-const unavailableURLBanner = "No observed exposure URL is available"
-const unavailableOpenURLBanner = "No observed exposure URL is available. o only opens observed URLs; use p to configure a named path."
-const unavailableCopyURLBanner = "No observed exposure URL is available. y only copies observed URLs; use p to configure a named path."
+const unavailableURLBanner = "No observed HTTPS URL is available"
+const unavailableOpenURLBanner = "No observed HTTPS URL is available. o only opens observed HTTPS routes; use p to configure one."
+const unavailableCopyURLBanner = "No observed HTTPS URL is available. y only copies observed HTTPS routes; use p to configure one."
+const insecureURLBanner = "Observed route URL is not HTTPS. Configure an explicit HTTPS route before opening or copying it."
 
 func (m *workspaceModel) clearStaleURLUnavailableBanner() {
 	if m.banner == "" {
 		return
 	}
 	item, ok := m.selectedItem()
-	if !ok || len(observedHTTPURLRoutes(item)) == 0 {
+	if !ok || len(observedHTTPSURLRoutes(item)) == 0 {
 		return
 	}
 	m.clearBannerNotice(unavailableURLBanner)
 	m.clearBannerNotice(unavailableOpenURLBanner)
 	m.clearBannerNotice(unavailableCopyURLBanner)
+	m.clearBannerNotice(insecureURLBanner)
 }
 
 func (m *workspaceModel) urlShortcutStatus() string {
-	observed, tcpOnly, browserFallback, local := false, false, false, false
+	observed, insecure, tcpOnly := false, false, false
 	if item, ok := m.selectedItem(); ok {
 		for _, route := range item.Routes {
-			if _, ok := workspace.ObservedRouteURL(route); ok {
+			if _, ok := workspace.ObservedHTTPSRouteURL(route); ok {
 				observed = true
 				continue
 			}
+			if strings.TrimSpace(route.URL) != "" {
+				insecure = true
+			}
 			if workspace.RouteTransport(route) == "tcp" {
-				if route.Mode == exposuredata.ExposureServe && m.provider != nil {
-					browserFallback = true
-				} else {
-					tcpOnly = true
-				}
+				tcpOnly = true
 			}
 		}
-		_, local = localURL(item)
 	}
 	clipboard := m.clipboard != nil
 	if !clipboard {
 		clipboard = clipboardAvailable()
 	}
-	return formatURLShortcutStatus(observed, tcpOnly, browserFallback, local, browserCommandAvailable(), clipboard)
+	return formatURLShortcutStatus(observed, insecure, tcpOnly, browserCommandAvailable(), clipboard)
 }
 
-func formatURLShortcutStatus(observed, tcpOnly, browserFallback, local, browser, clipboard bool) string {
-	observedStatus := "off"
-	if (observed || browserFallback) && browser {
-		observedStatus = "ok"
-	} else if tcpOnly && !observed && !browserFallback {
-		observedStatus = "TCP-only"
-	}
-	localStatus := "off"
-	if local && browser {
-		localStatus = "ok"
+func formatURLShortcutStatus(observed, insecure, tcpOnly, browser, clipboard bool) string {
+	openStatus := "off"
+	if observed && browser {
+		openStatus = "ok"
+	} else if !observed && insecure {
+		openStatus = "HTTPS-only"
+	} else if !observed && tcpOnly {
+		openStatus = "TCP-only"
 	}
 	copyStatus := "off"
-	if observed || browserFallback {
+	if observed {
 		if clipboard {
 			copyStatus = "ok"
 		} else {
 			copyStatus = "URL-only"
 		}
+	} else if insecure {
+		copyStatus = "HTTPS-only"
 	}
-	return fmt.Sprintf("o observed[%s]  O localhost[%s]  y copy[%s]", observedStatus, localStatus, copyStatus)
+	return fmt.Sprintf("o HTTPS[%s]  y copy[%s]", openStatus, copyStatus)
 }
 
 func browserCommand() string {
@@ -113,7 +112,7 @@ func (m *workspaceModel) openSelectedURL() tea.Cmd {
 		m.setBanner("No service is selected", true)
 		return nil
 	}
-	urls := observedHTTPURLRoutes(item)
+	urls := observedHTTPSURLRoutes(item)
 	if len(urls) > 0 {
 		m.clearStaleURLUnavailableBanner()
 	}
@@ -122,23 +121,24 @@ func (m *workspaceModel) openSelectedURL() tea.Cmd {
 		return nil
 	}
 	if len(urls) == 1 {
-		return m.openURL(urls[0].URL, "observed URL")
+		return m.openURL(urls[0].URL, "observed HTTPS URL")
 	}
-	if route, _, ok := observedURLActionRoute(item); ok {
-		return m.resolveServeTCPBrowserURL(route)
+	if hasObservedNonHTTPSURL(item) {
+		m.setBanner(insecureURLBanner, true)
+		return nil
 	}
 	if selector := workspace.RawTCPRouteSelector(item); selector != "" {
-		m.setBanner("Observed route "+selector+" is TCP-only; no browser URL exists. Use a TCP client.", true)
+		m.setBanner("Observed route "+selector+" is TCP-only; no HTTPS URL exists. Use a TCP client or configure an HTTPS route.", true)
 		return nil
 	}
 	m.setBanner(unavailableOpenURLBanner, true)
 	return nil
 }
 
-func observedHTTPURLRoutes(item exposure.ReconciledItem) []exposuredata.ExposureRoute {
+func observedHTTPSURLRoutes(item exposure.ReconciledItem) []exposuredata.ExposureRoute {
 	routes := make([]exposuredata.ExposureRoute, 0, len(item.Routes))
 	for _, route := range item.Routes {
-		if _, ok := workspace.ObservedRouteURL(route); ok {
+		if _, ok := workspace.ObservedHTTPSRouteURL(route); ok {
 			routes = append(routes, route)
 		}
 	}
@@ -151,36 +151,23 @@ func observedHTTPURLRoutes(item exposure.ReconciledItem) []exposuredata.Exposure
 	return routes
 }
 
-func observedURLActionRoute(item exposure.ReconciledItem) (exposuredata.ExposureRoute, string, bool) {
-	urls := observedHTTPURLRoutes(item)
-	if len(urls) == 1 {
-		return urls[0], urls[0].URL, true
-	}
-	if len(urls) > 1 {
-		return exposuredata.ExposureRoute{}, "", false
-	}
-	var fallback exposuredata.ExposureRoute
-	count := 0
+func hasObservedNonHTTPSURL(item exposure.ReconciledItem) bool {
 	for _, route := range item.Routes {
-		if workspace.RouteTransport(route) == "tcp" && route.Mode == exposuredata.ExposureServe {
-			fallback = route
-			count++
+		if strings.TrimSpace(route.URL) != "" && !workspace.IsHTTPSURL(route.URL) {
+			return true
 		}
 	}
-	if count == 1 {
-		return fallback, "", true
-	}
-	return exposuredata.ExposureRoute{}, "", false
+	return false
 }
 
 func (m *workspaceModel) updateURLChoiceModal(_ tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 	item, ok := m.selectedItem()
 	if !ok || item.ID != m.urlItemID || routeFingerprint(item.Routes, nil) != m.urlRoutesFingerprint {
 		m.modal, m.urlAction, m.urlItemID, m.urlRoutesFingerprint = modalNone, "", "", ""
-		m.setBanner("Observed route URLs changed — select a fresh URL", true)
+		m.setBanner("Observed HTTPS route URLs changed — select a fresh URL", true)
 		return m, nil
 	}
-	routes := observedHTTPURLRoutes(item)
+	routes := observedHTTPSURLRoutes(item)
 	if len(routes) < 2 {
 		m.modal, m.urlAction, m.urlItemID, m.urlRoutesFingerprint = modalNone, "", "", ""
 		return m, nil
@@ -199,55 +186,16 @@ func (m *workspaceModel) updateURLChoiceModal(_ tea.KeyMsg, key string) (tea.Mod
 		if action == "copy" {
 			return m, m.copyURLCommand(route.URL)
 		}
-		return m, m.openURL(route.URL, "observed URL")
+		return m, m.openURL(route.URL, "observed HTTPS URL")
 	}
 	return m, nil
 }
 
-func (m *workspaceModel) resolveServeTCPBrowserURL(route exposuredata.ExposureRoute) tea.Cmd {
-	if m.provider == nil {
-		m.setBanner("Observed Serve route has no provider endpoint resolver", true)
-		return nil
-	}
-	m.transient = "Resolving observed Tailscale endpoint"
-	return func() tea.Msg {
-		url, err := m.fetchServeTCPPreviewURL(route)
-		return resolvedObservedURLMsg{url: url, err: err}
-	}
-}
-
-func (m *workspaceModel) fetchServeTCPPreviewURL(route exposuredata.ExposureRoute) (string, error) {
-	ctx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
-	defer cancel()
-	status, err := m.provider.Status(ctx)
-	if err != nil {
-		return "", err
-	}
-	return workspace.ServeTCPBrowserURL(status, route)
-}
-
-func (m *workspaceModel) openSelectedLocalURL() tea.Cmd {
-	item, ok := m.selectedItem()
-	if !ok {
-		m.setBanner("No service is selected", true)
-		return nil
-	}
-	url, ok := localURL(item)
-	if !ok {
-		m.setBanner("No current local listener is available", true)
-		return nil
-	}
-	return m.openURL(url, "local URL")
-}
-
-func localURL(item exposure.ReconciledItem) (string, bool) {
-	if item.Listener == nil || item.Listener.Target.Port < 1 || item.Listener.Target.Port > 65535 {
-		return "", false
-	}
-	return "http://localhost:" + strconv.Itoa(item.Listener.Target.Port) + "/", true
-}
-
 func (m *workspaceModel) openURL(url, label string) tea.Cmd {
+	if !workspace.IsHTTPSURL(url) {
+		m.setBanner("Only valid HTTPS URLs can be opened from Tailge", true)
+		return nil
+	}
 	name := browserCommand()
 	if name == "" {
 		m.setBanner("Opening URLs is unsupported or unavailable on "+runtime.GOOS, true)
@@ -267,11 +215,6 @@ func (m *workspaceModel) openURL(url, label string) tea.Cmd {
 	}
 }
 
-type resolvedObservedURLMsg struct {
-	url string
-	err error
-}
-
 type statusMsg struct {
 	value  string
 	sticky bool
@@ -284,7 +227,7 @@ func (m *workspaceModel) copyURL() tea.Cmd {
 		return nil
 	}
 	item := items[m.selectedIdx]
-	urls := observedHTTPURLRoutes(item)
+	urls := observedHTTPSURLRoutes(item)
 	if len(urls) > 0 {
 		m.clearStaleURLUnavailableBanner()
 	}
@@ -295,11 +238,12 @@ func (m *workspaceModel) copyURL() tea.Cmd {
 	if len(urls) == 1 {
 		return m.copyURLCommand(urls[0].URL)
 	}
-	if route, _, ok := observedURLActionRoute(item); ok {
-		return m.resolveServeTCPCopyURL(route)
+	if hasObservedNonHTTPSURL(item) {
+		m.setBanner(insecureURLBanner, true)
+		return nil
 	}
 	if selector := workspace.RawTCPRouteSelector(item); selector != "" {
-		m.setBanner("Observed route "+selector+" is TCP-only; no browser URL exists to copy", true)
+		m.setBanner("Observed route "+selector+" is TCP-only; no HTTPS URL exists to copy", true)
 		return nil
 	}
 	m.setBanner(unavailableCopyURLBanner, true)
@@ -314,25 +258,13 @@ func (m *workspaceModel) clipboardOrOS() Clipboard {
 }
 
 func (m *workspaceModel) copyURLCommand(url string) tea.Cmd {
-	clipboard := m.clipboardOrOS()
-	m.transient = "Copying observed URL"
-	return func() tea.Msg {
-		return copyURLStatus(url, clipboard)
-	}
-}
-
-func (m *workspaceModel) resolveServeTCPCopyURL(route exposuredata.ExposureRoute) tea.Cmd {
-	if m.provider == nil {
-		m.setBanner("Observed Serve route has no provider endpoint resolver", true)
+	if !workspace.IsHTTPSURL(url) {
+		m.setBanner("Only valid HTTPS URLs can be copied from Tailge", true)
 		return nil
 	}
 	clipboard := m.clipboardOrOS()
-	m.transient = "Resolving observed Tailscale endpoint"
+	m.transient = "Copying observed HTTPS URL"
 	return func() tea.Msg {
-		url, err := m.fetchServeTCPPreviewURL(route)
-		if err != nil {
-			return statusMsg{value: "Observed URL: " + safeMessage(err), sticky: true}
-		}
 		return copyURLStatus(url, clipboard)
 	}
 }
@@ -354,20 +286,24 @@ func copySelectedURL(out, errOut io.Writer, items []exposure.ReconciledItem, sel
 	if selected < 0 || selected >= len(items) {
 		return
 	}
-	routes := observedHTTPURLRoutes(items[selected])
+	routes := observedHTTPSURLRoutes(items[selected])
 	if len(routes) == 1 {
 		copyURLValue(out, errOut, routes[0].URL, clipboard)
 		return
 	}
 	if len(routes) > 1 {
-		fmt.Fprintln(out, "Multiple observed URLs are available; choose one in the workspace.")
+		fmt.Fprintln(out, "Multiple observed HTTPS URLs are available; choose one in the workspace.")
 		return
 	}
-	fmt.Fprintln(out, "No URL is available for the selected item.")
+	fmt.Fprintln(out, "No HTTPS URL is available for the selected item.")
 }
 
 func copyURLValue(out, errOut io.Writer, url string, clipboard Clipboard) {
-	fmt.Fprintf(out, "URL: %s\n", url)
+	if !workspace.IsHTTPSURL(url) {
+		fmt.Fprintln(errOut, "only valid HTTPS URLs may be copied")
+		return
+	}
+	fmt.Fprintf(out, "HTTPS URL: %s\n", url)
 	if clipboard == nil {
 		fmt.Fprintln(errOut, "clipboard unavailable: no clipboard integration is configured.\nCopy the visible URL with normal terminal text selection.")
 		return

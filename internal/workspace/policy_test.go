@@ -9,7 +9,6 @@ import (
 	"github.com/arrokh/tailge/internal/exposure"
 	"github.com/arrokh/tailge/internal/exposuredata"
 	"github.com/arrokh/tailge/internal/readiness"
-	"github.com/arrokh/tailge/internal/tailscale"
 	"github.com/arrokh/tailge/internal/target"
 )
 
@@ -145,22 +144,24 @@ func TestSameStateDoesNotTreatWildcardBackendAsVerifiedNoop(t *testing.T) {
 	}
 }
 
-func TestURLPolicyPreservesExplicitObservationAndTCPOnlyClassification(t *testing.T) {
+func TestURLPolicyAllowsOnlyExplicitValidHTTPSRoutes(t *testing.T) {
 	item := workspaceItem()
 	if selector := RawTCPRouteSelector(item); selector != "serve:tcp=3000" {
 		t.Fatalf("raw TCP selector = %q", selector)
 	}
-	if _, ok := ObservedRouteURL(item.Routes[0]); ok {
-		t.Fatal("TCP selector was treated as an observed browser URL")
+	if _, ok := ObservedHTTPSRouteURL(item.Routes[0]); ok {
+		t.Fatal("TCP selector without an observed URL was treated as a browser URL")
 	}
-	item.Routes[0].URL = "https://dev.example.ts.net"
-	if url, ok := ObservedRouteURL(item.Routes[0]); !ok || url != item.Routes[0].URL {
-		t.Fatalf("explicit URL was not preserved: %q %t", url, ok)
+	for _, value := range []string{"http://dev.example.ts.net", "ftp://dev.example.ts.net", "https:///missing-host", "https://user:secret@dev.example.ts.net", "not a URL"} {
+		item.Routes[0].URL = value
+		if url, ok := ObservedHTTPSRouteURL(item.Routes[0]); ok {
+			t.Errorf("non-HTTPS/invalid URL %q was accepted as %q", value, url)
+		}
 	}
-	status := tailscale.Status{}
-	status.Self.DNSName = "dev.example.ts.net"
-	preview, err := ServeTCPBrowserURL(status, item.Routes[0])
-	if err != nil || preview != "http://dev.example.ts.net:3000/" {
-		t.Fatalf("Serve TCP preview = %q, err=%v", preview, err)
+	for _, value := range []string{"https://dev.example.ts.net", "HTTPS://dev.example.ts.net:8443/api"} {
+		item.Routes[0].URL = value
+		if url, ok := ObservedHTTPSRouteURL(item.Routes[0]); !ok || url != value {
+			t.Errorf("explicit HTTPS URL was not preserved: got=%q ok=%t", url, ok)
+		}
 	}
 }

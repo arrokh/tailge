@@ -156,7 +156,7 @@ func footerBuildIdentity(width int, status, theme string) (plain, linked string)
 }
 
 func compactURLShortcutStatus(status string) string {
-	return strings.NewReplacer(" observed[", ":", " localhost[", ":", " copy[", ":", "]", "").Replace(status)
+	return strings.NewReplacer(" HTTPS[", ":", " copy[", ":", "]", "").Replace(status)
 }
 
 func compactSortLabel(sortKey string) string {
