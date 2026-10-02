@@ -173,6 +173,7 @@ func (d *OSListenerObserver) enrich(ctx context.Context, snapshot *ListenerSnaps
 		}
 	}
 	usageByPID := processUsages(ctx, d.OS, pids)
+	workingDirectoryByPID := processWorkingDirectories(ctx, d.OS, pids)
 	for i := range snapshot.Listeners {
 		l := &snapshot.Listeners[i]
 		if l.PID == 0 {
@@ -180,6 +181,7 @@ func (d *OSListenerObserver) enrich(ctx context.Context, snapshot *ListenerSnaps
 			continue
 		}
 		l.Usage = usageByPID[l.PID]
+		l.WorkingDirectory = redactCommandLine(workingDirectoryByPID[l.PID])
 		if command := processCommand(ctx, d.OS, l.PID); command != "" {
 			l.CommandLine = redactCommandLine(command)
 			if strings.Contains(l.CommandLine, "[truncated]") {
@@ -201,6 +203,104 @@ func (d *OSListenerObserver) enrich(ctx context.Context, snapshot *ListenerSnaps
 			}
 		}
 	}
+}
+
+func processWorkingDirectories(ctx context.Context, goos string, pids []int) map[int]string {
+	result := map[int]string{}
+	switch goos {
+	case "linux":
+		return processWorkingDirectoriesFromProc(ctx, "/proc", pids)
+	case "darwin":
+		const maxPIDsPerCommand = 128
+		requested := uniquePositivePIDs(pids)
+		for start := 0; start < len(requested); start += maxPIDsPerCommand {
+			if ctx.Err() != nil {
+				break
+			}
+			end := start + maxPIDsPerCommand
+			if end > len(requested) {
+				end = len(requested)
+			}
+			batch := requested[start:end]
+			pidList := make([]string, 0, len(batch))
+			requestedBatch := make(map[int]bool, len(batch))
+			for _, pid := range batch {
+				pidList = append(pidList, strconv.Itoa(pid))
+				requestedBatch[pid] = true
+			}
+
+			lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			command := exec.CommandContext(lookupCtx, "lsof", "-nP", "-a", "-p", strings.Join(pidList, ","), "-d", "cwd", "-Fpn")
+			command.WaitDelay = 250 * time.Millisecond
+			var output, diagnostics boundedMetadataBuffer
+			output.max = len(batch)*(16*1024) + 16*1024
+			diagnostics.max = 16 * 1024
+			command.Stdout, command.Stderr = &output, &diagnostics
+			_ = command.Run() // CWD is optional best-effort process metadata.
+			cancel()
+			if !output.truncated {
+				for pid, path := range parseLsofWorkingDirectories(output.String(), requestedBatch) {
+					result[pid] = path
+				}
+			}
+		}
+	}
+	return result
+}
+
+func processWorkingDirectoriesFromProc(ctx context.Context, procRoot string, pids []int) map[int]string {
+	result := map[int]string{}
+	for _, pid := range uniquePositivePIDs(pids) {
+		if ctx.Err() != nil {
+			break
+		}
+		path, err := os.Readlink(filepath.Join(procRoot, strconv.Itoa(pid), "cwd"))
+		if err == nil && path != "" {
+			result[pid] = path
+		}
+	}
+	return result
+}
+
+func parseLsofWorkingDirectories(output string, requested map[int]bool) map[int]string {
+	result := map[int]string{}
+	currentPID := 0
+	for _, line := range strings.Split(output, "\n") {
+		if line == "" {
+			continue
+		}
+		switch line[0] {
+		case 'p':
+			pid, err := strconv.Atoi(line[1:])
+			if err != nil || pid <= 0 || !requested[pid] {
+				currentPID = 0
+				continue
+			}
+			currentPID = pid
+		case 'n':
+			if currentPID == 0 {
+				continue
+			}
+			path := strings.TrimSpace(line[1:])
+			if path != "" {
+				result[currentPID] = path
+			}
+		}
+	}
+	return result
+}
+
+func uniquePositivePIDs(pids []int) []int {
+	seen := make(map[int]bool, len(pids))
+	result := make([]int, 0, len(pids))
+	for _, pid := range pids {
+		if pid > 0 && !seen[pid] {
+			seen[pid] = true
+			result = append(result, pid)
+		}
+	}
+	sort.Ints(result)
+	return result
 }
 
 func processUsages(ctx context.Context, goos string, pids []int) map[int]*ProcessUsage {

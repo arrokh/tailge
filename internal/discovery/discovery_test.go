@@ -101,6 +101,50 @@ func TestParseLsofRejectsMalformedEndpoint(t *testing.T) {
 	}
 }
 
+func TestProcessWorkingDirectoriesFromProcReadsAndDeduplicatesPIDLinks(t *testing.T) {
+	procRoot := t.TempDir()
+	cwd := filepath.Join(procRoot, "4242", "cwd")
+	if err := os.MkdirAll(filepath.Dir(cwd), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want := "/Users/alice/Projects/tailge"
+	if err := os.Symlink(want, cwd); err != nil {
+		t.Fatal(err)
+	}
+
+	got := processWorkingDirectoriesFromProc(context.Background(), procRoot, []int{4242, 0, 4242, -1, 9999})
+	if len(got) != 1 || got[4242] != want {
+		t.Fatalf("working directories = %#v, want PID 4242 at %q", got, want)
+	}
+}
+
+func TestProcessWorkingDirectoriesUsesBatchedLsofOnDarwin(t *testing.T) {
+	directory := t.TempDir()
+	lsof := filepath.Join(directory, "lsof")
+	argsFile := filepath.Join(directory, "args")
+	script := `#!/bin/sh
+printf '%s\n' "$*" > "$TAILGE_LSOF_ARGS"
+printf '%s\n' 'p4242' 'fcwd' 'n/Users/alice/Projects/tailge' 'p4343' 'fcwd' 'n/Users/alice/Projects/Other App' 'p9999' 'fcwd' 'n/ignored'
+`
+	if err := os.WriteFile(lsof, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory)
+	t.Setenv("TAILGE_LSOF_ARGS", argsFile)
+
+	got := processWorkingDirectories(context.Background(), "darwin", []int{4343, 4242, 4242, 0})
+	if len(got) != 2 || got[4242] != "/Users/alice/Projects/tailge" || got[4343] != "/Users/alice/Projects/Other App" {
+		t.Fatalf("working directories = %#v", got)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(args) != "-nP -a -p 4242,4343 -d cwd -Fpn\n" {
+		t.Fatalf("lsof args = %q, want one sorted, batched cwd query", args)
+	}
+}
+
 func TestParseProcessUsageConvertsCPUAndResidentMemory(t *testing.T) {
 	usage, err := parseProcessUsage("  12.5  1024\n")
 	if err != nil {

@@ -127,7 +127,7 @@ An accepted search query remains visible and filters the workspace until deliber
 _Avoid_: disappearing filter, irreversible search edit
 
 **Compact service row**:
-A fixed-height list row carries selection state, concise service/target identity, exposure state, and best-effort process CPU and memory when available. macOS uses physical footprint with RSS fallback; Linux uses RSS. Unavailable measurements are marked with a dash, the source is identified in details/JSON, and full diagnostics belong to details.
+A fixed-height list row carries selection state, concise service/target identity, exposure state, and best-effort process CPU and memory when available. macOS uses physical footprint with RSS fallback; Linux uses RSS. Details and scan JSON include the best-effort process working directory when available. Unavailable measurements are marked with a dash, the source is identified in details/JSON, and full diagnostics belong to details.
 _Avoid_: multiline list row, hidden diagnostics
 
 **Redundant state indicator**:

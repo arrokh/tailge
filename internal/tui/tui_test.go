@@ -1822,6 +1822,22 @@ func TestVisualSelectionMarkerUsesColorWithoutDependingOnIt(t *testing.T) {
 	}
 }
 
+func TestListenerDetailsShowProcessWorkingDirectory(t *testing.T) {
+	m := workspaceFixture()
+	m.view.Items[0].Listener.WorkingDirectory = "/Users/alice/Projects/tailge"
+	details := m.renderDetails(100, 40)
+	if !strings.Contains(details, "working directory: /Users/alice/Projects/tailge") {
+		t.Fatalf("details omitted the process working directory: %q", details)
+	}
+
+	m.view.Items[0].Listener.WorkingDirectory = "/very-long-directory/" + strings.Repeat("nested/", 12)
+	for _, line := range strings.Split(m.renderDetails(32, 80), "\n") {
+		if width := lipgloss.Width(line); width > 32 {
+			t.Fatalf("working-directory detail exceeded narrow pane: width=%d line=%q", width, line)
+		}
+	}
+}
+
 func TestListenerListShowsCPUAndResidentMemory(t *testing.T) {
 	m := workspaceFixture()
 	m.view.Items[0].Listener.Usage = &discovery.ProcessUsage{CPUPercent: 12.5, MemoryBytes: 42 * 1024 * 1024}

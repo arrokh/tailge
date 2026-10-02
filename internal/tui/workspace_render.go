@@ -744,6 +744,9 @@ func (m *workspaceModel) renderDetails(width, height int) string {
 				fmt.Sprintf("  memory (%s): %s", processMemorySourceLabel(l.Usage.MemorySource), processMemoryDetail(l.Usage.MemoryBytes)),
 			)
 		}
+		if l.WorkingDirectory != "" {
+			lines = append(lines, "  working directory: "+l.WorkingDirectory)
+		}
 		if l.CommandLine != "" {
 			lines = append(lines, "  command: "+l.CommandLine)
 		}
