@@ -46,7 +46,11 @@ func itemSection(item exposure.ReconciledItem) string {
 }
 
 func (s workspaceSnapshot) Items() []exposure.ReconciledItem {
-	items := deduplicatePortItems(sectioned(ordered(displayed(s.view, "", s.cfg), s.cfg.Sort)))
+	// Choose each shared-port row's primary identity using a fixed order before
+	// applying the user's presentation sort. Otherwise changing sort can change
+	// which listener receives exposure actions for the collapsed row.
+	items := deduplicatePortItems(sectioned(ordered(displayed(s.view, "", s.cfg), "port")))
+	items = sectioned(ordered(items, s.cfg.Sort))
 	return visible(exposure.View{Items: items}, s.query)
 }
 

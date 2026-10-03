@@ -850,6 +850,26 @@ func TestApplyHTTPSRootReplacesExactServeTCPRouteOnlyAfterExplicitConfirmation(t
 	}
 }
 
+func TestApplyHTTPSRootDoesNotRemoveConcurrentRootAfterSetPreconditionFailure(t *testing.T) {
+	target := targetmodel.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
+	raw := exposuredata.ExposureRoute{ID: "raw-id", ProviderKey: "serve:tcp=4321", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:4321", Target: target, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive}
+	concurrentRoot := exposuredata.ExposureRoute{ID: "concurrent-root", ProviderKey: "serve:https=4321", Kind: exposuredata.RouteKindHTTPSRoot, Path: "/", Backend: "http://127.0.0.1:4321", Target: target, Mode: exposuredata.ExposureServe, URL: "https://dev.example.ts.net:4321/", State: exposuredata.ExposureActive}
+	base := &fakeProvider{snapshot: exposuredata.ExposureSnapshot{Authoritative: true, Routes: []exposuredata.ExposureRoute{raw}}, caps: tailscale.Capabilities{Serve: true, ExactServe: true, ServeTCP: true, ServeHTTPS: true, ServePath: true}, readiness: ready()}
+	provider := &concurrentRootBeforeApplyProvider{fakeProvider: base, root: concurrentRoot}
+	discoverer := &fakeDiscoverer{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{testListener(target, "node")}}}
+	controller := NewController(discoverer, provider)
+	_, err := controller.ApplyHTTPSRootWithOptions(context.Background(), target, HTTPSRootOptions{HTTPSPort: target.Port, ReplaceRawTCP: true, ConfirmExternal: true, ExpectedRawTCPRouteID: raw.ID}, time.Second)
+	if err == nil || fault.AsAppError(err).State != "unverified" {
+		t.Fatalf("precondition race was not reported as unverified: %v", err)
+	}
+	if len(base.removes) != 1 || base.removes[0].ID != raw.ProviderKey || len(base.sets) != 0 {
+		t.Fatalf("failed Set precondition caused another route mutation: removes=%#v sets=%#v", base.removes, base.sets)
+	}
+	if len(base.snapshot.Routes) != 1 || base.snapshot.Routes[0].ID != concurrentRoot.ID {
+		t.Fatalf("concurrent root was removed or overwritten: %#v", base.snapshot.Routes)
+	}
+}
+
 func TestApplyHTTPSRootDoesNotRemoveConcurrentRootBeforeApplying(t *testing.T) {
 	target := targetmodel.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
 	raw := exposuredata.ExposureRoute{ID: "raw-id", ProviderKey: "serve:tcp=4321", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:4321", Target: target, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive}
@@ -874,6 +894,21 @@ type applyThenFailRootProvider struct {
 	mutateBackend string
 }
 
+type concurrentRootBeforeApplyProvider struct {
+	*fakeProvider
+	root exposuredata.ExposureRoute
+}
+
+func (p *concurrentRootBeforeApplyProvider) Set(ctx context.Context, change tailscale.ExposureChange) (exposuredata.OperationReceipt, error) {
+	if change.HTTPSRoot {
+		p.mu.Lock()
+		p.snapshot.Routes = append(p.snapshot.Routes, p.root)
+		p.mu.Unlock()
+		return exposuredata.OperationReceipt{ID: "precondition-failed"}, fault.NewError(fault.ErrUnsafe, "tailscale", "exposure changed since preflight", false, "changed", "Refresh and retry.")
+	}
+	return p.fakeProvider.Set(ctx, change)
+}
+
 func (p *applyThenFailRootProvider) Set(ctx context.Context, change tailscale.ExposureChange) (exposuredata.OperationReceipt, error) {
 	receipt, err := p.fakeProvider.Set(ctx, change)
 	if err != nil {
@@ -889,6 +924,7 @@ func (p *applyThenFailRootProvider) Set(ctx context.Context, change tailscale.Ex
 			}
 			p.mu.Unlock()
 		}
+		receipt.Command = "tailscale serve --https=4321 http://127.0.0.1:4321"
 		return receipt, errors.New("simulated post-write failure")
 	}
 	return receipt, nil
@@ -913,6 +949,19 @@ func TestApplyHTTPSRootConversionRemovesPartialRootAndRestoresExactTCPRoute(t *t
 	}
 	if len(base.snapshot.Routes) != 1 || base.snapshot.Routes[0].ProviderKey != raw.ProviderKey || base.snapshot.Routes[0].Kind != exposuredata.RouteKindRawTCP || base.snapshot.Routes[0].Backend != raw.Backend {
 		t.Fatalf("exact previous route was not restored after the partial root: %#v", base.snapshot.Routes)
+	}
+}
+
+func TestHTTPSRootRollbackDoesNotTreatInactiveRawRouteAsRestored(t *testing.T) {
+	target := targetmodel.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
+	raw := exposuredata.ExposureRoute{ID: "raw-id", ProviderKey: "serve:tcp=4321", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:4321", Target: target, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureInactive}
+	provider := &fakeProvider{snapshot: exposuredata.ExposureSnapshot{Authoritative: true, Routes: []exposuredata.ExposureRoute{raw}}, caps: tailscale.Capabilities{Serve: true, ExactServe: true, ServeTCP: true, ServeHTTPS: true, ServePath: true}, readiness: ready()}
+	dependencies := exactOperationDependencies{provider: provider}
+	if err := dependencies.restoreRawTCPAfterHTTPSRootFailure(target, raw, target.Port, "http://127.0.0.1:4321", "operation", false); err == nil {
+		t.Fatal("inactive raw-TCP route was reported as a verified restoration")
+	}
+	if len(provider.sets) != 0 || len(provider.removes) != 0 {
+		t.Fatalf("rollback mutated an unverified inactive route: sets=%#v removes=%#v", provider.sets, provider.removes)
 	}
 }
 

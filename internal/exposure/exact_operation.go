@@ -882,7 +882,11 @@ func (c exactOperationDependencies) replaceRawTCPWithHTTPSRoot(ctx context.Conte
 	setReceipt, setErr := c.provider.Set(ctx, tailscale.ExposureChange{Target: target, Mode: exposuredata.ExposureServe, ProviderKey: providerKey, Path: path, HTTPSPort: httpsPort, HTTPSRoot: true, Backend: backend, Preconditions: precondition})
 	c.recordReceiptEvent(operationID, "set-https-root", target, exposuredata.ExposureServe, setErr)
 	if setErr != nil {
-		rollbackErr := c.restoreRawTCPAfterHTTPSRootFailure(target, previous, httpsPort, backend, operationID, true)
+		// A provider may reject its fresh precondition before running the command.
+		// In that case, an identical root observed during rollback could belong to
+		// a concurrent writer and must not be removed as our partial result.
+		setMayHaveApplied := strings.TrimSpace(setReceipt.Command) != ""
+		rollbackErr := c.restoreRawTCPAfterHTTPSRootFailure(target, previous, httpsPort, backend, operationID, setMayHaveApplied)
 		c.recordReceiptEvent(operationID, "rollback-raw-tcp", target, previous.Mode, rollbackErr)
 		if rollbackErr != nil {
 			return setReceipt, fault.WrapError(fault.ErrVerification, "exposure", "HTTPS-root apply failed and exact raw-TCP restoration could not be verified", false, "unverified", "Inspect the exact Serve route manually; Tailge did not apply a broad reset.", rollbackErr)
@@ -929,6 +933,9 @@ func (c exactOperationDependencies) restoreRawTCPAfterHTTPSRootFailure(requested
 		return err
 	}
 	if len(endpointRoutes) == 1 && routeFingerprint(endpointRoutes[0]) == routeFingerprint(previous) {
+		if endpointRoutes[0].State != exposuredata.ExposureActive {
+			return fault.NewError(fault.ErrVerification, "exposure", "the captured raw-TCP route is present but not active after rollback", true, "unverified", "Inspect the exact Serve route manually; Tailge could not verify restored access.")
+		}
 		if previous.Ownership == exposuredata.OwnershipManaged {
 			c.markManagedRoute(endpointRoutes[0])
 		}

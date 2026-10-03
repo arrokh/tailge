@@ -32,6 +32,26 @@ func TestWorkspaceSnapshotSharesPortIdentityAcrossPresentationFlows(t *testing.T
 	}
 }
 
+func TestWorkspaceSnapshotSortDoesNotChangeSharedPortPrimaryTarget(t *testing.T) {
+	wildcard := discovery.Listener{ID: "wildcard", Name: "Beta", Target: target.Target{Address: "0.0.0.0", Port: 3000, Protocol: "tcp"}}
+	loopback := discovery.Listener{ID: "loopback", Name: "Alpha", Target: target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}}
+	view := exposure.View{Items: []exposure.ReconciledItem{
+		{ID: loopback.ID, Listener: &loopback, State: exposuredata.ExposureInactive},
+		{ID: wildcard.ID, Listener: &wildcard, State: exposuredata.ExposureInactive},
+	}}
+	for _, sortKey := range []string{"port", "name", "name-desc", "address", "exposure", "none"} {
+		cfg := config.Defaults()
+		cfg.Sort = sortKey
+		items := newWorkspaceSnapshot(view, "", cfg).Items()
+		if len(items) != 1 || items[0].ID != wildcard.ID {
+			t.Fatalf("sort %q changed the shared-port primary row: %#v", sortKey, items)
+		}
+		if got, ok := itemTarget(items[0]); !ok || got.Normalized().Key() != wildcard.Target.Normalized().Key() {
+			t.Fatalf("sort %q changed the shared-port action target: %#v, ok=%t", sortKey, got, ok)
+		}
+	}
+}
+
 func TestWorkspaceSnapshotInheritsRouteStateWhenListenerHasNoRoute(t *testing.T) {
 	target := target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}
 	listener := discovery.Listener{ID: "listener", Name: "web", Target: target}
