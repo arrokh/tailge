@@ -16,13 +16,14 @@ import (
 // and the list, details, and action flows. It applies the same filtering,
 // ordering, sectioning, and port identity rules for every consumer.
 type workspaceSnapshot struct {
-	view  exposure.View
-	query string
-	cfg   config.Config
+	view           exposure.View
+	query          string
+	cfg            config.Config
+	modeNotOffOnly bool
 }
 
-func newWorkspaceSnapshot(view exposure.View, query string, cfg config.Config) workspaceSnapshot {
-	return workspaceSnapshot{view: view, query: query, cfg: cfg}
+func newWorkspaceSnapshot(view exposure.View, query string, cfg config.Config, modeNotOffOnly bool) workspaceSnapshot {
+	return workspaceSnapshot{view: view, query: query, cfg: cfg, modeNotOffOnly: modeNotOffOnly}
 }
 
 func itemTarget(item exposure.ReconciledItem) (target.Target, bool) {
@@ -51,6 +52,15 @@ func (s workspaceSnapshot) Items() []exposure.ReconciledItem {
 	// which listener receives exposure actions for the collapsed row.
 	items := deduplicatePortItems(sectioned(ordered(displayed(s.view, "", s.cfg), "port")))
 	items = sectioned(ordered(items, s.cfg.Sort))
+	if s.modeNotOffOnly {
+		filtered := make([]exposure.ReconciledItem, 0, len(items))
+		for _, item := range items {
+			if item.Mode != exposuredata.ExposureDisabled {
+				filtered = append(filtered, item)
+			}
+		}
+		items = filtered
+	}
 	return visible(exposure.View{Items: items}, s.query)
 }
 

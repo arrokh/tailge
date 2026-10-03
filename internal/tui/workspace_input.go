@@ -67,6 +67,9 @@ func (m *workspaceModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.openAction(nil)
 	case "e", "S":
 		return m, m.cycleSort()
+	case "w":
+		m.toggleModeNotOffFilter()
+		m.clampOffsets()
 	case "s":
 		m.openAction(ptrMode(exposuredata.ExposureServe))
 	case "f":

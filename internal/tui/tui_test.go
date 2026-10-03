@@ -138,6 +138,34 @@ func TestSortShortcutCyclesAndPreservesSelectedIdentity(t *testing.T) {
 	}
 }
 
+func TestModeFilterShortcutTogglesNonOffRowsAndPreservesSelection(t *testing.T) {
+	m := workspaceFixture()
+	offListener := discovery.Listener{ID: "listener-off", Name: "off", Target: targetmodel.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}}
+	m.view.Items = append(m.view.Items, exposure.ReconciledItem{ID: offListener.ID, Listener: &offListener, State: exposuredata.ExposureState("disabled"), Mode: exposuredata.ExposureDisabled})
+	m.selectedID = offListener.ID
+	m.selectedIdx = 1
+
+	m.Update(keyRune('w'))
+	if !m.modeNotOffOnly {
+		t.Fatal("w did not enable the not-OFF mode filter")
+	}
+	items := m.items()
+	if len(items) != 1 || items[0].ID != "listener-app" || m.selectedID != "listener-app" {
+		t.Fatalf("mode filter rows or selection are wrong: items=%#v selected=%q", items, m.selectedID)
+	}
+	if status := m.modeFilterStatusLabel(); status != "w:not-OFF" {
+		t.Fatalf("active mode-filter status=%q", status)
+	}
+
+	m.Update(keyRune('w'))
+	if m.modeNotOffOnly || len(m.items()) != 2 || m.selectedID != "listener-app" {
+		t.Fatalf("second w did not restore all rows while preserving visible selection: filtered=%t items=%#v selected=%q", m.modeNotOffOnly, m.items(), m.selectedID)
+	}
+	if status := m.modeFilterStatusLabel(); status != "w:all" {
+		t.Fatalf("default mode-filter status=%q", status)
+	}
+}
+
 func TestPaletteSortPreservesSelectionAndOffersEverySupportedSort(t *testing.T) {
 	m := workspaceFixture()
 	second := discovery.Listener{ID: "listener-api", Name: "api", Target: targetmodel.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}}
@@ -536,10 +564,10 @@ func TestFooterUsesGroupedHintsThatAdaptToWidth(t *testing.T) {
 		width int
 		want  []string
 	}{
-		{120, []string{"↑↓ Move", "Tab Focus", "v/V Select", "s/f/d Routes", "b HTTPS", "x Term", "e/S Sort", "/ Find", "z Zoom", "? Help", "q Quit"}},
-		{100, []string{"↑↓ Move", "Tab Focus", "v Mark", "s/f/d Routes", "e/S Sort", "/ Find", "z Zoom", "? Help", "q Quit"}},
+		{120, []string{"↑↓ Move", "Tab Focus", "v/V", "s/f/d Routes", "b HTTPS", "x Term", "e/S Sort", "w Filter", "/ Find", "z Zoom", "? Help", "q Quit"}},
+		{100, []string{"↑↓ Move", "Tab Focus", "s/f/d", "e/S Sort", "w Filter", "/ Find", "z Zoom", "? Help", "q Quit"}},
 		{72, []string{"↑↓ Move", "Tab Focus", "e/S Sort", "/ Find", "? Help", "q Quit"}},
-		{30, []string{"o:off", "y:off", "? Help"}},
+		{30, []string{"o:off", "y:off", "w", "? Help"}},
 	} {
 		m.width = test.width
 		lines := strings.Split(m.renderBottom(), "\n")
@@ -565,6 +593,18 @@ func TestFooterUsesGroupedHintsThatAdaptToWidth(t *testing.T) {
 
 func TestFooterShowsSortModeAndLargeOperationsKeepPriority(t *testing.T) {
 	m := workspaceFixture()
+	if line := ansi.Strip(strings.Split(m.renderBottom(), "\n")[0]); !strings.Contains(line, "w:all") {
+		t.Fatalf("footer did not show the default unfiltered mode: %q", line)
+	}
+	m.modeNotOffOnly = true
+	if line := ansi.Strip(strings.Split(m.renderBottom(), "\n")[0]); !strings.Contains(line, "w:not-OFF") {
+		t.Fatalf("footer did not show active mode filter: %q", line)
+	}
+	m.width, m.modeNotOffOnly = 30, true
+	if line := ansi.Strip(strings.Split(m.renderBottom(), "\n")[0]); !strings.Contains(line, "w:on") {
+		t.Fatalf("narrow footer did not compactly show the active mode filter: %q", line)
+	}
+	m.width, m.modeNotOffOnly = 120, false
 	for _, test := range []struct {
 		sortKey string
 		label   string
@@ -649,7 +689,7 @@ func TestFooterUsesDevelopmentFallbackAndCompactRepositoryLink(t *testing.T) {
 		t.Fatalf("footer has %d lines, want 2: %q", len(lines), lines)
 	}
 	visible := ansi.Strip(lines[0])
-	if !strings.Contains(visible, "List b[off]") {
+	if !strings.Contains(visible, "L w:all b[off]") {
 		t.Fatalf("narrow footer lost compact focus/path status: %q", visible)
 	}
 	if !strings.Contains(visible, "dev GitHub") {
@@ -674,7 +714,7 @@ func TestFooterShortensCommitToPreserveNarrowStatus(t *testing.T) {
 	m := workspaceFixture()
 	m.width = 30
 	line := ansi.Strip(strings.Split(m.renderBottom(), "\n")[0])
-	if !strings.Contains(line, "3d16efb GitHub") || !strings.Contains(line, "List b[off]") {
+	if !strings.Contains(line, "3d16efb GitHub") || !strings.Contains(line, "L w:all b[off]") {
 		t.Fatalf("long commit obscured narrow footer status: %q", line)
 	}
 	if width := lipgloss.Width(line); width > m.width {
@@ -737,7 +777,7 @@ func TestHelpDocumentsShortcutGroups(t *testing.T) {
 	help := strings.Join(helpLines(), "\n")
 	for _, text := range []string{
 		"WORKSPACE / NAVIGATION", "SEARCH / FILTER", "ACTION PREVIEW", "CONFIRMATION / APPLYING", "COMMAND PALETTE", "HELP", "SAFETY / STATE",
-		"C or Ctrl-l", "U                    clear all selected items", "s                    preview private Serve", "f                    preview public Funnel", "d                    preview Disable", "b                    preview a private HTTPS root", "HTTPS root           replaces only the exact conflicting Serve TCP route", "choose among exact paths", "Ctrl-d/Page Down", "Ctrl-u/Page Up", "Home/End", "Funnel               remains public", "z                    zoom the focused pane", "e/S                  cycle Name ↑, Name ↓, and unsorted order", "CPU% / MEM",
+		"C or Ctrl-l", "U                    clear all selected items", "s                    preview private Serve", "f                    preview public Funnel", "d                    preview Disable", "b                    preview a private HTTPS root", "HTTPS root           replaces only the exact conflicting Serve TCP route", "choose among exact paths", "Ctrl-d/Page Down", "Ctrl-u/Page Up", "Home/End", "Funnel               remains public", "z                    zoom the focused pane", "e/S                  cycle Name ↑, Name ↓, and unsorted order", "w                    toggle mode filter", "CPU% / MEM",
 	} {
 		if !strings.Contains(help, text) {
 			t.Fatalf("help missing %q:\n%s", text, help)

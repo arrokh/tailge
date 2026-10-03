@@ -189,20 +189,29 @@ func footerSortLabel(sortKey string) string {
 	}
 }
 
-func compactFooterStatus(width int, focus, sortKey, httpsRootStatus, progress string) string {
+func (m *workspaceModel) modeFilterStatusLabel() string {
+	if m.modeNotOffOnly {
+		return "w:not-OFF"
+	}
+	return "w:all"
+}
+
+func compactFooterStatus(width int, focus, sortKey, modeFilterStatus, httpsRootStatus, progress string) string {
 	if progress != "" {
 		return progress
 	}
-	parts := []string{focus}
-	if width >= 40 {
-		parts = append(parts, compactSortLabel(sortKey))
+	rootStatus := strings.Replace(httpsRootStatus, "b HTTPS root", "b", 1)
+	if width < 40 {
+		focus = string([]rune(focus)[0])
+		modeFilterStatus = strings.Replace(modeFilterStatus, "w:not-OFF", "w:on", 1)
+		return strings.Join([]string{focus, modeFilterStatus, rootStatus}, " ")
 	}
-	parts = append(parts, strings.Replace(httpsRootStatus, "b HTTPS root", "b", 1))
+	parts := []string{focus, modeFilterStatus, compactSortLabel(sortKey), rootStatus}
 	return strings.Join(parts, " ")
 }
 
-func compactFooterStatusWithShortcuts(width int, focus, sortKey, httpsRootStatus, urlStatus, progress string) string {
-	return compactFooterStatus(width, focus, sortKey, httpsRootStatus, progress) + " " + compactURLShortcutStatus(urlStatus)
+func compactFooterStatusWithShortcuts(width int, focus, sortKey, modeFilterStatus, httpsRootStatus, urlStatus, progress string) string {
+	return compactFooterStatus(width, focus, sortKey, modeFilterStatus, httpsRootStatus, progress) + " " + compactURLShortcutStatus(urlStatus)
 }
 
 func footerKeyHints(width int, focus paneFocus, searching, zoomed, canZoom bool, urlStatus string) string {
@@ -221,7 +230,7 @@ func footerKeyHints(width int, focus paneFocus, searching, zoomed, canZoom bool,
 		}
 	}
 	if width < 40 {
-		return compactURLShortcutStatus(urlStatus) + " · ? Help"
+		return compactURLShortcutStatus(urlStatus) + " w ? Help"
 	}
 	if width < 60 {
 		return "↑↓ Move · " + compactURLShortcutStatus(urlStatus)
@@ -236,9 +245,9 @@ func footerKeyHints(width int, focus paneFocus, searching, zoomed, canZoom bool,
 	if focus == focusDetails {
 		switch {
 		case width >= 120:
-			return "↑↓ Scroll · Tab List · v/V Select · s/f/d Routes · b HTTPS · x Term · e/S Sort · / Find" + zoomHint + " · ? Help · q Quit"
+			return "↑↓ Scroll · Tab List · v/V · s/f/d Routes · b HTTPS · x Term · e/S Sort · w Filter · / Find" + zoomHint + " · ? Help · q Quit"
 		case width >= 100:
-			return "↑↓ Scroll · Tab List · e/S Sort · / Find · ? Help · q Quit" + zoomHint
+			return "↑↓ Scroll · Tab List · e/S Sort · w Filter · / Find · ? Help · q Quit" + zoomHint
 		case width >= 72:
 			return "↑↓ Scroll · Tab List · e/S Sort · ? Help · q Quit" + zoomHint
 		case width >= 48:
@@ -249,9 +258,9 @@ func footerKeyHints(width int, focus paneFocus, searching, zoomed, canZoom bool,
 	}
 	switch {
 	case width >= 120:
-		return "↑↓ Move · Tab Focus · v/V Select · s/f/d Routes · b HTTPS · x Term · e/S Sort · / Find" + zoomHint + " · ? Help · q Quit"
+		return "↑↓ Move · Tab Focus · v/V · s/f/d Routes · b HTTPS · x Term · e/S Sort · w Filter · / Find" + zoomHint + " · ? Help · q Quit"
 	case width >= 100:
-		return "↑↓ Move · Tab Focus · v Mark · s/f/d Routes · e/S Sort · / Find · ? Help · q Quit" + zoomHint
+		return "↑↓ Move · Tab Focus · s/f/d · e/S Sort · w Filter · / Find · ? Help · q Quit" + zoomHint
 	case width >= 72:
 		return "↑↓ Move · Tab Focus · e/S Sort · / Find · ? Help · q Quit"
 	case width >= 48:
@@ -294,7 +303,7 @@ func (m *workspaceModel) renderBottom() string {
 		selection = fmt.Sprintf("  selected:%d", count)
 	}
 	urlStatus := m.urlShortcutStatus()
-	status := fmt.Sprintf("Focus: %s  Sort: %s  %s  %s%s%s", focus, footerSortLabel(m.cfg.Sort), m.httpsRootStatusLabel(), compactURLShortcutStatus(urlStatus), search, selection)
+	status := fmt.Sprintf("Focus: %s  %s  Sort: %s  %s  %s%s%s", focus, m.modeFilterStatusLabel(), footerSortLabel(m.cfg.Sort), m.httpsRootStatusLabel(), compactURLShortcutStatus(urlStatus), search, selection)
 	if progress != "" {
 		status += "  " + progress
 	}
@@ -302,9 +311,9 @@ func (m *workspaceModel) renderBottom() string {
 	statusWidth := maxInt(0, m.width-lipgloss.Width(identityText)-2)
 	if lipgloss.Width(status) > statusWidth {
 		if m.width < 60 {
-			status = compactFooterStatus(m.width, focus, m.cfg.Sort, m.httpsRootStatusLabel(), progress)
+			status = compactFooterStatus(m.width, focus, m.cfg.Sort, m.modeFilterStatusLabel(), m.httpsRootStatusLabel(), progress)
 		} else {
-			status = compactFooterStatusWithShortcuts(m.width, focus, m.cfg.Sort, m.httpsRootStatusLabel(), urlStatus, progress)
+			status = compactFooterStatusWithShortcuts(m.width, focus, m.cfg.Sort, m.modeFilterStatusLabel(), m.httpsRootStatusLabel(), urlStatus, progress)
 		}
 	}
 	status = ansi.Truncate(status, statusWidth, "...")
@@ -321,7 +330,13 @@ func (m *workspaceModel) renderList(width, height int) string {
 	}
 	if len(items) == 0 {
 		if m.query != "" {
+			if m.modeNotOffOnly {
+				return title + "\n\n  NO MATCHING SERVICES\n\n  Press w to include OFF services, or edit/clear search."
+			}
 			return title + "\n\n  NO MATCHING SERVICES\n\n  Clear search with Ctrl-u or edit with /."
+		}
+		if m.modeNotOffOnly {
+			return title + "\n\n  NO SERVICES WITH MODE NOT OFF\n\n  Press w to show all services."
 		}
 		return title + "\n\n  No local listeners or configured routes."
 	}

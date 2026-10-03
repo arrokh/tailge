@@ -22,7 +22,7 @@ func TestWorkspaceSnapshotSharesPortIdentityAcrossPresentationFlows(t *testing.T
 			{ID: "inactive", Routes: []exposuredata.ExposureRoute{{ID: "inactive-route", ProviderKey: "funnel:3000", Target: target, Mode: exposuredata.ExposureFunnel}}, State: exposuredata.ExposureInactive},
 		},
 	}
-	snapshot := newWorkspaceSnapshot(view, "", config.Defaults())
+	snapshot := newWorkspaceSnapshot(view, "", config.Defaults(), false)
 	items := snapshot.Items()
 	if len(items) != 1 || items[0].ID != listener.ID || len(items[0].Routes) != 2 {
 		t.Fatalf("snapshot did not preserve one target identity: %#v", items)
@@ -42,7 +42,7 @@ func TestWorkspaceSnapshotSortDoesNotChangeSharedPortPrimaryTarget(t *testing.T)
 	for _, sortKey := range []string{"port", "name", "name-desc", "address", "exposure", "none"} {
 		cfg := config.Defaults()
 		cfg.Sort = sortKey
-		items := newWorkspaceSnapshot(view, "", cfg).Items()
+		items := newWorkspaceSnapshot(view, "", cfg, false).Items()
 		if len(items) != 1 || items[0].ID != wildcard.ID {
 			t.Fatalf("sort %q changed the shared-port primary row: %#v", sortKey, items)
 		}
@@ -52,7 +52,34 @@ func TestWorkspaceSnapshotSortDoesNotChangeSharedPortPrimaryTarget(t *testing.T)
 	}
 }
 
-func TestWorkspaceSnapshotInheritsRouteStateWhenListenerHasNoRoute(t *testing.T) {
+func TestWorkspaceSnapshotModeFilterDefaultsToAllAndExcludesOnlyOff(t *testing.T) {
+	serveTarget := target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}
+	funnelTarget := target.Target{Address: "127.0.0.1", Port: 3001, Protocol: "tcp"}
+	multipleTarget := target.Target{Address: "127.0.0.1", Port: 3002, Protocol: "tcp"}
+	off := discovery.Listener{ID: "off", Name: "off", Target: target.Target{Address: "127.0.0.1", Port: 2999, Protocol: "tcp"}}
+	serve := discovery.Listener{ID: "serve", Name: "serve", Target: serveTarget}
+	view := exposure.View{Items: []exposure.ReconciledItem{
+		{ID: off.ID, Listener: &off, Mode: exposuredata.ExposureDisabled, State: exposuredata.ExposureState("disabled")},
+		{ID: serve.ID, Listener: &serve, Mode: exposuredata.ExposureServe, State: exposuredata.ExposureActive},
+		{ID: "funnel", Mode: exposuredata.ExposureFunnel, State: exposuredata.ExposureInactive, Routes: []exposuredata.ExposureRoute{{ID: "funnel-route", Target: funnelTarget, Mode: exposuredata.ExposureFunnel}}},
+		{ID: "multiple", Mode: exposuredata.ExposureMultiple, State: exposuredata.ExposureActive, Routes: []exposuredata.ExposureRoute{{ID: "serve-route", Target: multipleTarget, Mode: exposuredata.ExposureServe}, {ID: "funnel-route-2", Target: multipleTarget, Mode: exposuredata.ExposureFunnel}}},
+	}}
+	all := newWorkspaceSnapshot(view, "", config.Defaults(), false).Items()
+	if len(all) != 4 {
+		t.Fatalf("default snapshot unexpectedly filtered services: %#v", all)
+	}
+	filtered := newWorkspaceSnapshot(view, "", config.Defaults(), true).Items()
+	if len(filtered) != 3 {
+		t.Fatalf("mode filter kept OFF services or hid non-OFF modes: %#v", filtered)
+	}
+	for _, item := range filtered {
+		if item.Mode == exposuredata.ExposureDisabled {
+			t.Fatalf("mode filter retained OFF service: %#v", item)
+		}
+	}
+}
+
+func TestWorkspaceSnapshotInheritsNonOffRouteStateForModeFilter(t *testing.T) {
 	target := target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}
 	listener := discovery.Listener{ID: "listener", Name: "web", Target: target}
 	route := exposuredata.ExposureRoute{ID: "route", ProviderKey: "tcp:3000", Target: target, Mode: exposuredata.ExposureServe, State: exposuredata.ExposureActive}
@@ -60,9 +87,9 @@ func TestWorkspaceSnapshotInheritsRouteStateWhenListenerHasNoRoute(t *testing.T)
 		{ID: listener.ID, Listener: &listener, State: exposuredata.ExposureState("disabled"), Mode: exposuredata.ExposureDisabled},
 		{ID: "route-only", Routes: []exposuredata.ExposureRoute{route}, State: exposuredata.ExposureActive, Mode: exposuredata.ExposureServe},
 	}}
-	items := newWorkspaceSnapshot(view, "", config.Defaults()).Items()
+	items := newWorkspaceSnapshot(view, "", config.Defaults(), true).Items()
 	if len(items) != 1 || items[0].State != exposuredata.ExposureActive || items[0].Mode != exposuredata.ExposureServe {
-		t.Fatalf("collapsed listener did not inherit route state: %#v", items)
+		t.Fatalf("mode filter hid or lost the route state on a collapsed listener: %#v", items)
 	}
 }
 
@@ -74,7 +101,7 @@ func TestWorkspaceSnapshotFiltersAfterPortIdentityCollapse(t *testing.T) {
 		{ID: "listener", Listener: &listener, State: exposuredata.ExposureState("disabled"), Mode: exposuredata.ExposureDisabled},
 		{ID: "route-only", Routes: []exposuredata.ExposureRoute{route}, State: exposuredata.ExposureActive, Mode: exposuredata.ExposureFunnel},
 	}}
-	items := newWorkspaceSnapshot(view, "funnel:https=3000", config.Defaults()).Items()
+	items := newWorkspaceSnapshot(view, "funnel:https=3000", config.Defaults(), false).Items()
 	if len(items) != 1 || items[0].ID != "listener" || len(items[0].Routes) != 1 {
 		t.Fatalf("filter split the collapsed target identity: %#v", items)
 	}
@@ -90,7 +117,7 @@ func TestWorkspaceSnapshotDoesNotMutateViewRoutes(t *testing.T) {
 		{ID: "listener", Listener: &listener, Routes: primaryRoutes, State: exposuredata.ExposureActive},
 		{ID: "duplicate", Routes: []exposuredata.ExposureRoute{duplicateRoute}, State: exposuredata.ExposureActive},
 	}}
-	items := newWorkspaceSnapshot(view, "", config.Defaults()).Items()
+	items := newWorkspaceSnapshot(view, "", config.Defaults(), false).Items()
 	if len(items) != 1 || len(items[0].Routes) != 2 {
 		t.Fatalf("snapshot did not merge routes: %#v", items)
 	}

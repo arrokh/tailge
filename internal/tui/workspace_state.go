@@ -35,6 +35,7 @@ type workspaceState struct {
 	zoomed bool
 
 	query             string
+	modeNotOffOnly    bool
 	searching         bool
 	previousQ         string
 	selectedID        string
@@ -285,7 +286,19 @@ func (s *workspaceState) selectedItem() (exposure.ReconciledItem, bool) {
 }
 
 func (s workspaceState) items() []exposure.ReconciledItem {
-	return newWorkspaceSnapshot(s.view, s.query, s.cfg).Items()
+	return newWorkspaceSnapshot(s.view, s.query, s.cfg, s.modeNotOffOnly).Items()
+}
+
+func (s *workspaceState) toggleModeNotOffFilter() {
+	previousID, previousIndex := s.selectedID, s.selectedIdx
+	s.modeNotOffOnly = !s.modeNotOffOnly
+	s.reselect(previousID, previousIndex)
+	s.updateVisualSelection()
+	if s.modeNotOffOnly {
+		s.transient = "Mode filter: showing services whose mode is not OFF; press w to show all"
+	} else {
+		s.transient = "Mode filter: showing all services"
+	}
 }
 
 func (s *workspaceState) reselect(previousID string, previousIndex int) {

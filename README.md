@@ -105,6 +105,7 @@ TCP listener discovery never implies HTTP: raw routes remain protocol-agnostic. 
 | `j` / `k`, arrows | Navigate the service list |
 | `gg` / `G` | Jump to the first / last service |
 | `/` | Search the list |
+| `w` | Toggle filter to services whose mode is not OFF (default: all services) |
 | `Tab` / `Shift-Tab` | Switch between list and details |
 | `s` / `f` / `d` | Open Serve / Funnel / Disable; press the same key in the selector to choose, then confirm separately |
 | `b` | Preview a private HTTPS root on the selected TCP listener's exact port (explicit HTTP intent) |
