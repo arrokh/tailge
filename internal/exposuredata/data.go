@@ -38,7 +38,7 @@ const (
 )
 
 const (
-	NumericIPv6HTTPSBackendRecommendation = "If Tailscale returns `unknown proxy destination`, first disable this exact handler, then recreate it with `--localhost-backend` or toggle `Ctrl+B` in the `p` dialog; hostname resolution weakens exact IPv6 address guarantees."
+	NumericIPv6HTTPSBackendRecommendation = "If Tailscale returns `unknown proxy destination`, first disable this exact handler, then recreate it with the CLI's `--localhost-backend` option. The TUI preserves numeric IPv6 backends and has no hostname-resolution override. Hostname resolution weakens exact IPv6 address guarantees."
 	LocalhostHTTPSBackendRecommendation   = "This route explicitly uses `http://localhost:<port>`; hostname resolution weakens the exact IPv6 address guarantee."
 )
 

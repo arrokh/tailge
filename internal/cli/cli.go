@@ -209,7 +209,7 @@ func (a app) httpExposure(args []string, stdout, stderr io.Writer) int {
 	if args[0] == "disable" {
 		mode = exposuredata.ExposureDisabled
 	}
-	parsed, err := parseFlagValues(args[1:], map[string]bool{"confirm-public": false, "confirm-external": false, "json": false, "root": false, "localhost-backend": false, "address": true, "path": true, "https-port": true})
+	parsed, err := parseFlagValues(args[1:], map[string]bool{"confirm-public": false, "confirm-external": false, "replace-raw-tcp": false, "json": false, "root": false, "localhost-backend": false, "address": true, "path": true, "https-port": true})
 	if err != nil {
 		return reportMaybeJSON(stdout, stderr, err, wantsJSON(args[1:]))
 	}
@@ -242,6 +242,12 @@ func (a app) runHTTPPathExposure(mode exposuredata.ExposureMode, parsed flagValu
 	}
 	if !root && httpsPort != 443 {
 		return reportMaybeJSON(stdout, stderr, invalidArgs("named HTTP paths use HTTPS port 443; use --root for a custom HTTPS port"), parsed.bools["json"])
+	}
+	if parsed.bools["replace-raw-tcp"] && (!root || mode != exposuredata.ExposureServe) {
+		return reportMaybeJSON(stdout, stderr, invalidArgs("--replace-raw-tcp is only valid for a private Serve HTTPS root"), parsed.bools["json"])
+	}
+	if root && mode != exposuredata.ExposureDisabled && parsed.bools["confirm-external"] && !parsed.bools["replace-raw-tcp"] {
+		return reportMaybeJSON(stdout, stderr, invalidArgs("--confirm-external on an HTTPS root requires --replace-raw-tcp"), parsed.bools["json"])
 	}
 	if root && mode == exposuredata.ExposureFunnel {
 		return reportMaybeJSON(stdout, stderr, fault.NewError(fault.ErrUnsupported, "cli", "custom-port HTTPS root routes are currently available only through private Serve", false, "read_only", "Use a named HTTP path for Funnel, after reviewing its shared public visibility."), parsed.bools["json"])
@@ -334,7 +340,8 @@ func (a app) runHTTPPathExposure(mode exposuredata.ExposureMode, parsed flagValu
 		route = matches[0]
 		receipt, applyErr = controller.ApplyRouteIdentity(ctx, target, route.ID, parsed.bools["confirm-external"], cfg.OperationTimeout)
 	} else if root {
-		receipt, applyErr = controller.ApplyHTTPSRoot(ctx, target, httpsPort, parsed.bools["localhost-backend"], cfg.OperationTimeout)
+		options := exposure.HTTPSRootOptions{HTTPSPort: httpsPort, LocalhostBackendAlias: parsed.bools["localhost-backend"], ReplaceRawTCP: parsed.bools["replace-raw-tcp"], ConfirmExternal: parsed.bools["confirm-external"]}
+		receipt, applyErr = controller.ApplyHTTPSRootWithOptions(ctx, target, options, cfg.OperationTimeout)
 		route = exposuredata.ExposureRoute{ProviderKey: string(mode) + ":https=" + strconv.Itoa(httpsPort), Kind: exposuredata.RouteKindHTTPSRoot, Path: "/", Target: target, Mode: mode}
 		if applyErr == nil && receipt.Verified {
 			if observed, ok := observedHTTPSRoute(ctx, a.tailscale, target, mode, "/", httpsPort, true, parsed.bools["localhost-backend"]); ok {
@@ -381,8 +388,10 @@ func (a app) runHTTPPathExposure(mode exposuredata.ExposureMode, parsed flagValu
 		if route.Recommendation != "" {
 			fmt.Fprintf(stdout, "Next: %s\n", route.Recommendation)
 		}
+	} else if root {
+		fmt.Fprintf(stdout, "HTTPS root on port %d operation %s completed; provider verification is pending\n", httpsPort, receipt.ID)
 	} else {
-		fmt.Fprintf(stdout, "HTTPS path %s operation %s completed\n", path, receipt.ID)
+		fmt.Fprintf(stdout, "HTTPS path %s operation %s completed; provider verification is pending\n", path, receipt.ID)
 	}
 	return 0
 }
@@ -859,7 +868,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "       tailge exposure status [--json]")
 	fmt.Fprintln(w, "       tailge exposure serve|funnel|disable TARGET [--address ADDR] [--mode serve|funnel] [--confirm-public] [--confirm-external] [--json]")
 	fmt.Fprintln(w, "       tailge exposure http serve|funnel TARGET [--path SLUG] [--localhost-backend] [--address ADDR] [--confirm-public] [--json]")
-	fmt.Fprintln(w, "       tailge exposure http serve TARGET --root --https-port PORT [--localhost-backend] [--address ADDR] [--json]")
+	fmt.Fprintln(w, "       tailge exposure http serve TARGET --root --https-port PORT [--replace-raw-tcp [--confirm-external]] [--localhost-backend] [--address ADDR] [--json]")
 	fmt.Fprintln(w, "       tailge exposure http disable TARGET (--path SLUG | --root --https-port PORT) [--address ADDR] [--confirm-external] [--json]")
 	fmt.Fprintln(w, "       tailge config path|show|set KEY VALUE|validate | tailge completion bash|zsh|fish")
 }

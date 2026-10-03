@@ -37,7 +37,7 @@ type Config struct {
 }
 
 func Defaults() Config {
-	return Config{Version: 1, RefreshInterval: 5 * time.Second, Sort: "port", ColorTheme: "auto", ShowSystemListeners: true, ShowInactiveConfiguredPorts: true, OperationTimeout: 15 * time.Second}
+	return Config{Version: 1, RefreshInterval: 5 * time.Second, Sort: "name", ColorTheme: "auto", ShowSystemListeners: true, ShowInactiveConfiguredPorts: true, OperationTimeout: 15 * time.Second}
 }
 
 func (c Config) Validate() error {
@@ -51,9 +51,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("operation_timeout must be between 1s and 10m")
 	}
 	switch c.Sort {
-	case "port", "name", "address", "exposure":
+	case "port", "name", "name-desc", "address", "exposure", "none":
 	default:
-		return fmt.Errorf("sort must be one of port, name, address, exposure")
+		return fmt.Errorf("sort must be one of port, name, name-desc, address, exposure, none")
 	}
 	switch c.ColorTheme {
 	case "auto", "dark", "light":

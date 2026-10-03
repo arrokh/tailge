@@ -10,7 +10,6 @@ func TestEffectForKeyKeepsExternalActionsTyped(t *testing.T) {
 		{"r", EffectRefresh},
 		{"R", EffectRetry},
 		{"o", EffectOpenObservedURL},
-		{"O", EffectOpenLocalURL},
 		{"y", EffectCopyURL},
 		{"c", EffectCancelOperation},
 		{"x", EffectTerminateProcess},
@@ -23,7 +22,9 @@ func TestEffectForKeyKeepsExternalActionsTyped(t *testing.T) {
 			t.Errorf("EffectForKey(%q) = %#v, %t; want kind %v", test.key, got, ok, test.kind)
 		}
 	}
-	if _, ok := EffectForKey("s"); ok {
-		t.Fatal("local action was incorrectly classified as an external effect")
+	for _, key := range []string{"s", "O"} {
+		if _, ok := EffectForKey(key); ok {
+			t.Fatalf("disabled/local key %q was incorrectly mapped to an external effect", key)
+		}
 	}
 }

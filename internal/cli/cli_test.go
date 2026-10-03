@@ -101,6 +101,45 @@ func customHTTPSRootTestAdapter(active *bool, calls *[]string) *tailscale.Adapte
 	})}
 }
 
+func rawTCPConversionTestAdapter(state *int, calls *[]string) *tailscale.Adapter {
+	const status = `{"BackendState":"Running","HaveNodeKey":true,"TailscaleIPs":["100.64.0.2"],"Self":{"HostName":"devbox","DNSName":"devbox.tailnet.ts.net.","TailscaleIPs":["100.64.0.2"],"Online":true}}`
+	const rawRoute = `{"TCP":{"4321":"127.0.0.1:4321"}}`
+	const httpsRoot = `{"TCP":{"4321":{"HTTPS":true}},"Web":{"devbox.tailnet.ts.net:4321":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:4321"}}}},"AllowFunnel":{"devbox.tailnet.ts.net:4321":false}}`
+	return &tailscale.Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+		command := strings.Join(args, " ")
+		*calls = append(*calls, command)
+		switch command {
+		case "version":
+			return runner.Result{Stdout: "1.102.4\n"}, nil
+		case "status --json":
+			return runner.Result{Stdout: status}, nil
+		case "serve --help":
+			return runner.Result{Stdout: "status clear --https value --tcp value --set-path value"}, nil
+		case "funnel --help":
+			return runner.Result{Stdout: "status reset --https value --tcp value --set-path value off"}, nil
+		case "serve status --json":
+			switch *state {
+			case 1:
+				return runner.Result{Stdout: rawRoute}, nil
+			case 2:
+				return runner.Result{Stdout: httpsRoot}, nil
+			default:
+				return runner.Result{Stdout: `{}`}, nil
+			}
+		case "funnel status --json":
+			return runner.Result{Stdout: `{}`}, nil
+		case "serve --bg --tcp=4321 off":
+			*state = 0
+			return runner.Result{}, nil
+		case "serve --bg --yes --set-path=/ --https=4321 http://127.0.0.1:4321":
+			*state = 2
+			return runner.Result{}, nil
+		default:
+			return runner.Result{}, errors.New("unexpected command: " + command)
+		}
+	})}
+}
+
 func TestVersionReportsBuildCommitAndRepository(t *testing.T) {
 	originalCommit := buildinfo.Commit
 	buildinfo.Commit = "3d16efbb9058b146749de0d81aa7dd5eede3e9da"
@@ -186,6 +225,51 @@ func TestHTTPSRootCLIUsesExplicitCustomPortAndExactRemoval(t *testing.T) {
 	}
 }
 
+func TestHTTPSRootCLIConvertsExactRawTCPRouteOnlyWithExplicitConfirmation(t *testing.T) {
+	manager, err := config.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manager.Path, []byte("version: 1\nserve_probe_version: 1.102.4\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listenerTarget := target.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
+	observer := &staticListenerObserver{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{{ID: "node-listener", Target: listenerTarget, Name: "Node.js", Process: "node", PID: 41, Scope: target.ScopeLoopback, Metadata: discovery.MetadataComplete}}}}
+	state := 1
+	var calls []string
+	application := app{config: manager, discoverer: observer, tailscale: rawTCPConversionTestAdapter(&state, &calls)}
+	var stdout, stderr bytes.Buffer
+	args := []string{"http", "serve", listenerTarget.String(), "--root", "--https-port", "4321", "--replace-raw-tcp", "--json"}
+	code := application.exposure(args, &stdout, &stderr)
+	if code == 0 || (!strings.Contains(stderr.String(), "unknown/external ownership") && !strings.Contains(stdout.String(), "unknown/external ownership")) || state != 1 {
+		t.Fatalf("unknown-owned route was converted without confirmation: code=%d state=%d stdout=%q stderr=%q", code, state, stdout.String(), stderr.String())
+	}
+	for _, call := range calls {
+		if strings.HasPrefix(call, "serve --bg") {
+			t.Fatalf("CLI mutated the route before external confirmation: %v", calls)
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	args = append(args, "--confirm-external")
+	code = application.exposure(args, &stdout, &stderr)
+	if code != 0 || state != 2 || !strings.Contains(stdout.String(), `"kind": "https_root"`) || !strings.Contains(stdout.String(), `"url": "https://devbox.tailnet.ts.net:4321/"`) {
+		t.Fatalf("confirmed same-port root conversion failed: code=%d state=%d stdout=%q stderr=%q", code, state, stdout.String(), stderr.String())
+	}
+	if !containsCall(calls, "serve --bg --tcp=4321 off") || !containsCall(calls, "serve --bg --yes --set-path=/ --https=4321 http://127.0.0.1:4321") {
+		t.Fatalf("CLI did not remove only the exact TCP selector and configure the HTTPS root: %v", calls)
+	}
+	for _, call := range calls {
+		if strings.HasPrefix(call, "funnel ") && call != "funnel --help" && call != "funnel status --json" {
+			t.Fatalf("private HTTPS-root conversion invoked Funnel: %v", calls)
+		}
+	}
+}
+
 func TestNamedHTTPPathCLIExplicitlySelectsLocalhostBackendForIPv6(t *testing.T) {
 	manager, err := config.NewManager(t.TempDir())
 	if err != nil {
@@ -247,6 +331,9 @@ func TestHTTPSRootCLIRequiresExplicitPortAndAliasOptIn(t *testing.T) {
 		want string
 	}{
 		{name: "root port required", args: []string{"http", "serve", "[::1]:4321", "--root"}, want: "requires an explicit --https-port"},
+		{name: "raw conversion requires root", args: []string{"http", "serve", "[::1]:4321", "--replace-raw-tcp"}, want: "only valid for a private Serve HTTPS root"},
+		{name: "root external confirmation requires conversion intent", args: []string{"http", "serve", "[::1]:4321", "--root", "--https-port", "4321", "--confirm-external"}, want: "requires --replace-raw-tcp"},
+		{name: "raw conversion is private Serve only", args: []string{"http", "funnel", "[::1]:4321", "--root", "--https-port", "4321", "--replace-raw-tcp"}, want: "only valid for a private Serve HTTPS root"},
 		{name: "path and root conflict", args: []string{"http", "serve", "[::1]:4321", "--root", "--https-port", "4321", "--path", "api"}, want: "mutually exclusive"},
 		{name: "named path stays on standard port", args: []string{"http", "serve", "[::1]:4321", "--path", "api", "--https-port", "4321"}, want: "use --root"},
 		{name: "alias requires IPv6 listener", args: []string{"http", "serve", "127.0.0.1:4321", "--path", "api", "--localhost-backend"}, want: "only valid for IPv6 listeners"},

@@ -35,12 +35,20 @@ func (c *Controller) applyHTTPPath(ctx context.Context, target targetmodel.Targe
 	return c.trackOperation(ctx, op)
 }
 
-func (c *Controller) applyHTTPSRoot(ctx context.Context, target targetmodel.Target, httpsPort int, localhostBackendAlias bool, timeout time.Duration, approval *MutationApproval) (exposuredata.OperationReceipt, error) {
-	op := c.newExactOperation(target, exposuredata.ExposureServe, "", "", exposuredata.ExposureDisabled, false, false, timeout, approval)
+func (c *Controller) applyHTTPSRoot(ctx context.Context, target targetmodel.Target, options HTTPSRootOptions, timeout time.Duration, approval *MutationApproval) (exposuredata.OperationReceipt, error) {
+	mode := options.Mode
+	if mode == "" {
+		mode = exposuredata.ExposureServe
+	}
+	op := c.newExactOperation(target, mode, "", "", exposuredata.ExposureDisabled, options.ConfirmFunnel, options.ConfirmExternal, timeout, approval)
 	op.httpPath = "/"
-	op.httpsPort = httpsPort
+	op.httpsPort = options.HTTPSPort
 	op.httpsRootIntent = true
-	op.localhostBackendAlias = localhostBackendAlias
+	op.localhostBackendAlias = options.LocalhostBackendAlias
+	op.replaceRawTCP = options.ReplaceRawTCP
+	op.expectedRawTCPRouteID = options.ExpectedRawTCPRouteID
+	op.replaceExistingRoute = options.ReplaceExistingRoute
+	op.expectedRouteID = options.ExpectedRouteID
 	return c.trackOperation(ctx, op)
 }
 

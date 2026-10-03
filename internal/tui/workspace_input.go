@@ -65,16 +65,36 @@ func (m *workspaceModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "space", " ":
 		m.openAction(nil)
+	case "e", "S":
+		return m, m.cycleSort()
+	case "w":
+		m.toggleModeNotOffFilter()
+		m.clampOffsets()
 	case "s":
 		m.openAction(ptrMode(exposuredata.ExposureServe))
 	case "f":
 		m.openAction(ptrMode(exposuredata.ExposureFunnel))
 	case "d":
 		m.openAction(ptrMode(exposuredata.ExposureDisabled))
-	case "p":
-		m.openHTTPPathInput()
+	case "O":
+		return m, m.openLocalURL()
 	case "v":
 		m.toggleCurrentSelection()
+	case "z":
+		if !splitViewAvailable(m.width, m.height) {
+			m.transient = "Zoom requires split view (100 columns × 24 rows)"
+			return m, nil
+		}
+		m.zoomed = !m.zoomed
+		if m.zoomed {
+			pane := "List"
+			if m.focus == focusDetails {
+				pane = "Details"
+			}
+			m.transient = pane + " pane zoomed; press z to restore split view"
+		} else {
+			m.transient = "Split view restored"
+		}
 	case "V":
 		m.toggleVisualSelection()
 	case "U":
@@ -254,36 +274,6 @@ func (m *workspaceModel) updateModal(msg tea.KeyMsg, key string) (tea.Model, tea
 		}
 		m.helpOffset = clamp(m.helpOffset, 0, m.helpMaxOffset())
 		return m, nil
-	case modalHTTPPath:
-		if key == "ctrl+b" {
-			item, ok := m.actionAnchorItem()
-			if ok && item.Listener != nil && supportsLocalhostBackendAlias(item.Listener.Target) {
-				m.httpPathLocalhostBackend = !m.httpPathLocalhostBackend
-			} else {
-				m.setBanner("localhost backend alias is only available for IPv6 listeners", true)
-			}
-			return m, nil
-		}
-		if key == "esc" {
-			m.modal = modalNone
-			m.discardHTTPPathAction()
-			return m, nil
-		}
-		if key == "tab" || key == "shift+tab" {
-			if m.httpPathMode == exposuredata.ExposureServe {
-				m.httpPathMode = exposuredata.ExposureFunnel
-			} else {
-				m.httpPathMode = exposuredata.ExposureServe
-			}
-			return m, nil
-		}
-		if key == "enter" {
-			m.submitHTTPPath()
-			return m, nil
-		}
-		updated, cmd := m.pathInput.Update(msg)
-		m.pathInput = updated
-		return m, cmd
 	case modalChooseURL:
 		return m.updateURLChoiceModal(msg, key)
 	case modalPalette:
@@ -335,17 +325,32 @@ func (m *workspaceModel) updateActionModal(_ tea.KeyMsg, key string) (tea.Model,
 		m.modal = modalNone
 		return m, nil
 	}
-	if key == "up" || key == "k" {
-		m.actionSession.index = (m.actionSession.index + 2) % 3
+	choiceCount := len(m.actionSession.choices)
+	switch key {
+	case "up", "k":
+		if choiceCount > 0 {
+			m.actionSession.index = (m.actionSession.index + choiceCount - 1) % choiceCount
+		}
+		return m, nil
+	case "down", "j":
+		if choiceCount > 0 {
+			m.actionSession.index = (m.actionSession.index + 1) % choiceCount
+		}
+		return m, nil
+	case "d":
+		m.actionSession.index = modeIndex(exposuredata.ExposureDisabled)
+	case "s":
+		m.actionSession.index = modeIndex(exposuredata.ExposureServe)
+	case "f":
+		m.actionSession.index = modeIndex(exposuredata.ExposureFunnel)
+	case "enter":
+	default:
 		return m, nil
 	}
-	if key == "down" || key == "j" {
-		m.actionSession.index = (m.actionSession.index + 1) % 3
-		return m, nil
-	}
-	if key != "enter" {
-		return m, nil
-	}
+	return m.chooseAction()
+}
+
+func (m *workspaceModel) chooseAction() (tea.Model, tea.Cmd) {
 	choice, ok := m.actionSession.selectedChoice()
 	if !ok {
 		m.modal = modalNone
@@ -365,6 +370,10 @@ func (m *workspaceModel) updateActionModal(_ tea.KeyMsg, key string) (tea.Model,
 		return m, nil
 	}
 	mode := choice.mode
+	if mode == exposuredata.ExposureServe || mode == exposuredata.ExposureFunnel {
+		m.openHTTPSRootPreview(mode)
+		return m, nil
+	}
 	allSame := len(items) > 0
 	for _, item := range items {
 		if !workspace.SameStateForItem(m.view, item, mode) {
@@ -437,8 +446,8 @@ func (m *workspaceModel) beginConfirmation(mode exposuredata.ExposureMode) (tea.
 func (m *workspaceModel) updateConfirmModal(_ tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 	if key == "esc" {
 		m.modal = modalNone
-		if m.httpPathAction {
-			m.discardHTTPPathAction()
+		if m.httpsRootAction {
+			m.discardHTTPSRootAction()
 		}
 		return m, nil
 	}
@@ -449,8 +458,8 @@ func (m *workspaceModel) updateConfirmModal(_ tea.KeyMsg, key string) (tea.Model
 	if key == "enter" {
 		if !m.actionSession.confirm {
 			m.modal = modalNone
-			if m.httpPathAction {
-				m.discardHTTPPathAction()
+			if m.httpsRootAction {
+				m.discardHTTPSRootAction()
 			}
 			m.transient = "Cancelled; no changes made"
 			return m, nil

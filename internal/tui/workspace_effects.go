@@ -20,8 +20,6 @@ func (m *workspaceModel) executeWorkspaceEffect(effect workspace.Effect) tea.Cmd
 		return m.startRetry()
 	case workspace.EffectOpenObservedURL:
 		return m.openSelectedURL()
-	case workspace.EffectOpenLocalURL:
-		return m.openSelectedLocalURL()
 	case workspace.EffectCopyURL:
 		return m.copyURL()
 	case workspace.EffectApplyExposure:

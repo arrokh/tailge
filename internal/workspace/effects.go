@@ -12,7 +12,6 @@ const (
 	EffectRefresh
 	EffectRetry
 	EffectOpenObservedURL
-	EffectOpenLocalURL
 	EffectCopyURL
 	EffectApplyExposure
 	EffectCancelOperation
@@ -38,8 +37,6 @@ func EffectForKey(key string) (Effect, bool) {
 		kind = EffectRetry
 	case "o":
 		kind = EffectOpenObservedURL
-	case "O":
-		kind = EffectOpenLocalURL
 	case "y":
 		kind = EffectCopyURL
 	case "c":

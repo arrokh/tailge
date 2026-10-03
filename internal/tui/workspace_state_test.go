@@ -40,7 +40,6 @@ func TestWorkspaceStateMapsExternalKeysToExplicitEffects(t *testing.T) {
 		{"r", workspace.EffectRefresh},
 		{"R", workspace.EffectRetry},
 		{"o", workspace.EffectOpenObservedURL},
-		{"O", workspace.EffectOpenLocalURL},
 		{"y", workspace.EffectCopyURL},
 		{"c", workspace.EffectCancelOperation},
 		{"x", workspace.EffectTerminateProcess},
@@ -53,8 +52,10 @@ func TestWorkspaceStateMapsExternalKeysToExplicitEffects(t *testing.T) {
 			t.Errorf("key %q mapped to %#v, want %v", test.key, effect, test.kind)
 		}
 	}
-	if _, ok := workspace.EffectForKey("s"); ok {
-		t.Fatal("local action key unexpectedly produced an external effect")
+	for _, key := range []string{"s", "O"} {
+		if _, ok := workspace.EffectForKey(key); ok {
+			t.Fatalf("local/disabled action key %q unexpectedly produced an external effect", key)
+		}
 	}
 }
 

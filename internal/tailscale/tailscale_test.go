@@ -3,6 +3,7 @@ package tailscale
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -144,6 +145,59 @@ func TestReadinessSeparatesServeAndFunnelMutationEvidence(t *testing.T) {
 	}
 }
 
+func TestLegacyFunnelCannotClaimRawTCPReadinessOrMutate(t *testing.T) {
+	calls := []string{}
+	adapter := &Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+		command := strings.Join(args, " ")
+		calls = append(calls, command)
+		switch command {
+		case "version":
+			return runner.Result{Stdout: "1.80.0\n"}, nil
+		case "status --json":
+			return runner.Result{Stdout: statusJSON("Running", true)}, nil
+		case "serve --help":
+			return runner.Result{Stdout: "serve status clear --https --tcp"}, nil
+		case "funnel --help":
+			return runner.Result{Stdout: "funnel status {on|off}"}, nil
+		case "serve status --json":
+			return runner.Result{Stdout: `{"TCP":{}}`}, nil
+		case "funnel status --json":
+			return runner.Result{Stdout: `{}`}, nil
+		default:
+			return runner.Result{}, errors.New("unexpected command: " + command)
+		}
+	})}
+
+	report, err := adapter.Readiness(context.Background(), ReadinessOptions{ServeProbeVersion: "1.80.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var funnel readinessmodel.ModeReadiness
+	for _, mode := range report.Modes {
+		if mode.Mode == exposuredata.ExposureFunnel {
+			funnel = mode
+		}
+	}
+	if funnel.Status != readinessmodel.ReadinessReadOnly || len(funnel.Checks) == 0 || !strings.Contains(funnel.Checks[0].Message, "raw-TCP") {
+		t.Fatalf("legacy Funnel was not reported read-only for raw TCP: %#v", funnel)
+	}
+
+	calls = nil
+	_, err = adapter.Set(context.Background(), ExposureChange{
+		Target:        target.Target{Address: "192.168.1.20", Port: 3000, Protocol: "tcp"},
+		Mode:          exposuredata.ExposureFunnel,
+		Preconditions: ExposurePrecondition{RouteIDsHash: hashIDs(nil), AllRoutesHash: RoutesHash(nil)},
+	})
+	if err == nil || fault.AsAppError(err).Code != fault.ErrUnsupported {
+		t.Fatalf("legacy Funnel raw TCP mutation was not refused: %v", err)
+	}
+	for _, command := range calls {
+		if strings.HasPrefix(command, "funnel --bg") {
+			t.Fatalf("legacy Funnel mutation ran despite unsupported raw TCP: %q", command)
+		}
+	}
+}
+
 func TestListPreservesDependencyExitClassWhenRoutesAreUnavailable(t *testing.T) {
 	adapter := &Adapter{Binary: "/missing/tailscale", Now: time.Now}
 	snapshot, err := adapter.List(context.Background())
@@ -179,6 +233,19 @@ func TestReadinessFailureStillReportsBothModes(t *testing.T) {
 	for _, mode := range report.Modes {
 		if mode.Status != readinessmodel.ReadinessNotReady && mode.Status != readinessmodel.ReadinessUnknown {
 			t.Fatalf("mode %s hid readiness failure: %s", mode.Mode, mode.Status)
+		}
+	}
+}
+
+func TestFunnelHTTPSPortSupport(t *testing.T) {
+	for _, port := range []int{443, 8443, 10000} {
+		if !FunnelHTTPSPortSupported(port) {
+			t.Errorf("Funnel HTTPS port %d was rejected", port)
+		}
+	}
+	for _, port := range []int{3000, 4321, 65535} {
+		if FunnelHTTPSPortSupported(port) {
+			t.Errorf("unsupported Funnel HTTPS port %d was accepted", port)
 		}
 	}
 }
@@ -443,55 +510,250 @@ func TestHTTPBackendPreservesIPv6UnlessLocalhostAliasIsExplicit(t *testing.T) {
 	}
 }
 
-func TestTargetArgumentUsesReachableBackendAddress(t *testing.T) {
+func TestTCPBackendArgumentPreservesSpecificAndTranslatesWildcardAddresses(t *testing.T) {
 	cases := []struct {
 		name   string
 		target target.Target
 		want   string
 	}{
-		{name: "loopback", target: target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}, want: "127.0.0.1:3000"},
-		{name: "ipv6 loopback", target: target.Target{Address: "::1", Port: 3000, Protocol: "tcp"}, want: "http://localhost:3000"},
-		{name: "ipv4 wildcard", target: target.Target{Address: "0.0.0.0", Port: 3000, Protocol: "tcp"}, want: "http://127.0.0.1:3000"},
-		{name: "ipv6 wildcard", target: target.Target{Address: "::", Port: 3000, Protocol: "tcp"}, want: "http://[::1]:3000"},
-		{name: "local network", target: target.Target{Address: "192.168.1.20", Port: 3000, Protocol: "tcp"}, want: "http://192.168.1.20:3000"},
+		{name: "ipv4 loopback", target: target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}, want: "tcp://127.0.0.1:3000"},
+		{name: "ipv6 loopback", target: target.Target{Address: "::1", Port: 3000, Protocol: "tcp"}, want: "tcp://[::1]:3000"},
+		{name: "ipv4 wildcard", target: target.Target{Address: "0.0.0.0", Port: 3000, Protocol: "tcp"}, want: "tcp://127.0.0.1:3000"},
+		{name: "ipv6 wildcard", target: target.Target{Address: "::", Port: 3000, Protocol: "tcp"}, want: "tcp://[::1]:3000"},
+		{name: "specific ipv4", target: target.Target{Address: "192.168.1.20", Port: 3000, Protocol: "tcp"}, want: "tcp://192.168.1.20:3000"},
+		{name: "specific ipv6", target: target.Target{Address: "fd7a:115c:a1e0::20", Port: 3000, Protocol: "tcp"}, want: "tcp://[fd7a:115c:a1e0::20]:3000"},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			if got := targetArgument(test.target); got != test.want {
-				t.Fatalf("targetArgument(%#v) = %q, want %q", test.target, got, test.want)
+			got, err := rawTCPBackendArgument(test.target, "")
+			if err != nil || got != test.want {
+				t.Fatalf("rawTCPBackendArgument(%#v, empty) = %q, err=%v; want %q", test.target, got, err, test.want)
 			}
 		})
 	}
 }
 
-func TestSetUsesLoopbackBackendForWildcardTarget(t *testing.T) {
+func TestRawTCPBackendArgumentPreservesRestoredAddressAndTransport(t *testing.T) {
+	cases := []struct {
+		name     string
+		selected target.Target
+		backend  string
+		want     string
+		wantErr  bool
+	}{
+		{name: "scheme-less non-loopback IPv4 status", selected: target.Target{Address: "192.168.1.20", Port: 3000, Protocol: "tcp"}, backend: "192.168.1.20:3000", want: "tcp://192.168.1.20:3000"},
+		{name: "scheme-less non-loopback IPv6 status", selected: target.Target{Address: "fd7a:115c:a1e0::20", Port: 3000, Protocol: "tcp"}, backend: "[fd7a:115c:a1e0::20]:3000", want: "tcp://[fd7a:115c:a1e0::20]:3000"},
+		{name: "lowest supported port", selected: target.Target{Address: "192.168.1.20", Port: 1, Protocol: "tcp"}, backend: "192.168.1.20:1", want: "tcp://192.168.1.20:1"},
+		{name: "highest supported port", selected: target.Target{Address: "fd7a:115c:a1e0::20", Port: 65535, Protocol: "tcp"}, backend: "[fd7a:115c:a1e0::20]:65535", want: "tcp://[fd7a:115c:a1e0::20]:65535"},
+		{name: "wildcard IPv4 maps to covered loopback", selected: target.Target{Address: "0.0.0.0", Port: 3000, Protocol: "tcp"}, backend: "127.0.0.1:3000", want: "tcp://127.0.0.1:3000"},
+		{name: "wildcard IPv6 maps to covered loopback", selected: target.Target{Address: "::", Port: 3000, Protocol: "tcp"}, backend: "tcp://[::1]:3000", want: "tcp://[::1]:3000"},
+		{name: "captured localhost spelling is preserved", selected: target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}, backend: "localhost:3000", want: "tcp://localhost:3000"},
+		{name: "IPv6 loopback remains numeric", selected: target.Target{Address: "::1", Port: 3000, Protocol: "tcp"}, backend: "tcp://[::1]:3000", want: "tcp://[::1]:3000"},
+		{name: "HTTP backend rejected", selected: target.Target{Address: "192.168.1.20", Port: 3000, Protocol: "tcp"}, backend: "http://192.168.1.20:3000", wantErr: true},
+		{name: "different backend address rejected", selected: target.Target{Address: "192.168.1.20", Port: 3000, Protocol: "tcp"}, backend: "192.168.1.21:3000", wantErr: true},
+		{name: "different backend port rejected", selected: target.Target{Address: "192.168.1.20", Port: 3000, Protocol: "tcp"}, backend: "192.168.1.20:3001", wantErr: true},
+		{name: "wildcard cannot restore a different loopback address", selected: target.Target{Address: "0.0.0.0", Port: 3000, Protocol: "tcp"}, backend: "127.0.0.2:3000", wantErr: true},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := rawTCPBackendArgument(test.selected, test.backend)
+			if (err != nil) != test.wantErr || got != test.want {
+				t.Fatalf("rawTCPBackendArgument(%#v, %q) = %q, err=%v; want %q, error=%t", test.selected, test.backend, got, err, test.want, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestRawTCPBackendMatchesExactSelectedTarget(t *testing.T) {
+	cases := []struct {
+		name     string
+		selected target.Target
+		backend  string
+		want     bool
+	}{
+		{name: "exact loopback", selected: target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}, backend: "tcp://127.0.0.1:3000", want: true},
+		{name: "scheme-less status", selected: target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}, backend: "127.0.0.1:3000", want: true},
+		{name: "covered wildcard loopback", selected: target.Target{Address: "0.0.0.0", Port: 3000, Protocol: "tcp"}, backend: "tcp://127.0.0.1:3000", want: true},
+		{name: "different address", selected: target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}, backend: "tcp://127.0.0.2:3000", want: false},
+		{name: "different port", selected: target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}, backend: "tcp://127.0.0.1:3001", want: false},
+		{name: "missing backend identity", selected: target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}, backend: "", want: false},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if got := RawTCPBackendMatchesTarget(test.selected, test.backend); got != test.want {
+				t.Fatalf("RawTCPBackendMatchesTarget(%#v, %q) = %t, want %t", test.selected, test.backend, got, test.want)
+			}
+		})
+	}
+}
+
+func TestHTTPBackendArgumentSupportsListenerAddressFamilies(t *testing.T) {
+	cases := []struct {
+		name   string
+		target target.Target
+		want   string
+	}{
+		{name: "ipv4 loopback", target: target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}, want: "http://127.0.0.1:3000"},
+		{name: "ipv6 loopback stays exact", target: target.Target{Address: "::1", Port: 3000, Protocol: "tcp"}, want: "http://[::1]:3000"},
+		{name: "ipv4 wildcard uses contained loopback", target: target.Target{Address: "0.0.0.0", Port: 3000, Protocol: "tcp"}, want: "http://127.0.0.1:3000"},
+		{name: "ipv6 wildcard uses contained loopback", target: target.Target{Address: "::", Port: 3000, Protocol: "tcp"}, want: "http://[::1]:3000"},
+		{name: "specific ipv4 stays exact", target: target.Target{Address: "192.168.1.20", Port: 3000, Protocol: "tcp"}, want: "http://192.168.1.20:3000"},
+		{name: "specific ipv6 stays exact", target: target.Target{Address: "fd7a:115c:a1e0::20", Port: 3000, Protocol: "tcp"}, want: "http://[fd7a:115c:a1e0::20]:3000"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if got := HTTPPathBackendArgument(test.target); got != test.want {
+				t.Fatalf("HTTPPathBackendArgument(%#v) = %q, want %q", test.target, got, test.want)
+			}
+		})
+	}
+}
+
+func TestSetTranslatesBindAddressesAcrossServeFunnelAndHTTPS(t *testing.T) {
+	addresses := []struct {
+		address  string
+		tcpHost  string
+		httpHost string
+	}{
+		{address: "0.0.0.0", tcpHost: "127.0.0.1", httpHost: "127.0.0.1"},
+		{address: "127.0.0.1", tcpHost: "127.0.0.1", httpHost: "127.0.0.1"},
+		{address: "::", tcpHost: "[::1]", httpHost: "[::1]"},
+		{address: "::1", tcpHost: "[::1]", httpHost: "[::1]"},
+		{address: "192.168.1.20", tcpHost: "192.168.1.20", httpHost: "192.168.1.20"},
+		{address: "fd7a:115c:a1e0::20", tcpHost: "[fd7a:115c:a1e0::20]", httpHost: "[fd7a:115c:a1e0::20]"},
+	}
+	calls := []string{}
 	adapter := &Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
 		command := strings.Join(args, " ")
+		calls = append(calls, command)
 		switch command {
 		case "version":
 			return runner.Result{Stdout: "1.102.4\n"}, nil
 		case "serve --help":
-			return runner.Result{Stdout: "status clear --https --tcp"}, nil
+			return runner.Result{Stdout: "status clear --https --tcp --set-path value"}, nil
 		case "funnel --help":
-			return runner.Result{Stdout: "status reset"}, nil
+			return runner.Result{Stdout: "status reset --https value --tcp value --set-path value"}, nil
 		case "serve status --json", "funnel status --json":
 			return runner.Result{Stdout: `{}`}, nil
-		case "serve --bg --yes --tcp=3000 tcp://127.0.0.1:3000":
-			return runner.Result{}, nil
 		default:
+			if strings.HasPrefix(command, "serve --bg --yes ") || strings.HasPrefix(command, "funnel --bg --yes ") {
+				return runner.Result{}, nil
+			}
 			return runner.Result{}, errors.New("unexpected command: " + command)
 		}
 	})}
-	target := target.Target{Address: "0.0.0.0", Port: 3000, Protocol: "tcp"}.Normalized()
-	if _, err := adapter.Set(context.Background(), ExposureChange{
-		Target: target,
-		Mode:   exposuredata.ExposureServe,
-		Preconditions: ExposurePrecondition{
-			RouteIDsHash:  hashIDs(nil),
-			AllRoutesHash: RoutesHash(nil),
-		},
-	}); err != nil {
-		t.Fatal(err)
+
+	for _, address := range addresses {
+		for _, mode := range []exposuredata.ExposureMode{exposuredata.ExposureServe, exposuredata.ExposureFunnel} {
+			target := target.Target{Address: address.address, Port: 3000, Protocol: "tcp"}.Normalized()
+			listenPort := 3000
+			if mode == exposuredata.ExposureFunnel {
+				listenPort = 10000
+			}
+			for _, route := range []struct {
+				name        string
+				httpPath    bool
+				transport   string
+				backendHost string
+			}{
+				{name: "raw-tcp", transport: "tcp", backendHost: address.tcpHost},
+				{name: "https-web", httpPath: true, transport: "https", backendHost: address.httpHost},
+			} {
+				port := listenPort
+				if route.httpPath {
+					port = 443
+				}
+				backendScheme := "tcp"
+				if route.httpPath {
+					backendScheme = "http"
+				}
+				pathFlag := ""
+				if route.httpPath {
+					pathFlag = "--set-path=/web "
+				}
+				want := string(mode) + " --bg --yes " + pathFlag + "--" + route.transport + "=" + strconv.Itoa(port) + " " + backendScheme + "://" + route.backendHost + ":3000"
+				t.Run(string(mode)+"/"+route.name+"/"+address.address, func(t *testing.T) {
+					_, err := adapter.Set(context.Background(), ExposureChange{
+						Target: target,
+						Mode:   mode,
+						Path: func() string {
+							if route.httpPath {
+								return "/web"
+							}
+							return ""
+						}(),
+						HTTPPath: route.httpPath,
+						Preconditions: ExposurePrecondition{
+							RouteIDsHash:  hashIDs(nil),
+							AllRoutesHash: RoutesHash(nil),
+						},
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got := calls[len(calls)-1]; got != want {
+						t.Fatalf("provider mutation command = %q, want %q", got, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestSetRestoresOnlyAnExactRawTCPBackend(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		backend string
+		want    string
+		wantErr bool
+	}{
+		{name: "scheme-less provider status", backend: "192.168.1.20:3000", want: "serve --bg --yes --tcp=3000 tcp://192.168.1.20:3000"},
+		{name: "different backend is refused", backend: "192.168.1.21:3000", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := []string{}
+			adapter := &Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+				command := strings.Join(args, " ")
+				calls = append(calls, command)
+				switch command {
+				case "version":
+					return runner.Result{Stdout: "1.102.4\n"}, nil
+				case "serve --help":
+					return runner.Result{Stdout: "status clear --https --tcp"}, nil
+				case "funnel --help":
+					return runner.Result{Stdout: "status reset --https value --tcp value"}, nil
+				case "serve status --json", "funnel status --json":
+					return runner.Result{Stdout: `{}`}, nil
+				default:
+					if strings.HasPrefix(command, "serve --bg --yes ") {
+						return runner.Result{}, nil
+					}
+					return runner.Result{}, errors.New("unexpected command: " + command)
+				}
+			})}
+			target := target.Target{Address: "192.168.1.20", Port: 3000, Protocol: "tcp"}
+			_, err := adapter.Set(context.Background(), ExposureChange{
+				Target:        target,
+				Mode:          exposuredata.ExposureServe,
+				ProviderKey:   "serve:tcp=3000",
+				Backend:       test.backend,
+				Preconditions: ExposurePrecondition{RouteIDsHash: hashIDs(nil), AllRoutesHash: RoutesHash(nil)},
+			})
+			if (err != nil) != test.wantErr {
+				t.Fatalf("Set error = %v, want error=%t", err, test.wantErr)
+			}
+			if test.wantErr {
+				for _, command := range calls {
+					if strings.HasPrefix(command, "serve --bg --yes ") {
+						t.Fatalf("unsafe backend reached mutation command: %q", command)
+					}
+				}
+				return
+			}
+			if got := calls[len(calls)-1]; got != test.want {
+				t.Fatalf("provider mutation command = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -531,7 +793,7 @@ func TestSetRefusesProviderEndpointCollision(t *testing.T) {
 	}
 }
 
-func TestSetRestoresExactProviderListenerSelector(t *testing.T) {
+func TestSetRestoresExplicitHTTPSRootOnExactProviderListener(t *testing.T) {
 	calls := []string{}
 	adapter := &Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
 		command := strings.Join(args, " ")
@@ -540,12 +802,12 @@ func TestSetRestoresExactProviderListenerSelector(t *testing.T) {
 		case "version":
 			return runner.Result{Stdout: "1.102.4\n"}, nil
 		case "serve --help":
-			return runner.Result{Stdout: "status clear --https --tcp"}, nil
+			return runner.Result{Stdout: "status clear --https --tcp --set-path value"}, nil
 		case "funnel --help":
 			return runner.Result{Stdout: "status reset"}, nil
 		case "serve status --json", "funnel status --json":
 			return runner.Result{Stdout: `{}`}, nil
-		case "serve --bg --yes --https=443 http://127.0.0.1:3000":
+		case "serve --bg --yes --set-path=/ --https=443 http://127.0.0.1:3000":
 			return runner.Result{}, nil
 		default:
 			return runner.Result{}, errors.New("unexpected command: " + command)
@@ -556,6 +818,9 @@ func TestSetRestoresExactProviderListenerSelector(t *testing.T) {
 		Target:      target,
 		Mode:        exposuredata.ExposureServe,
 		ProviderKey: "serve:https=443",
+		Path:        "/",
+		HTTPSPort:   443,
+		HTTPSRoot:   true,
 		Preconditions: ExposurePrecondition{
 			RouteIDsHash:  hashIDs(nil),
 			AllRoutesHash: RoutesHash(nil),
@@ -564,8 +829,81 @@ func TestSetRestoresExactProviderListenerSelector(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls[len(calls)-1] != "serve --bg --yes --https=443 http://127.0.0.1:3000" {
+	if calls[len(calls)-1] != "serve --bg --yes --set-path=/ --https=443 http://127.0.0.1:3000" {
 		t.Fatalf("restore selector was not preserved: %v", calls)
+	}
+}
+
+func TestSetUsesSameHTTPSPortAndBackendPortForExplicitRoot(t *testing.T) {
+	calls := []string{}
+	adapter := &Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+		command := strings.Join(args, " ")
+		calls = append(calls, command)
+		switch command {
+		case "version":
+			return runner.Result{Stdout: "1.102.4\n"}, nil
+		case "serve --help":
+			return runner.Result{Stdout: "status clear --https --tcp --set-path value"}, nil
+		case "funnel --help":
+			return runner.Result{Stdout: "status reset --https --tcp"}, nil
+		case "serve status --json", "funnel status --json":
+			return runner.Result{Stdout: `{}`}, nil
+		case "serve --bg --yes --set-path=/ --https=3000 http://127.0.0.1:3000":
+			return runner.Result{}, nil
+		default:
+			return runner.Result{}, errors.New("unexpected command: " + command)
+		}
+	})}
+	target := target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}.Normalized()
+	_, err := adapter.Set(context.Background(), ExposureChange{
+		Target: target, Mode: exposuredata.ExposureServe, ProviderKey: "serve:https=3000",
+		Path: "/", HTTPSPort: 3000, HTTPSRoot: true, Backend: "http://127.0.0.1:3000",
+		Preconditions: ExposurePrecondition{RouteIDsHash: hashIDs(nil), AllRoutesHash: RoutesHash(nil)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls[len(calls)-1] != "serve --bg --yes --set-path=/ --https=3000 http://127.0.0.1:3000" {
+		t.Fatalf("same-port HTTPS root changed the listener or backend port: %v", calls)
+	}
+	for _, command := range calls {
+		if strings.HasPrefix(command, "funnel ") && command != "funnel --help" && command != "funnel status --json" {
+			t.Fatalf("private root setup invoked a Funnel mutation: %v", calls)
+		}
+	}
+}
+
+func TestSetConfiguresExplicitFunnelHTTPSRootOnSupportedPort(t *testing.T) {
+	calls := []string{}
+	adapter := &Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+		command := strings.Join(args, " ")
+		calls = append(calls, command)
+		switch command {
+		case "version":
+			return runner.Result{Stdout: "1.102.4\n"}, nil
+		case "serve --help":
+			return runner.Result{Stdout: "status clear --https --tcp --set-path value"}, nil
+		case "funnel --help":
+			return runner.Result{Stdout: "status reset --https value --tcp value --set-path value"}, nil
+		case "serve status --json", "funnel status --json":
+			return runner.Result{Stdout: `{}`}, nil
+		case "funnel --bg --yes --set-path=/ --https=10000 http://127.0.0.1:3000":
+			return runner.Result{}, nil
+		default:
+			return runner.Result{}, errors.New("unexpected command: " + command)
+		}
+	})}
+	target := target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}.Normalized()
+	_, err := adapter.Set(context.Background(), ExposureChange{
+		Target: target, Mode: exposuredata.ExposureFunnel, ProviderKey: "funnel:https=10000",
+		Path: "/", HTTPSPort: 10000, HTTPSRoot: true, Backend: "http://127.0.0.1:3000",
+		Preconditions: ExposurePrecondition{RouteIDsHash: hashIDs(nil), AllRoutesHash: RoutesHash(nil)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls[len(calls)-1] != "funnel --bg --yes --set-path=/ --https=10000 http://127.0.0.1:3000" {
+		t.Fatalf("Funnel root did not preserve the exact HTTPS port and HTTP backend: %v", calls)
 	}
 }
 
@@ -752,10 +1090,13 @@ func TestSetHTTPPathSuggestsExplicitAliasWhenTailscaleRejectsNumericIPv6(t *test
 		t.Fatalf("numeric IPv6 proxy rejection was not preserved: %v", err)
 	}
 	remediation := fault.AsAppError(err).Remediation
-	for _, want := range []string{"--localhost-backend", "disable", "exact", "weakens"} {
+	for _, want := range []string{"--localhost-backend", "disable", "exact", "weakens", "TUI preserves numeric IPv6 backends"} {
 		if !strings.Contains(remediation, want) {
 			t.Fatalf("numeric IPv6 failure omitted %q remediation: %q", want, remediation)
 		}
+	}
+	if strings.Contains(remediation, "Ctrl+B") {
+		t.Fatalf("numeric IPv6 failure remediation offered an obsolete TUI shortcut: %q", remediation)
 	}
 }
 

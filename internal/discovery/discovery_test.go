@@ -3,6 +3,8 @@ package discovery
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +98,138 @@ func TestParseLsofNormalizesAndPreservesPartialMetadata(t *testing.T) {
 func TestParseLsofRejectsMalformedEndpoint(t *testing.T) {
 	if _, err := ParseLsof("p12\ncapp\nnot-an-endpoint\n", time.Now()); err == nil {
 		t.Fatal("expected malformed lsof endpoint error")
+	}
+}
+
+func TestProcessWorkingDirectoriesFromProcReadsAndDeduplicatesPIDLinks(t *testing.T) {
+	procRoot := t.TempDir()
+	cwd := filepath.Join(procRoot, "4242", "cwd")
+	if err := os.MkdirAll(filepath.Dir(cwd), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want := "/Users/alice/Projects/tailge"
+	if err := os.Symlink(want, cwd); err != nil {
+		t.Fatal(err)
+	}
+
+	got := processWorkingDirectoriesFromProc(context.Background(), procRoot, []int{4242, 0, 4242, -1, 9999})
+	if len(got) != 1 || got[4242] != want {
+		t.Fatalf("working directories = %#v, want PID 4242 at %q", got, want)
+	}
+}
+
+func TestProcessWorkingDirectoriesUsesBatchedLsofOnDarwin(t *testing.T) {
+	directory := t.TempDir()
+	lsof := filepath.Join(directory, "lsof")
+	argsFile := filepath.Join(directory, "args")
+	script := `#!/bin/sh
+printf '%s\n' "$*" > "$TAILGE_LSOF_ARGS"
+printf '%s\n' 'p4242' 'fcwd' 'n/Users/alice/Projects/tailge' 'p4343' 'fcwd' 'n/Users/alice/Projects/Other App' 'p9999' 'fcwd' 'n/ignored'
+`
+	if err := os.WriteFile(lsof, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory)
+	t.Setenv("TAILGE_LSOF_ARGS", argsFile)
+
+	got := processWorkingDirectories(context.Background(), "darwin", []int{4343, 4242, 4242, 0})
+	if len(got) != 2 || got[4242] != "/Users/alice/Projects/tailge" || got[4343] != "/Users/alice/Projects/Other App" {
+		t.Fatalf("working directories = %#v", got)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(args) != "-nP -a -p 4242,4343 -d cwd -Fpn\n" {
+		t.Fatalf("lsof args = %q, want one sorted, batched cwd query", args)
+	}
+}
+
+func TestParseProcessUsageConvertsCPUAndResidentMemory(t *testing.T) {
+	usage, err := parseProcessUsage("  12.5  1024\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.CPUPercent != 12.5 || usage.MemoryBytes != 1024*1024 || usage.MemorySource != ProcessMemoryRSS {
+		t.Fatalf("usage = %#v, want 12.5%% CPU and 1 MiB RSS", usage)
+	}
+}
+
+func TestParseProcessUsageRejectsInvalidOrAmbiguousOutput(t *testing.T) {
+	for _, output := range []string{"", "0.0", "NaN 1024", "-1.0 1024", "0.5 -1", "0.5 18446744073709551615", "1,5 1024", "0.1 1 extra"} {
+		if usage, err := parseProcessUsage(output); err == nil {
+			t.Errorf("parseProcessUsage(%q) = %#v, want an error", output, usage)
+		}
+	}
+}
+
+func TestProcessUsagesPrefersDarwinPhysicalFootprint(t *testing.T) {
+	directory := t.TempDir()
+	ps := filepath.Join(directory, "ps")
+	psScript := "#!/bin/sh\nprintf '4242 12.5 1024\\n4343 0.0 2048\\n'\n"
+	if err := os.WriteFile(ps, []byte(psScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	footprintCalls := filepath.Join(directory, "footprint-calls")
+	footprint := filepath.Join(directory, "footprint")
+	footprintScript := `#!/bin/sh
+[ "$LC_ALL" = C ] || exit 9
+printf '%s\n' "$4" >> "$TAILGE_FOOTPRINT_CALLS"
+case "$4" in
+4242) printf '%s\n' 'OrbStack Helper [4242]: 64-bit Footprint: 1 B' 'Auxiliary data:' '    phys_footprint: 13260138336 B' '    phys_footprint_peak: 19767413424 B' ;;
+4343) printf '%s\n' 'api [4343]: 64-bit Footprint: 1 B' 'Auxiliary data:' '    phys_footprint: 2097152 B' '    phys_footprint_peak: 2097152 B' ;;
+*) exit 10 ;;
+esac
+`
+	if err := os.WriteFile(footprint, []byte(footprintScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory)
+	t.Setenv("TAILGE_FOOTPRINT_CALLS", footprintCalls)
+
+	usages := processUsages(context.Background(), "darwin", []int{4242, 4343})
+	if usage := usages[4242]; usage == nil || usage.CPUPercent != 12.5 || usage.MemoryBytes != 13260138336 || usage.MemorySource != ProcessMemoryPhysicalFootprint {
+		t.Fatalf("OrbStack usage = %#v, want 12.5%% CPU and 13260138336-byte physical footprint", usage)
+	}
+	if usage := usages[4343]; usage == nil || usage.MemoryBytes != 2097152 {
+		t.Fatalf("second process usage = %#v, want 2097152-byte physical footprint", usage)
+	}
+	calls, err := os.ReadFile(footprintCalls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, pid := range strings.Fields(string(calls)) {
+		seen[pid] = true
+	}
+	if len(seen) != 2 || !seen["4242"] || !seen["4343"] {
+		t.Fatalf("footprint calls = %q; want one independent lookup for each unique PID", calls)
+	}
+}
+
+func TestParseProcessUsageRowAndBatchPsLookup(t *testing.T) {
+	pid, usage, err := parseProcessUsageRow("  4242  12.5  1024")
+	if err != nil || pid != 4242 || usage.CPUPercent != 12.5 || usage.MemoryBytes != 1024*1024 {
+		t.Fatalf("parseProcessUsageRow = (%d, %#v, %v)", pid, usage, err)
+	}
+
+	directory := t.TempDir()
+	callsFile := filepath.Join(directory, "calls")
+	ps := filepath.Join(directory, "ps")
+	script := "#!/bin/sh\n[ \"$LC_ALL\" = C ] || exit 9\nprintf 'call\\n' >> \"$TAILGE_PS_CALLS\"\nprintf '4242 12.5 1024\\n4343 0.0 2048\\n'\n"
+	if err := os.WriteFile(ps, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory)
+	t.Setenv("TAILGE_PS_CALLS", callsFile)
+	usages := processUsages(context.Background(), "darwin", []int{4242, 4343})
+	if len(usages) != 2 || usages[4242] == nil || usages[4343] == nil || usages[4343].MemoryBytes != 2*1024*1024 || usages[4242].MemorySource != ProcessMemoryRSS {
+		calls, _ := os.ReadFile(callsFile)
+		t.Fatalf("batched process usages = %#v; script calls=%q", usages, calls)
+	}
+	calls, err := os.ReadFile(callsFile)
+	if err != nil || string(calls) != "call\n" {
+		t.Fatalf("ps call count = %q, err=%v; want one call", calls, err)
 	}
 }
 

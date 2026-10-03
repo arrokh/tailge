@@ -133,9 +133,8 @@ func (a *Adapter) Set(ctx context.Context, change ExposureChange) (exposuredata.
 		receipt.FinishedAt = a.now()
 		return receipt, appErr
 	}
-	// Local discovery is TCP-only, so only an explicit non-empty path selects
-	// Tailscale's HTTPS reverse proxy. All legacy exposure mutations remain raw
-	// TCP and retain their existing listener-port behavior.
+	// Local discovery is TCP-only. Only explicit named-path or HTTPS-root intent
+	// selects Tailscale's reverse proxy; plain Serve/Funnel changes stay raw TCP.
 	pathRoute := change.HTTPPath
 	rootHTTPS := change.HTTPSRoot
 	if pathRoute && rootHTTPS {
@@ -153,8 +152,8 @@ func (a *Adapter) Set(ctx context.Context, change ExposureChange) (exposuredata.
 			return receipt, appErr
 		}
 	} else if rootHTTPS {
-		if change.Mode != exposuredata.ExposureServe || change.Path != "/" || change.HTTPSPort < 1 || change.HTTPSPort > 65535 {
-			appErr := fault.NewError(fault.ErrInvalidInput, "tailscale", "explicit HTTPS root route requires Serve mode, path `/`, and a valid HTTPS port", false, "invalid", "Use a private Serve HTTPS port and an explicit root selection.")
+		if (change.Mode != exposuredata.ExposureServe && change.Mode != exposuredata.ExposureFunnel) || change.Path != "/" || change.HTTPSPort < 1 || change.HTTPSPort > 65535 || (change.Mode == exposuredata.ExposureFunnel && !FunnelHTTPSPortSupported(change.HTTPSPort)) {
+			appErr := fault.NewError(fault.ErrInvalidInput, "tailscale", "explicit HTTPS root route requires Serve or Funnel mode, path `/`, and a supported HTTPS port", false, "invalid", "Use a valid Serve port or Funnel HTTPS port 443, 8443, or 10000.")
 			receipt.Error = ptr(appErr.Safe())
 			receipt.FinishedAt = a.now()
 			return receipt, appErr
@@ -206,8 +205,20 @@ func (a *Adapter) Set(ctx context.Context, change ExposureChange) (exposuredata.
 		receipt.FinishedAt = a.now()
 		return receipt, appErr
 	}
-	if !legacyFunnel && ((change.Mode == exposuredata.ExposureServe && transport == "tcp" && !caps.ServeTCP) || (change.Mode == exposuredata.ExposureFunnel && transport == "tcp" && !caps.FunnelTCP) || (change.Mode == exposuredata.ExposureServe && transport == "https" && !caps.ServeHTTPS) || (change.Mode == exposuredata.ExposureFunnel && transport == "https" && !caps.FunnelHTTPS)) {
-		appErr := fault.NewError(fault.ErrUnsupported, "tailscale", string(change.Mode)+" has no deterministic listener-port syntax", false, "read_only", "Use a Tailscale version exposing --https or --tcp listener flags.")
+	if !pathRoute && !rootHTTPS && transport != "tcp" {
+		appErr := fault.NewError(fault.ErrInvalidInput, "tailscale", "an HTTPS listener requires an explicit named path or root route", false, "invalid", "Use an explicit `exposure http` operation for browser-facing routes; raw listener exposure remains TCP-only.")
+		receipt.Error = ptr(appErr.Safe())
+		receipt.FinishedAt = a.now()
+		return receipt, appErr
+	}
+	if legacyFunnel {
+		appErr := fault.NewError(fault.ErrUnsupported, "tailscale", "legacy Funnel syntax cannot configure an exact listener route", false, "read_only", "Use a Tailscale version exposing exact `--tcp` listener flags; Tailge will not infer an HTTP service.")
+		receipt.Error = ptr(appErr.Safe())
+		receipt.FinishedAt = a.now()
+		return receipt, appErr
+	}
+	if (change.Mode == exposuredata.ExposureServe && transport == "tcp" && !caps.ServeTCP) || (change.Mode == exposuredata.ExposureFunnel && transport == "tcp" && !caps.FunnelTCP) || (change.Mode == exposuredata.ExposureServe && transport == "https" && !caps.ServeHTTPS) || (change.Mode == exposuredata.ExposureFunnel && transport == "https" && !caps.FunnelHTTPS) {
+		appErr := fault.NewError(fault.ErrUnsupported, "tailscale", string(change.Mode)+" has no deterministic listener-port syntax", false, "read_only", "Use a Tailscale version exposing `--https` or `--tcp` listener flags.")
 		receipt.Error = ptr(appErr.Safe())
 		receipt.FinishedAt = a.now()
 		return receipt, appErr
@@ -219,9 +230,6 @@ func (a *Adapter) Set(ctx context.Context, change ExposureChange) (exposuredata.
 		return receipt, err
 	}
 	expectedKey := string(change.Mode) + ":" + transport + "=" + strconv.Itoa(listenPort)
-	if legacyFunnel {
-		expectedKey = ""
-	}
 	if snapshot.Authoritative {
 		for _, route := range snapshot.Routes {
 			if pathRoute || rootHTTPS {
@@ -280,11 +288,23 @@ func (a *Adapter) Set(ctx context.Context, change ExposureChange) (exposuredata.
 		}
 	}
 	targetArg := change.Backend
-	if targetArg == "" {
-		if pathRoute || rootHTTPS {
+	if pathRoute || rootHTTPS {
+		if targetArg == "" {
 			targetArg = HTTPPathBackendArgument(change.Target)
-		} else {
-			targetArg = targetArgumentForTransport(change.Target, transport)
+		} else if !HTTPPathBackendMatches(targetArg, HTTPPathBackendArgument(change.Target)) && !HTTPPathBackendMatches(targetArg, HTTPSBackendArgument(change.Target, true)) {
+			appErr := fault.NewError(fault.ErrUnsafe, "tailscale", "HTTPS backend does not match the exact listener address", false, "unsafe", "Refresh the exact route identity and use the captured backend; Tailge will not redirect an HTTPS handler to another service.")
+			receipt.Error = ptr(appErr.Safe())
+			receipt.FinishedAt = a.now()
+			return receipt, appErr
+		}
+	} else {
+		var backendErr error
+		targetArg, backendErr = rawTCPBackendArgument(change.Target, targetArg)
+		if backendErr != nil {
+			appErr := fault.WrapError(fault.ErrUnsafe, "tailscale", "raw TCP backend does not match the exact listener address", false, "unsafe", "Refresh the exact route identity; Tailge will not restore a raw-TCP route to a different backend.", backendErr)
+			receipt.Error = ptr(appErr.Safe())
+			receipt.FinishedAt = a.now()
+			return receipt, appErr
 		}
 	}
 	args := []string{"--bg", "--yes"}
@@ -295,9 +315,6 @@ func (a *Adapter) Set(ctx context.Context, change ExposureChange) (exposuredata.
 		args = append(args, "--set-path="+change.Path)
 	}
 	args = append(args, "--"+transport+"="+strconv.Itoa(listenPort), targetArg)
-	if legacyFunnel {
-		args = []string{"--bg", "--yes", targetArg, "on"}
-	}
 	commandArgs := append([]string{string(change.Mode)}, args...)
 	result, err := a.run(ctx, commandArgs...)
 	receipt.Command, receipt.ExitCode, receipt.Stdout, receipt.Stderr = result.Command, result.ExitCode, redact(result.Stdout), redact(result.Stderr)
@@ -309,7 +326,7 @@ func (a *Adapter) Set(ctx context.Context, change ExposureChange) (exposuredata.
 			(selected.Address == "::1" || selected.Address == "::") &&
 			(change.Backend == "" || HTTPPathBackendMatches(change.Backend, HTTPPathBackendArgument(selected))) &&
 			strings.Contains(strings.ToLower(result.Stderr), "unknown proxy destination") {
-			appErr.Remediation = "Refresh provider status and inspect the exact HTTPS handler. If it exists, disable that exact path or root first; then retry with `--localhost-backend` (or Ctrl+B in the `p` dialog). Hostname resolution weakens the exact IPv6 address guarantee."
+			appErr.Remediation = "Refresh provider status and inspect the exact HTTPS handler. If it exists, disable that exact path or root first; then retry the CLI operation with `--localhost-backend`. The TUI preserves numeric IPv6 backends and has no hostname-resolution override. Hostname resolution weakens the exact IPv6 address guarantee."
 		}
 		receipt.Error = ptr(appErr.Safe())
 		return receipt, appErr
