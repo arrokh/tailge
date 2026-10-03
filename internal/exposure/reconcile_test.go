@@ -850,6 +850,94 @@ func TestApplyHTTPSRootReplacesExactServeTCPRouteOnlyAfterExplicitConfirmation(t
 	}
 }
 
+func TestApplyFunnelHTTPSRootConvertsExactTCPRouteAndPreservesPort(t *testing.T) {
+	target := targetmodel.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
+	raw := exposuredata.ExposureRoute{ID: "funnel-tcp-id", ProviderKey: "funnel:tcp=10000", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:4321", Target: target, Mode: exposuredata.ExposureFunnel, Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive}
+	caps := tailscale.Capabilities{Serve: true, Funnel: true, ExactServe: true, ExactFunnel: true, ServeTCP: true, FunnelTCP: true, ServeHTTPS: true, FunnelHTTPS: true, ServePath: true, FunnelPath: true}
+	provider := &fakeProvider{snapshot: exposuredata.ExposureSnapshot{Authoritative: true, Routes: []exposuredata.ExposureRoute{raw}}, caps: caps, readiness: ready()}
+	discoverer := &fakeDiscoverer{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{testListener(target, "node")}}}
+	controller := NewController(discoverer, provider)
+	options := HTTPSRootOptions{Mode: exposuredata.ExposureFunnel, HTTPSPort: 10000, ConfirmFunnel: true, ConfirmExternal: true, ReplaceExistingRoute: true, ExpectedRouteID: raw.ID}
+	receipt, err := controller.ApplyHTTPSRootWithOptions(context.Background(), target, options, time.Second)
+	if err != nil || !receipt.Verified {
+		t.Fatalf("Funnel HTTPS conversion failed: receipt=%#v err=%v", receipt, err)
+	}
+	if len(provider.removes) != 1 || provider.removes[0].ID != raw.ProviderKey || provider.removes[0].Mode != exposuredata.ExposureFunnel || provider.removes[0].Backend != raw.Backend {
+		t.Fatalf("conversion did not remove the exact public TCP route: %#v", provider.removes)
+	}
+	if len(provider.sets) != 1 || provider.sets[0].Mode != exposuredata.ExposureFunnel || provider.sets[0].ProviderKey != "funnel:https=10000" || !provider.sets[0].HTTPSRoot || provider.sets[0].Backend != "http://127.0.0.1:4321" {
+		t.Fatalf("conversion did not configure HTTPS on the observed public port and exact backend: %#v", provider.sets)
+	}
+	if len(provider.snapshot.Routes) != 1 || provider.snapshot.Routes[0].Mode != exposuredata.ExposureFunnel || provider.snapshot.Routes[0].Kind != exposuredata.RouteKindHTTPSRoot || provider.snapshot.Routes[0].ProviderKey != "funnel:https=10000" {
+		t.Fatalf("public HTTPS root was not the sole verified route: %#v", provider.snapshot.Routes)
+	}
+}
+
+type failFirstHTTPSRootSetProvider struct {
+	*fakeProvider
+	failed bool
+}
+
+func (p *failFirstHTTPSRootSetProvider) Set(ctx context.Context, change tailscale.ExposureChange) (exposuredata.OperationReceipt, error) {
+	if change.HTTPSRoot && !p.failed {
+		p.failed = true
+		return exposuredata.OperationReceipt{}, errors.New("simulated HTTPS root apply failure")
+	}
+	return p.fakeProvider.Set(ctx, change)
+}
+
+func TestHTTPSRootReplacementRestoresExactPreviousFunnelRouteOnFailure(t *testing.T) {
+	target := targetmodel.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
+	raw := exposuredata.ExposureRoute{ID: "funnel-tcp-id", ProviderKey: "funnel:tcp=10000", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:4321", Target: target, Mode: exposuredata.ExposureFunnel, Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive}
+	caps := tailscale.Capabilities{Serve: true, Funnel: true, ExactServe: true, ExactFunnel: true, ServeTCP: true, FunnelTCP: true, ServeHTTPS: true, FunnelHTTPS: true, ServePath: true, FunnelPath: true}
+	base := &fakeProvider{snapshot: exposuredata.ExposureSnapshot{Authoritative: true, Routes: []exposuredata.ExposureRoute{raw}}, caps: caps, readiness: ready()}
+	provider := &failFirstHTTPSRootSetProvider{fakeProvider: base}
+	discoverer := &fakeDiscoverer{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{testListener(target, "node")}}}
+	controller := NewController(discoverer, provider)
+	_, err := controller.ApplyHTTPSRootWithOptions(context.Background(), target, HTTPSRootOptions{Mode: exposuredata.ExposureFunnel, HTTPSPort: 10000, ConfirmFunnel: true, ConfirmExternal: true, ReplaceExistingRoute: true, ExpectedRouteID: raw.ID}, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "simulated HTTPS root apply failure") {
+		t.Fatalf("expected root apply failure after exact removal, got %v", err)
+	}
+	if len(base.removes) != 1 || len(base.sets) != 1 || base.sets[0].HTTPSRoot || base.sets[0].ProviderKey != raw.ProviderKey || base.sets[0].Backend != raw.Backend {
+		t.Fatalf("rollback did not restore the exact public TCP route: removes=%#v sets=%#v", base.removes, base.sets)
+	}
+	if len(base.snapshot.Routes) != 1 || !sameProviderRouteIdentity(base.snapshot.Routes[0], raw) || base.snapshot.Routes[0].State != exposuredata.ExposureActive {
+		t.Fatalf("exact previous Funnel route was not restored: %#v", base.snapshot.Routes)
+	}
+}
+
+func TestHTTPSRootReplacementRejectsUnrestorableFunnelPortBeforeRemoval(t *testing.T) {
+	target := targetmodel.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
+	root := exposuredata.ExposureRoute{ID: "funnel-root-id", ProviderKey: "funnel:https=3000", Kind: exposuredata.RouteKindHTTPSRoot, Path: "/", Backend: "http://127.0.0.1:4321", Target: target, Mode: exposuredata.ExposureFunnel, Ownership: exposuredata.OwnershipManaged, State: exposuredata.ExposureActive}
+	caps := tailscale.Capabilities{Serve: true, Funnel: true, ExactServe: true, ExactFunnel: true, ServeTCP: true, FunnelTCP: true, ServeHTTPS: true, FunnelHTTPS: true, ServePath: true, FunnelPath: true}
+	provider := &fakeProvider{snapshot: exposuredata.ExposureSnapshot{Authoritative: true, Routes: []exposuredata.ExposureRoute{root}}, caps: caps, readiness: ready()}
+	discoverer := &fakeDiscoverer{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{testListener(target, "node")}}}
+	controller := NewController(discoverer, provider)
+	_, err := controller.ApplyHTTPSRootWithOptions(context.Background(), target, HTTPSRootOptions{Mode: exposuredata.ExposureServe, HTTPSPort: target.Port, ConfirmExternal: true, ReplaceExistingRoute: true, ExpectedRouteID: root.ID}, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "cannot be restored exactly") {
+		t.Fatalf("unsupported Funnel endpoint was treated as exactly restorable: %v", err)
+	}
+	if len(provider.removes) != 0 || len(provider.sets) != 0 {
+		t.Fatalf("unrestorable Funnel route was mutated: removes=%#v sets=%#v", provider.removes, provider.sets)
+	}
+}
+
+func TestApplyFunnelHTTPSRootRequiresPublicConfirmationBeforeRemovingRoute(t *testing.T) {
+	target := targetmodel.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
+	raw := exposuredata.ExposureRoute{ID: "funnel-tcp-id", ProviderKey: "funnel:tcp=10000", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:4321", Target: target, Mode: exposuredata.ExposureFunnel, Ownership: exposuredata.OwnershipManaged, State: exposuredata.ExposureActive}
+	caps := tailscale.Capabilities{Serve: true, Funnel: true, ExactServe: true, ExactFunnel: true, ServeTCP: true, FunnelTCP: true, ServeHTTPS: true, FunnelHTTPS: true, ServePath: true, FunnelPath: true}
+	provider := &fakeProvider{snapshot: exposuredata.ExposureSnapshot{Authoritative: true, Routes: []exposuredata.ExposureRoute{raw}}, caps: caps, readiness: ready()}
+	discoverer := &fakeDiscoverer{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{testListener(target, "node")}}}
+	controller := NewController(discoverer, provider)
+	_, err := controller.ApplyHTTPSRootWithOptions(context.Background(), target, HTTPSRootOptions{Mode: exposuredata.ExposureFunnel, HTTPSPort: 10000, ConfirmExternal: true, ReplaceExistingRoute: true, ExpectedRouteID: raw.ID}, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "explicit public-internet confirmation") {
+		t.Fatalf("public HTTPS root was accepted without Funnel confirmation: %v", err)
+	}
+	if len(provider.removes) != 0 || len(provider.sets) != 0 {
+		t.Fatalf("route mutated before public confirmation: removes=%#v sets=%#v", provider.removes, provider.sets)
+	}
+}
+
 func TestApplyHTTPSRootDoesNotRemoveConcurrentRootAfterSetPreconditionFailure(t *testing.T) {
 	target := targetmodel.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
 	raw := exposuredata.ExposureRoute{ID: "raw-id", ProviderKey: "serve:tcp=4321", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:4321", Target: target, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive}

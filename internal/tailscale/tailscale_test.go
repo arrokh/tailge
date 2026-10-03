@@ -237,6 +237,19 @@ func TestReadinessFailureStillReportsBothModes(t *testing.T) {
 	}
 }
 
+func TestFunnelHTTPSPortSupport(t *testing.T) {
+	for _, port := range []int{443, 8443, 10000} {
+		if !FunnelHTTPSPortSupported(port) {
+			t.Errorf("Funnel HTTPS port %d was rejected", port)
+		}
+	}
+	for _, port := range []int{3000, 4321, 65535} {
+		if FunnelHTTPSPortSupported(port) {
+			t.Errorf("unsupported Funnel HTTPS port %d was accepted", port)
+		}
+	}
+}
+
 func TestParseListenerSelectorAndRouteFingerprint(t *testing.T) {
 	selector, err := ParseListenerSelector("serve:https=443", exposuredata.ExposureServe)
 	if err != nil || selector.Transport != "https" || selector.Port != 443 {
@@ -860,6 +873,40 @@ func TestSetUsesSameHTTPSPortAndBackendPortForExplicitRoot(t *testing.T) {
 	}
 }
 
+func TestSetConfiguresExplicitFunnelHTTPSRootOnSupportedPort(t *testing.T) {
+	calls := []string{}
+	adapter := &Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+		command := strings.Join(args, " ")
+		calls = append(calls, command)
+		switch command {
+		case "version":
+			return runner.Result{Stdout: "1.102.4\n"}, nil
+		case "serve --help":
+			return runner.Result{Stdout: "status clear --https --tcp --set-path value"}, nil
+		case "funnel --help":
+			return runner.Result{Stdout: "status reset --https value --tcp value --set-path value"}, nil
+		case "serve status --json", "funnel status --json":
+			return runner.Result{Stdout: `{}`}, nil
+		case "funnel --bg --yes --set-path=/ --https=10000 http://127.0.0.1:3000":
+			return runner.Result{}, nil
+		default:
+			return runner.Result{}, errors.New("unexpected command: " + command)
+		}
+	})}
+	target := target.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}.Normalized()
+	_, err := adapter.Set(context.Background(), ExposureChange{
+		Target: target, Mode: exposuredata.ExposureFunnel, ProviderKey: "funnel:https=10000",
+		Path: "/", HTTPSPort: 10000, HTTPSRoot: true, Backend: "http://127.0.0.1:3000",
+		Preconditions: ExposurePrecondition{RouteIDsHash: hashIDs(nil), AllRoutesHash: RoutesHash(nil)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls[len(calls)-1] != "funnel --bg --yes --set-path=/ --https=10000 http://127.0.0.1:3000" {
+		t.Fatalf("Funnel root did not preserve the exact HTTPS port and HTTP backend: %v", calls)
+	}
+}
+
 func TestFunnelRemoveUsesExactListenerFlagAndNeverReset(t *testing.T) {
 	calls := []string{}
 	adapter := &Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
@@ -1043,10 +1090,13 @@ func TestSetHTTPPathSuggestsExplicitAliasWhenTailscaleRejectsNumericIPv6(t *test
 		t.Fatalf("numeric IPv6 proxy rejection was not preserved: %v", err)
 	}
 	remediation := fault.AsAppError(err).Remediation
-	for _, want := range []string{"--localhost-backend", "disable", "exact", "weakens"} {
+	for _, want := range []string{"--localhost-backend", "disable", "exact", "weakens", "TUI preserves numeric IPv6 backends"} {
 		if !strings.Contains(remediation, want) {
 			t.Fatalf("numeric IPv6 failure omitted %q remediation: %q", want, remediation)
 		}
+	}
+	if strings.Contains(remediation, "Ctrl+B") {
+		t.Fatalf("numeric IPv6 failure remediation offered an obsolete TUI shortcut: %q", remediation)
 	}
 }
 

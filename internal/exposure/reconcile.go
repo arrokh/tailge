@@ -87,7 +87,7 @@ func Reconcile(listeners discovery.ListenerSnapshot, exposures exposuredata.Expo
 		}
 		for _, route := range item.Routes {
 			if route.Mode == exposuredata.ExposureFunnel {
-				item.Warning = appendWarning(item.Warning, "WARNING: Funnel makes this service reachable from the public internet")
+				item.Warning = appendWarning(item.Warning, "WARNING: Funnel is configured for public internet access")
 			}
 		}
 		if !exposures.Authoritative || !listeners.Authoritative {
@@ -125,7 +125,7 @@ func Reconcile(listeners discovery.ListenerSnapshot, exposures exposuredata.Expo
 		}
 		item := ReconciledItem{ID: route.ID, Routes: []exposuredata.ExposureRoute{route}, Mode: route.Mode, State: route.State}
 		if route.Mode == exposuredata.ExposureFunnel {
-			item.Warning = "WARNING: Funnel route is reachable from the public internet"
+			item.Warning = "WARNING: Funnel route is configured for public internet access"
 		}
 		if !exposures.Authoritative {
 			item.State = exposuredata.ExposureUnknown
@@ -809,17 +809,21 @@ func (c *Controller) ApplyHTTPPathWithOptionsApproved(ctx context.Context, targe
 	return c.applyHTTPPath(ctx, target, path, mode, confirmFunnel, options, timeout, &approval)
 }
 
-// HTTPSRootOptions carries explicit choices for a private HTTPS root. The
-// default preserves the exact discovered backend address and never replaces a
-// raw-TCP route. ReplaceRawTCP requires an exact active Serve TCP route on
-// HTTPSPort; ConfirmExternal is required for routes with unknown/external
-// ownership, and ExpectedRawTCPRouteID binds an interactive preview to it.
+// HTTPSRootOptions carries explicit choices for an HTTPS root. The zero mode
+// preserves the historical private Serve behavior. TUI replacements bind to
+// one exact raw-TCP or HTTPS-root route; the legacy raw-TCP fields remain for
+// explicit CLI conversion. Funnel roots require a public confirmation and use
+// a Tailscale-supported HTTPS port.
 type HTTPSRootOptions struct {
+	Mode                  exposuredata.ExposureMode
 	HTTPSPort             int
 	LocalhostBackendAlias bool
 	ReplaceRawTCP         bool
+	ConfirmFunnel         bool
 	ConfirmExternal       bool
 	ExpectedRawTCPRouteID string
+	ReplaceExistingRoute  bool
+	ExpectedRouteID       string
 }
 
 // ApplyHTTPSRoot explicitly maps the selected listener to the HTTPS root at the
@@ -834,7 +838,7 @@ func (c *Controller) ApplyHTTPSRootApproved(ctx context.Context, target target.T
 	return c.ApplyHTTPSRootWithOptionsApproved(ctx, target, HTTPSRootOptions{HTTPSPort: httpsPort, LocalhostBackendAlias: localhostBackendAlias}, timeout, approval)
 }
 
-// ApplyHTTPSRootWithOptions applies a private root with explicit route-replacement intent.
+// ApplyHTTPSRootWithOptions applies a Serve or Funnel root with explicit route-replacement intent. A zero Mode defaults to private Serve.
 func (c *Controller) ApplyHTTPSRootWithOptions(ctx context.Context, target target.Target, options HTTPSRootOptions, timeout time.Duration) (receipt exposuredata.OperationReceipt, applyErr error) {
 	return c.applyHTTPSRoot(ctx, target, options, timeout, nil)
 }

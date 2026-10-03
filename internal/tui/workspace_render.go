@@ -159,6 +159,17 @@ func compactURLShortcutStatus(status string) string {
 	return strings.NewReplacer(" HTTPS[", ":", " HTTP-preview[", ":", " copy[", ":", " local[", ":", "]", "").Replace(status)
 }
 
+func compactNarrowURLShortcutStatus(status string) string {
+	parts := strings.Fields(compactURLShortcutStatus(status))
+	if len(parts) > 2 {
+		parts = parts[:2]
+	}
+	for index := range parts {
+		parts[index] = strings.NewReplacer("TCP-only", "TCP", "HTTPS-only", "HTTPS", "URL-only", "URL").Replace(parts[index])
+	}
+	return strings.Join(parts, " ")
+}
+
 func compactSortLabel(sortKey string) string {
 	switch sortKey {
 	case "name":
@@ -196,22 +207,23 @@ func (m *workspaceModel) modeFilterStatusLabel() string {
 	return "w:all"
 }
 
-func compactFooterStatus(width int, focus, sortKey, modeFilterStatus, httpsRootStatus, progress string) string {
+func compactFooterStatus(width int, focus, sortKey, modeFilterStatus, httpsActionsStatus, progress string) string {
 	if progress != "" {
 		return progress
 	}
-	rootStatus := strings.Replace(httpsRootStatus, "b HTTPS root", "b", 1)
 	if width < 40 {
 		focus = string([]rune(focus)[0])
 		modeFilterStatus = strings.Replace(modeFilterStatus, "w:not-OFF", "w:on", 1)
-		return strings.Join([]string{focus, modeFilterStatus, rootStatus}, " ")
+		httpsActionsStatus = strings.NewReplacer("s:ok", "s+", "s:off", "s-", "f:ok", "f+", "f:off", "f-").Replace(httpsActionsStatus)
+		httpsActionsStatus = strings.ReplaceAll(httpsActionsStatus, " ", "")
+		return strings.Join([]string{focus, modeFilterStatus, httpsActionsStatus}, " ")
 	}
-	parts := []string{focus, modeFilterStatus, compactSortLabel(sortKey), rootStatus}
+	parts := []string{focus, modeFilterStatus, compactSortLabel(sortKey), httpsActionsStatus}
 	return strings.Join(parts, " ")
 }
 
-func compactFooterStatusWithShortcuts(width int, focus, sortKey, modeFilterStatus, httpsRootStatus, urlStatus, progress string) string {
-	return compactFooterStatus(width, focus, sortKey, modeFilterStatus, httpsRootStatus, progress) + " " + compactURLShortcutStatus(urlStatus)
+func compactFooterStatusWithShortcuts(width int, focus, sortKey, modeFilterStatus, httpsActionsStatus, urlStatus, progress string) string {
+	return compactFooterStatus(width, focus, sortKey, modeFilterStatus, httpsActionsStatus, progress) + " " + compactURLShortcutStatus(urlStatus)
 }
 
 func footerKeyHints(width int, focus paneFocus, searching, zoomed, canZoom bool, urlStatus string) string {
@@ -222,15 +234,15 @@ func footerKeyHints(width int, focus paneFocus, searching, zoomed, canZoom bool,
 		case width >= 40:
 			return "Enter/Esc · " + compactURLShortcutStatus(urlStatus)
 		default:
-			hints := "Enter/Esc · " + compactURLShortcutStatus(urlStatus)
+			hints := "Enter/Esc · " + compactNarrowURLShortcutStatus(urlStatus)
 			if lipgloss.Width(hints) <= width {
 				return hints
 			}
-			return compactURLShortcutStatus(urlStatus)
+			return compactNarrowURLShortcutStatus(urlStatus)
 		}
 	}
 	if width < 40 {
-		return compactURLShortcutStatus(urlStatus) + " w ? Help"
+		return compactNarrowURLShortcutStatus(urlStatus) + " w ? Help"
 	}
 	if width < 60 {
 		return "↑↓ Move · " + compactURLShortcutStatus(urlStatus)
@@ -245,7 +257,7 @@ func footerKeyHints(width int, focus paneFocus, searching, zoomed, canZoom bool,
 	if focus == focusDetails {
 		switch {
 		case width >= 120:
-			return "↑↓ Scroll · Tab List · v/V · s/f/d Routes · b HTTPS · x Term · e/S Sort · w Filter · / Find" + zoomHint + " · ? Help · q Quit"
+			return "↑↓ Scroll · Tab List · v/V · s/f/d HTTPS · x Term · e/S Sort · w Filter · / Find" + zoomHint + " · ? Help · q Quit"
 		case width >= 100:
 			return "↑↓ Scroll · Tab List · e/S Sort · w Filter · / Find · ? Help · q Quit" + zoomHint
 		case width >= 72:
@@ -258,7 +270,7 @@ func footerKeyHints(width int, focus paneFocus, searching, zoomed, canZoom bool,
 	}
 	switch {
 	case width >= 120:
-		return "↑↓ Move · Tab Focus · v/V · s/f/d Routes · b HTTPS · x Term · e/S Sort · w Filter · / Find" + zoomHint + " · ? Help · q Quit"
+		return "↑↓ Move · Tab Focus · v/V · s/f/d HTTPS · x Term · e/S Sort · w Filter · / Find" + zoomHint + " · ? Help · q Quit"
 	case width >= 100:
 		return "↑↓ Move · Tab Focus · s/f/d · e/S Sort · w Filter · / Find · ? Help · q Quit" + zoomHint
 	case width >= 72:
@@ -303,7 +315,7 @@ func (m *workspaceModel) renderBottom() string {
 		selection = fmt.Sprintf("  selected:%d", count)
 	}
 	urlStatus := m.urlShortcutStatus()
-	status := fmt.Sprintf("Focus: %s  %s  Sort: %s  %s  %s%s%s", focus, m.modeFilterStatusLabel(), footerSortLabel(m.cfg.Sort), m.httpsRootStatusLabel(), compactURLShortcutStatus(urlStatus), search, selection)
+	status := fmt.Sprintf("Focus: %s  %s  Sort: %s  %s  %s%s%s", focus, m.modeFilterStatusLabel(), footerSortLabel(m.cfg.Sort), m.httpsActionStatusLabel(), compactURLShortcutStatus(urlStatus), search, selection)
 	if progress != "" {
 		status += "  " + progress
 	}
@@ -311,9 +323,9 @@ func (m *workspaceModel) renderBottom() string {
 	statusWidth := maxInt(0, m.width-lipgloss.Width(identityText)-2)
 	if lipgloss.Width(status) > statusWidth {
 		if m.width < 60 {
-			status = compactFooterStatus(m.width, focus, m.cfg.Sort, m.modeFilterStatusLabel(), m.httpsRootStatusLabel(), progress)
+			status = compactFooterStatus(m.width, focus, m.cfg.Sort, m.modeFilterStatusLabel(), m.httpsActionStatusLabel(), progress)
 		} else {
-			status = compactFooterStatusWithShortcuts(m.width, focus, m.cfg.Sort, m.modeFilterStatusLabel(), m.httpsRootStatusLabel(), urlStatus, progress)
+			status = compactFooterStatusWithShortcuts(m.width, focus, m.cfg.Sort, m.modeFilterStatusLabel(), m.httpsActionStatusLabel(), urlStatus, progress)
 		}
 	}
 	status = ansi.Truncate(status, statusWidth, "...")
@@ -393,25 +405,35 @@ func (layout listenerTableLayout) columns() []listenerTableColumn {
 }
 
 func listenerTableWidths(width int) listenerTableLayout {
-	// Keep CPU and RSS visible even in compact list views. At very narrow
-	// widths, target and status columns are progressively omitted rather than
-	// truncating the resource columns off the right edge.
+	// Keep CPU and RSS visible even in compact list views. Make room for the
+	// full FUNNEL mode label before expanding secondary columns; narrow layouts
+	// continue dropping target and status before resource metrics.
 	switch {
-	case width >= 51:
-		layout := listenerTableLayout{service: 7, target: 7, mode: 5, state: 11, cpu: 5, memory: 5}
-		extra := width - 51
+	case width >= 52:
+		layout := listenerTableLayout{service: 7, target: 6, mode: 6, state: 11, cpu: 5, memory: 5}
+		extra := width - 52
 		serviceExtra := minInt(extra, 19)
 		layout.service += serviceExtra
 		extra -= serviceExtra
-		targetExtra := minInt(extra, 16)
+		targetExtra := minInt(extra, 17)
 		layout.target += targetExtra
 		extra -= targetExtra
 		layout.state += extra
 		return layout
-	case width >= 42:
+	case width >= 51:
+		return listenerTableLayout{service: 7, target: 6, mode: 6, state: 11, cpu: 5, memory: 5}
+	case width >= 44:
+		return listenerTableLayout{service: 6, mode: 6, state: 11, cpu: 5, memory: 5}
+	case width >= 43:
 		return listenerTableLayout{service: 7, mode: 4, state: 11, cpu: 5, memory: 5}
-	case width >= 36:
-		return listenerTableLayout{service: 6, mode: 4, state: 6, cpu: 5, memory: 5}
+	case width >= 42:
+		return listenerTableLayout{service: 6, mode: 4, state: 11, cpu: 5, memory: 5}
+	case width >= 39:
+		return listenerTableLayout{service: 6, mode: 6, state: 6, cpu: 5, memory: 5}
+	case width >= 38:
+		return listenerTableLayout{service: 5, mode: 6, state: 6, cpu: 5, memory: 5}
+	case width >= 32:
+		return listenerTableLayout{service: 6, mode: 6, cpu: 5, memory: 5}
 	case width >= 29:
 		return listenerTableLayout{service: 6, mode: 4, cpu: 5, memory: 5}
 	default:
@@ -426,12 +448,16 @@ func listenerTableHeader(width int) string {
 		label := column.name
 		if column.name == "SERVICE" && column.width < 7 {
 			label = "SVC"
-		} else if column.name == "TARGET" && column.width < 7 {
+		} else if column.name == "TARGET" && column.width < 6 {
 			label = "TGT"
 		}
 		cells = append(cells, fmt.Sprintf("%-*s", column.width, truncate(label, column.width)))
 	}
-	return paint("auto", "1;37", "SELECT "+strings.Join(cells, " "))
+	header := "SELECT " + strings.Join(cells, " ")
+	if lipgloss.Width(header) > width {
+		header = "SEL " + strings.Join(cells, " ")
+	}
+	return paint("auto", "1;37", header)
 }
 
 func listenerTableDivider(width int) string {
@@ -732,7 +758,7 @@ func (m *workspaceModel) renderDetails(width, height int) string {
 	}
 	if item.Warning != "" {
 		lines = append(lines, "", detailGroup("ALERTS"))
-		for _, warning := range detailWarnings(item.Warning) {
+		for _, warning := range detailWarningsForItem(item) {
 			lines = append(lines, "  "+detailOwner(warning)+" issue: "+warning)
 		}
 	}
@@ -780,7 +806,14 @@ func (m *workspaceModel) renderDetails(width, height int) string {
 		if route.Kind == exposuredata.RouteKindHTTPPath {
 			lines = append(lines, "     kind: named HTTP path (configured outside the TUI)", "     mount path: "+valueOr(route.Path, "/"))
 		} else if route.Kind == exposuredata.RouteKindHTTPSRoot {
-			lines = append(lines, "     kind: private HTTPS root handler", "     mount path: /")
+			kind := "HTTPS root handler (scope unknown)"
+			switch route.Mode {
+			case exposuredata.ExposureServe:
+				kind = "private HTTPS root handler"
+			case exposuredata.ExposureFunnel:
+				kind = "public HTTPS root handler"
+			}
+			lines = append(lines, "     kind: "+kind, "     mount path: /")
 		}
 		if route.URL != "" {
 			lines = append(lines, "     url: "+route.URL)
@@ -906,6 +939,31 @@ func detailWarnings(value string) []string {
 	return warnings
 }
 
+func rawTCPFunnelSelectors(item exposure.ReconciledItem) []string {
+	selectors := make([]string, 0, len(item.Routes))
+	for _, route := range item.Routes {
+		if route.Mode == exposuredata.ExposureFunnel && route.Kind == exposuredata.RouteKindRawTCP && workspace.RouteTransport(route) == "tcp" && route.ProviderKey != "" {
+			selectors = append(selectors, route.ProviderKey)
+		}
+	}
+	return selectors
+}
+
+func detailWarningsForItem(item exposure.ReconciledItem) []string {
+	warnings := detailWarnings(item.Warning)
+	selectors := rawTCPFunnelSelectors(item)
+	if len(selectors) == 0 {
+		return warnings
+	}
+	for index, warning := range warnings {
+		lower := strings.ToLower(warning)
+		if strings.Contains(lower, "funnel") && strings.Contains(lower, "public") {
+			warnings[index] = fmt.Sprintf("Funnel is configured for public TCP forwarding via %s. Tailge has not performed an external connectivity test; this is not an HTTPS route.", strings.Join(selectors, ", "))
+		}
+	}
+	return warnings
+}
+
 func detailOwner(message string) string {
 	lower := strings.ToLower(message)
 	switch {
@@ -920,15 +978,17 @@ func detailOwner(message string) string {
 	}
 }
 
-func detailWarningNext(owner, message string) string {
+func detailWarningNext(owner, message string, item exposure.ReconciledItem) string {
 	lower := strings.ToLower(message)
 	switch {
 	case strings.Contains(lower, "multiple"), strings.Contains(lower, "exact"):
 		return "Refresh and choose one exact route before changing exposure."
 	case strings.Contains(lower, "stale"), strings.Contains(lower, "incomplete"), strings.Contains(lower, "unknown"):
 		return "Refresh and wait for authoritative state before changing exposure."
+	case owner == "FUNNEL" && strings.Contains(lower, "public") && len(rawTCPFunnelSelectors(item)) > 0:
+		return "Check Tailscale Funnel status for the public host and port, then test TCP from outside your tailnet. Browser access also requires an HTTP backend; o does not open Funnel TCP."
 	case owner == "FUNNEL":
-		return "Review public-internet reachability and confirm the exact Funnel action."
+		return "Confirm this exact route should be public; use d to disable it if public access is not intended."
 	case owner == "LISTENER":
 		return "Inspect the listener scope and process before exposing or terminating it."
 	default:
@@ -938,9 +998,9 @@ func detailWarningNext(owner, message string) string {
 
 func detailActionItems(item exposure.ReconciledItem) []string {
 	items := []string{}
-	for _, warning := range detailWarnings(item.Warning) {
+	for _, warning := range detailWarningsForItem(item) {
 		owner := detailOwner(warning)
-		items = append(items, "  "+owner+" next: "+detailWarningNext(owner, warning))
+		items = append(items, "  "+owner+" next: "+detailWarningNext(owner, warning, item))
 	}
 	if item.Recommendation != "" {
 		owner := "EXPOSURE"

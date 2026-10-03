@@ -22,6 +22,8 @@ type batchOperation struct {
 	providerKey     string
 	routeID         string
 	confirmExternal bool
+	httpsRoot       bool
+	httpsRootPort   int
 	approval        exposure.MutationApproval
 }
 
@@ -125,7 +127,8 @@ func observedMode(item exposure.ReconciledItem) exposuredata.ExposureMode {
 }
 
 func (m *workspaceModel) actionAvailability(mode exposuredata.ExposureMode) workspace.ActionAvailability {
-	return workspace.ActionAvailabilityForItems(m.actionItems(), mode, workspace.ActionContext{
+	items := m.actionItems()
+	availability := workspace.ActionAvailabilityForItems(items, mode, workspace.ActionContext{
 		ConfigError:    m.configErr,
 		View:           m.view,
 		Readiness:      m.readiness,
@@ -134,6 +137,34 @@ func (m *workspaceModel) actionAvailability(mode exposuredata.ExposureMode) work
 		RefreshPending: m.refreshState.isPending(),
 		ProcessBusy:    m.processBusy,
 	})
+	if mode != exposuredata.ExposureDisabled && m.refreshState.isPending() {
+		return workspace.ActionAvailability{Disabled: true, Reason: "HTTPS action unavailable: refresh is in progress", Wait: true}
+	}
+	if availability.Disabled || mode == exposuredata.ExposureDisabled {
+		return availability
+	}
+	if len(items) > 1 && mode == exposuredata.ExposureFunnel {
+		return workspace.ActionAvailability{Disabled: true, Reason: "Funnel HTTPS roots share one public hostname and port; choose one exact listener at a time"}
+	}
+	status, message, remediation := workspace.HTTPPathStatus(m.readiness, mode)
+	if status != readiness.ReadinessReady {
+		return workspace.ActionAvailability{Disabled: true, Reason: httpsRootReadinessReason(status, message, remediation)}
+	}
+	ports := make(map[int]string, len(items))
+	for _, item := range items {
+		if reason := m.httpsRootBaseReason(item); reason != "" {
+			return workspace.ActionAvailability{Disabled: true, Reason: item.ID + ": " + reason}
+		}
+		port, _, _, reason := httpsRootRoutePlan(m.view.Exposures.Routes, item, mode)
+		if reason != "" {
+			return workspace.ActionAvailability{Disabled: true, Reason: item.ID + ": " + reason}
+		}
+		if owner, duplicate := ports[port]; duplicate {
+			return workspace.ActionAvailability{Disabled: true, Reason: "Selected listeners " + owner + " and " + item.ID + " require the same HTTPS endpoint port"}
+		}
+		ports[port] = item.ID
+	}
+	return workspace.ActionAvailability{}
 }
 
 func (m *workspaceModel) startOperation() tea.Cmd {
@@ -143,7 +174,7 @@ func (m *workspaceModel) startOperation() tea.Cmd {
 	if m.refreshState.isPending() {
 		if m.httpsRootAction {
 			m.modal = modalConfirm
-			m.setBanner("HTTPS root preview paused while refresh is in progress; review it again after refresh", true)
+			m.setBanner("HTTPS preview paused while refresh is in progress; review it again after refresh", true)
 		} else {
 			m.modal = modalAction
 			m.refreshActionModal()
@@ -155,18 +186,13 @@ func (m *workspaceModel) startOperation() tea.Cmd {
 	// changing route or listener fingerprints; confirmation must never bypass
 	// that newer workspace-owned safety decision.
 	availability := m.actionAvailability(m.actionSession.mode)
-	if m.httpsRootAction {
-		availability = workspace.ActionAvailability{}
+	if m.httpsRootAction && !availability.Disabled && len(m.actionItems()) == 1 {
 		item, ok := m.actionAnchorItem()
 		if !ok {
 			availability = workspace.ActionAvailability{Disabled: true, Reason: "No exact listener is selected"}
-		} else if reason := m.httpsRootBaseReason(item); reason != "" {
-			availability = workspace.ActionAvailability{Disabled: true, Reason: reason}
-		} else if status, message, remediation := workspace.HTTPPathStatus(m.readiness, exposuredata.ExposureServe); status != readiness.ReadinessReady {
-			availability = workspace.ActionAvailability{Disabled: true, Reason: httpsRootReadinessReason(status, message, remediation)}
-		} else if rawTCP, already, reason := httpsRootRouteConflict(m.view.Exposures.Routes, item.Listener.Target, m.httpsRootPort, m.httpsRootLocalhostBackend); reason != "" || already || (m.httpsRootReplaceRawTCP && (rawTCP == nil || rawTCP.ID != m.httpsRootRouteID)) || (!m.httpsRootReplaceRawTCP && rawTCP != nil) {
+		} else if port, replacement, already, reason := httpsRootRoutePlan(m.view.Exposures.Routes, item, m.actionSession.mode); reason != "" || already || port != m.httpsRootPort || (replacement != nil && replacement.ID != m.httpsRootRouteID) || (replacement == nil && m.httpsRootReplaceRoute) {
 			if reason == "" {
-				reason = "The exact HTTPS-root endpoint changed after preview"
+				reason = "The exact HTTPS route changed after preview"
 			}
 			availability = workspace.ActionAvailability{Disabled: true, Reason: reason}
 		}
@@ -245,10 +271,10 @@ func (m *workspaceModel) startSingleOperation() tea.Cmd {
 	}
 	key := m.actionSession.target.Key()
 	if m.httpsRootAction {
-		if len(m.actionItems()) != 1 || m.httpsRootPort != m.actionSession.target.Port {
+		if len(m.actionItems()) != 1 || m.httpsRootPort < 1 {
 			m.modal = modalNone
 			m.discardHTTPSRootAction()
-			m.setBanner("HTTPS root preview is incomplete; refresh and select one exact listener", true)
+			m.setBanner("HTTPS preview is incomplete; refresh and select one exact listener", true)
 			return nil
 		}
 		if _, busy := m.activeOps[key]; busy {
@@ -260,14 +286,15 @@ func (m *workspaceModel) startSingleOperation() tea.Cmd {
 		m.markApplying(key)
 		target := m.actionSession.target
 		options := exposure.HTTPSRootOptions{
-			HTTPSPort: m.httpsRootPort, LocalhostBackendAlias: m.httpsRootLocalhostBackend,
-			ReplaceRawTCP: m.httpsRootReplaceRawTCP, ConfirmExternal: m.httpsRootReplaceRawTCP,
-			ExpectedRawTCPRouteID: m.httpsRootRouteID,
+			Mode: m.actionSession.mode, HTTPSPort: m.httpsRootPort,
+			ConfirmFunnel:        m.actionSession.mode == exposuredata.ExposureFunnel,
+			ReplaceExistingRoute: m.httpsRootReplaceRoute, ExpectedRouteID: m.httpsRootRouteID,
+			ConfirmExternal: m.httpsRootReplaceRoute,
 		}
 		controller, timeout := m.controller, m.cfg.OperationTimeout
 		approval := m.mutationApproval(item, target)
 		m.discardHTTPSRootAction()
-		m.transient = "Applying private HTTPS root to " + target.String()
+		m.transient = "Applying " + string(m.actionSession.mode) + " HTTPS root to " + target.String()
 		return func() tea.Msg {
 			receipt, err := controller.ApplyHTTPSRootWithOptionsApproved(ctx, target, options, timeout, approval)
 			return operationDoneMsg{targetKey: key, receipt: receipt, err: err}
@@ -330,21 +357,43 @@ func (m *workspaceModel) startBatchOperation() tea.Cmd {
 			m.setBanner("Selection contains a target with an operation Applying", true)
 			return nil
 		}
-		if workspace.SameStateForItem(m.view, item, m.actionSession.mode) {
-			continue
-		}
 		providerKey, routeID := batchRouteSelection(m.actionSession.mode, item)
+		request := batchOperation{itemID: item.ID, target: target, providerKey: providerKey, routeID: routeID}
+		if m.httpsRootAction {
+			port, replacement, already, reason := httpsRootRoutePlan(m.view.Exposures.Routes, item, m.actionSession.mode)
+			if reason != "" {
+				m.setBanner(item.ID+": "+reason, true)
+				return nil
+			}
+			if already {
+				continue
+			}
+			request.httpsRoot = true
+			request.httpsRootPort = port
+			request.routeID = ""
+			if replacement != nil {
+				request.routeID = replacement.ID
+				request.confirmExternal = workspace.ExternalPreview(item, replacement.ID)
+			}
+		} else {
+			if workspace.SameStateForItem(m.view, item, m.actionSession.mode) {
+				continue
+			}
+			routeChoice := routeID
+			if routeChoice == "" {
+				routeChoice = providerKey
+			}
+			request.confirmExternal = workspace.ExternalPreview(item, routeChoice)
+		}
 		approval := m.mutationApproval(item, target)
 		approval.AllowOtherRouteChanges = true
-		routeChoice := routeID
-		if routeChoice == "" {
-			routeChoice = providerKey
-		}
-		requests = append(requests, batchOperation{itemID: item.ID, target: target, providerKey: providerKey, routeID: routeID, confirmExternal: workspace.ExternalPreview(item, routeChoice), approval: approval})
+		request.approval = approval
+		requests = append(requests, request)
 	}
 	if len(requests) == 0 {
 		m.modal = modalNone
-		m.transient = fmt.Sprintf("Already %s for %d selected service(s)", m.actionSession.mode, len(items))
+		m.transient = fmt.Sprintf("Already %s HTTPS for %d selected service(s)", m.actionSession.mode, len(items))
+		m.discardHTTPSRootAction()
 		return nil
 	}
 	batchCtx := newBatchContext(m.ctx)
@@ -358,7 +407,8 @@ func (m *workspaceModel) startBatchOperation() tea.Cmd {
 	}
 	m.transient = fmt.Sprintf("Applying %s to %d selected services", m.actionSession.mode, len(requests))
 	cmds := make([]tea.Cmd, 0, len(requests))
-	mode, confirmFunnel := m.actionSession.mode, m.actionSession.mode == exposuredata.ExposureFunnel
+	mode, confirmFunnel, rootAction := m.actionSession.mode, m.actionSession.mode == exposuredata.ExposureFunnel, m.httpsRootAction
+	m.discardHTTPSRootAction()
 	controller := m.controller
 	timeout := m.cfg.OperationTimeout
 	for index, request := range requests {
@@ -366,7 +416,10 @@ func (m *workspaceModel) startBatchOperation() tea.Cmd {
 		cmds = append(cmds, func() tea.Msg {
 			var receipt exposuredata.OperationReceipt
 			var err error
-			if mode == exposuredata.ExposureDisabled && request.routeID != "" {
+			if request.httpsRoot || rootAction {
+				options := exposure.HTTPSRootOptions{Mode: mode, HTTPSPort: request.httpsRootPort, ConfirmFunnel: confirmFunnel, ReplaceExistingRoute: request.routeID != "", ExpectedRouteID: request.routeID, ConfirmExternal: request.confirmExternal}
+				receipt, err = controller.ApplyHTTPSRootWithOptionsApproved(batchCtx, request.target, options, timeout, request.approval)
+			} else if mode == exposuredata.ExposureDisabled && request.routeID != "" {
 				receipt, err = controller.ApplyRouteIdentityApproved(batchCtx, request.target, request.routeID, request.confirmExternal, timeout, request.approval)
 			} else if mode == exposuredata.ExposureDisabled && request.providerKey != "" {
 				receipt, err = controller.ApplyRouteApproved(batchCtx, request.target, request.providerKey, request.confirmExternal, timeout, request.approval)

@@ -52,6 +52,12 @@ type ListenerSelector struct {
 	Port      int
 }
 
+// FunnelHTTPSPortSupported reports whether Tailscale Funnel can expose HTTPS
+// on port. Funnel's public HTTPS endpoints are restricted to these ports.
+func FunnelHTTPSPortSupported(port int) bool {
+	return port == 443 || port == 8443 || port == 10000
+}
+
 func ParseListenerSelector(value string, expectedMode exposuredata.ExposureMode) (ListenerSelector, error) {
 	parts := strings.SplitN(value, ":", 2)
 	if len(parts) != 2 || parts[0] != string(expectedMode) {

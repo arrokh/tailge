@@ -76,8 +76,6 @@ func (m *workspaceModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.openAction(ptrMode(exposuredata.ExposureFunnel))
 	case "d":
 		m.openAction(ptrMode(exposuredata.ExposureDisabled))
-	case "b":
-		m.openHTTPSRootPreview()
 	case "O":
 		return m, m.openLocalURL()
 	case "v":
@@ -372,6 +370,10 @@ func (m *workspaceModel) chooseAction() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	mode := choice.mode
+	if mode == exposuredata.ExposureServe || mode == exposuredata.ExposureFunnel {
+		m.openHTTPSRootPreview(mode)
+		return m, nil
+	}
 	allSame := len(items) > 0
 	for _, item := range items {
 		if !workspace.SameStateForItem(m.view, item, mode) {
@@ -442,16 +444,6 @@ func (m *workspaceModel) beginConfirmation(mode exposuredata.ExposureMode) (tea.
 }
 
 func (m *workspaceModel) updateConfirmModal(_ tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
-	if m.httpsRootAction && key == "ctrl+b" {
-		item, ok := m.actionAnchorItem()
-		if ok && item.Listener != nil && supportsLocalhostBackendAlias(item.Listener.Target) {
-			m.httpsRootLocalhostBackend = !m.httpsRootLocalhostBackend
-			m.transient = "HTTPS root backend alias toggled; review the exact address preview"
-		} else {
-			m.setBanner("localhost backend alias is only available for IPv6 listeners", true)
-		}
-		return m, nil
-	}
 	if key == "esc" {
 		m.modal = modalNone
 		if m.httpsRootAction {

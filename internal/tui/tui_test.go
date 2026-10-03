@@ -376,7 +376,7 @@ func workspaceFixture() *workspaceModel {
 	target := targetmodel.Target{Address: "127.0.0.1", Port: 3000, Protocol: "tcp"}
 	now := time.Now()
 	listener := discovery.Listener{ID: "listener-app", Name: "web", Process: "node", ProcessStart: "test:4242", PID: 4242, CommandLine: "node dev-server", Target: target, Scope: targetmodel.ScopeLoopback, Metadata: discovery.MetadataComplete, FirstSeen: now, LastSeen: now}
-	route := exposuredata.ExposureRoute{ID: "route-app", ProviderKey: "tcp:3000", Target: target, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipManaged, State: exposuredata.ExposureActive, LastSeen: now, LastVerifiedAt: now}
+	route := exposuredata.ExposureRoute{ID: "route-app", ProviderKey: "serve:tcp=3000", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:3000", Target: target, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipManaged, State: exposuredata.ExposureActive, LastSeen: now, LastVerifiedAt: now}
 	return &workspaceModel{
 		workspaceState: workspaceState{
 			cfg: config.Defaults(),
@@ -463,7 +463,7 @@ func (provider *httpsRootTestProvider) Remove(_ context.Context, selector tailsc
 }
 
 func httpsRootCapabilities() tailscale.Capabilities {
-	return tailscale.Capabilities{Serve: true, Funnel: true, ExactServe: true, ExactFunnel: true, ServeTCP: true, ServeHTTPS: true, FunnelHTTPS: true, ServePath: true, FunnelPath: true}
+	return tailscale.Capabilities{Serve: true, Funnel: true, ExactServe: true, ExactFunnel: true, ServeTCP: true, ServeHTTPS: true, FunnelTCP: true, FunnelHTTPS: true, ServePath: true, FunnelPath: true}
 }
 
 func httpsRootReadiness() readiness.Readiness {
@@ -522,10 +522,36 @@ func TestDetailsGroupsRoutesAndStatusBadges(t *testing.T) {
 	m.view.Items[0].Warning = "multiple exposure routes match this listener"
 	m.readiness.Modes[1].Status = readiness.ReadinessReadOnly
 	view := m.renderDetails(120, 100)
-	for _, want := range []string{"[! AMBIG]", "── ALERTS ──", "── EXPOSURE ROUTES (2) ──", "[MANAGED]", "[UNKNOWN]", "── ACTION ITEMS ──", "unknown proxy destination", "--localhost-backend", "[! READ-ONLY]"} {
+	for _, want := range []string{"[! AMBIG]", "── ALERTS ──", "── EXPOSURE ROUTES (2) ──", "[MANAGED]", "[UNKNOWN]", "── ACTION ITEMS ──", "unknown proxy destination", "--localhost-backend", "TUI preserves numeric IPv6 backends", "[! READ-ONLY]"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("details missing %q: %s", want, view)
 		}
+	}
+	if strings.Contains(view, "Ctrl+B") {
+		t.Fatalf("details offered an obsolete TUI backend shortcut: %s", view)
+	}
+}
+
+func TestDetailsLabelHTTPSRootByVisibilityScope(t *testing.T) {
+	m := workspaceFixture()
+	root := m.view.Items[0].Routes[0]
+	root.Kind = exposuredata.RouteKindHTTPSRoot
+	root.Path = "/"
+	root.ProviderKey = "serve:https=3000"
+	root.Backend = "http://127.0.0.1:3000"
+	root.Mode = exposuredata.ExposureServe
+	m.view.Items[0].Routes = []exposuredata.ExposureRoute{root}
+	serveDetails := m.renderDetails(120, 80)
+	if !strings.Contains(serveDetails, "private HTTPS root handler") || strings.Contains(serveDetails, "public HTTPS root handler") {
+		t.Fatalf("Serve root visibility was mislabeled: %s", serveDetails)
+	}
+
+	root.Mode = exposuredata.ExposureFunnel
+	root.ProviderKey = "funnel:https=10000"
+	m.view.Items[0].Routes = []exposuredata.ExposureRoute{root}
+	funnelDetails := m.renderDetails(120, 80)
+	if !strings.Contains(funnelDetails, "public HTTPS root handler") || strings.Contains(funnelDetails, "private HTTPS root handler") {
+		t.Fatalf("Funnel root visibility was mislabeled: %s", funnelDetails)
 	}
 }
 
@@ -564,10 +590,10 @@ func TestFooterUsesGroupedHintsThatAdaptToWidth(t *testing.T) {
 		width int
 		want  []string
 	}{
-		{120, []string{"↑↓ Move", "Tab Focus", "v/V", "s/f/d Routes", "b HTTPS", "x Term", "e/S Sort", "w Filter", "/ Find", "z Zoom", "? Help", "q Quit"}},
+		{120, []string{"↑↓ Move", "Tab Focus", "v/V", "s/f/d HTTPS", "x Term", "e/S Sort", "w Filter", "/ Find", "z Zoom", "? Help", "q Quit"}},
 		{100, []string{"↑↓ Move", "Tab Focus", "s/f/d", "e/S Sort", "w Filter", "/ Find", "z Zoom", "? Help", "q Quit"}},
 		{72, []string{"↑↓ Move", "Tab Focus", "e/S Sort", "/ Find", "? Help", "q Quit"}},
-		{30, []string{"o:off", "y:off", "w", "? Help"}},
+		{30, []string{"o:TCP", "y:off", "w", "? Help"}},
 	} {
 		m.width = test.width
 		lines := strings.Split(m.renderBottom(), "\n")
@@ -618,14 +644,14 @@ func TestFooterShowsSortModeAndLargeOperationsKeepPriority(t *testing.T) {
 
 	m.width, m.cfg.Sort, m.transient = 80, "name", "Applying batch (2/4)"
 	line := ansi.Strip(strings.Split(m.renderBottom(), "\n")[0])
-	if !strings.Contains(line, "Applying batch (2/4)") || !strings.Contains(line, "o:off") || !strings.Contains(line, "y:off") {
+	if !strings.Contains(line, "Applying batch (2/4)") || !strings.Contains(line, "o:TCP-only") || !strings.Contains(line, "y:off") {
 		t.Fatalf("applying status obscured shortcut availability: %q", line)
 	}
 
 	m.width, m.searching, m.transient = 30, true, ""
 	lines := strings.Split(m.renderBottom(), "\n")
 	visible := ansi.Strip(lines[1])
-	for _, hint := range []string{"Enter/Esc", "o:off", "y:off"} {
+	for _, hint := range []string{"Enter/Esc", "o:TCP", "y:off"} {
 		if !strings.Contains(visible, hint) {
 			t.Errorf("narrow search footer omitted %q: %q", hint, visible)
 		}
@@ -689,7 +715,7 @@ func TestFooterUsesDevelopmentFallbackAndCompactRepositoryLink(t *testing.T) {
 		t.Fatalf("footer has %d lines, want 2: %q", len(lines), lines)
 	}
 	visible := ansi.Strip(lines[0])
-	if !strings.Contains(visible, "L w:all b[off]") {
+	if !strings.Contains(visible, "L w:all s+f+") {
 		t.Fatalf("narrow footer lost compact focus/path status: %q", visible)
 	}
 	if !strings.Contains(visible, "dev GitHub") {
@@ -701,7 +727,7 @@ func TestFooterUsesDevelopmentFallbackAndCompactRepositoryLink(t *testing.T) {
 	if width := lipgloss.Width(lines[0]); width > m.width {
 		t.Fatalf("narrow footer identity line exceeds width: got %d, want <= %d: %q", width, m.width, lines[0])
 	}
-	if !strings.Contains(lines[1], "? Help") || !strings.Contains(lines[1], "o:off") {
+	if !strings.Contains(lines[1], "? Help") || !strings.Contains(lines[1], "o:TCP") {
 		t.Fatalf("narrow footer hid help or shortcut availability: %q", lines[1])
 	}
 }
@@ -714,7 +740,7 @@ func TestFooterShortensCommitToPreserveNarrowStatus(t *testing.T) {
 	m := workspaceFixture()
 	m.width = 30
 	line := ansi.Strip(strings.Split(m.renderBottom(), "\n")[0])
-	if !strings.Contains(line, "3d16efb GitHub") || !strings.Contains(line, "L w:all b[off]") {
+	if !strings.Contains(line, "3d16efb GitHub") || !strings.Contains(line, "L w:all s+f+") {
 		t.Fatalf("long commit obscured narrow footer status: %q", line)
 	}
 	if width := lipgloss.Width(line); width > m.width {
@@ -777,7 +803,7 @@ func TestHelpDocumentsShortcutGroups(t *testing.T) {
 	help := strings.Join(helpLines(), "\n")
 	for _, text := range []string{
 		"WORKSPACE / NAVIGATION", "SEARCH / FILTER", "ACTION PREVIEW", "CONFIRMATION / APPLYING", "COMMAND PALETTE", "HELP", "SAFETY / STATE",
-		"C or Ctrl-l", "U                    clear all selected items", "s                    preview private Serve", "f                    preview public Funnel", "d                    preview Disable", "b                    preview a private HTTPS root", "HTTPS root           replaces only the exact conflicting Serve TCP route", "choose among exact paths", "Ctrl-d/Page Down", "Ctrl-u/Page Up", "Home/End", "Funnel               remains public", "z                    zoom the focused pane", "e/S                  cycle Name ↑, Name ↓, and unsorted order", "w                    toggle mode filter", "CPU% / MEM",
+		"C or Ctrl-l", "U                    clear all selected items", "s                    preview private HTTPS Serve", "f                    preview public HTTPS Funnel", "d                    preview Disable", "s/f HTTPS            replace only one exact raw-TCP or HTTPS-root route", "HTTP backend         the selected local service must speak HTTP", "choose among exact paths", "Ctrl-d/Page Down", "Ctrl-u/Page Up", "Home/End", "Funnel               remains public", "z                    zoom the focused pane", "e/S                  cycle Name ↑, Name ↓, and unsorted order", "w                    toggle mode filter", "CPU% / MEM",
 	} {
 		if !strings.Contains(help, text) {
 			t.Fatalf("help missing %q:\n%s", text, help)
@@ -823,6 +849,38 @@ func TestDetailLabelsServeAndFunnelReadinessAndOperationOwners(t *testing.T) {
 		if !strings.Contains(view, text) {
 			t.Fatalf("detail panel missing %q: %q", text, view)
 		}
+	}
+}
+
+func TestRawTCPFunnelAlertsExplainPublicAccessAndBrowserLimits(t *testing.T) {
+	item := exposure.ReconciledItem{
+		Mode:    exposuredata.ExposureFunnel,
+		Warning: "WARNING: Funnel is configured for public internet access",
+		Routes: []exposuredata.ExposureRoute{{
+			ID: "funnel-route", Kind: exposuredata.RouteKindRawTCP, ProviderKey: "funnel:tcp=10000",
+			Mode: exposuredata.ExposureFunnel, State: exposuredata.ExposureActive,
+		}},
+	}
+	warnings := detailWarningsForItem(item)
+	if len(warnings) != 1 {
+		t.Fatalf("alerts = %#v, want one public TCP alert", warnings)
+	}
+	for _, phrase := range []string{"public TCP forwarding via funnel:tcp=10000", "external connectivity test", "not an HTTPS route"} {
+		if !strings.Contains(warnings[0], phrase) {
+			t.Errorf("alert omitted %q: %q", phrase, warnings[0])
+		}
+	}
+	actions := detailActionItems(item)
+	if len(actions) != 1 {
+		t.Fatalf("action items = %#v, want one Funnel TCP action", actions)
+	}
+	for _, phrase := range []string{"Tailscale Funnel status", "test TCP from outside your tailnet", "HTTP backend", "o does not open Funnel TCP"} {
+		if !strings.Contains(actions[0], phrase) {
+			t.Errorf("action item omitted %q: %q", phrase, actions[0])
+		}
+	}
+	if strings.Contains(actions[0], "confirm the exact Funnel action") {
+		t.Fatalf("action still tells the user to confirm an already configured Funnel route: %q", actions[0])
 	}
 }
 
@@ -1086,7 +1144,7 @@ func TestWorkspaceRefreshDoesNotPaintTransientActionWarning(t *testing.T) {
 	if strings.Contains(view, "refresh is in progress") {
 		t.Fatalf("refresh warning leaked into action choices: %q", view)
 	}
-	if strings.Contains(view, "Serve (s, tailnet only) [unavailable]") || strings.Contains(view, "Funnel (f, public internet) [unavailable]") {
+	if strings.Contains(view, "Serve HTTPS (s, tailnet only) [unavailable]") || strings.Contains(view, "Funnel HTTPS (f, public internet) [unavailable]") {
 		t.Fatalf("refresh-waiting actions were presented as unavailable: %q", view)
 	}
 	availability := m.actionAvailability(exposuredata.ExposureFunnel)
@@ -1103,7 +1161,7 @@ func TestWorkspaceActionModalLabelsGenuineUnavailableChoice(t *testing.T) {
 	m := workspaceFixture()
 	m.readiness.Modes[1].Status = readiness.ReadinessReadOnly
 	m.openAction(ptrMode(exposuredata.ExposureFunnel))
-	if view := m.View(); !strings.Contains(view, "Funnel (f, public internet) [unavailable]") {
+	if view := m.View(); !strings.Contains(view, "Funnel HTTPS (f, public internet) [unavailable]") {
 		t.Fatalf("genuinely unavailable action lost its label: %q", view)
 	}
 }
@@ -1157,8 +1215,8 @@ func TestWorkspaceConfirmationDefersToRefresh(t *testing.T) {
 		t.Fatal("refresh did not start")
 	}
 	m.Update(keyType(tea.KeyEnter))
-	if m.modal != modalAction || len(m.activeOps) != 0 {
-		t.Fatalf("confirmation bypassed refresh guard: modal=%v operations=%d", m.modal, len(m.activeOps))
+	if m.modal != modalConfirm || len(m.activeOps) != 0 || !strings.Contains(m.banner, "preview paused while refresh") {
+		t.Fatalf("confirmation bypassed refresh guard: modal=%v operations=%d banner=%q", m.modal, len(m.activeOps), m.banner)
 	}
 }
 
@@ -1179,12 +1237,8 @@ func TestWorkspaceConfirmationRemainsVisibleUntilOperatorActsDuringRefresh(t *te
 	seq := m.refreshState.sequence()
 	m.Update(viewLoadedMsg{seq: seq, view: changed})
 	m.Update(readinessLoadedMsg{seq: seq, data: m.readiness})
-	if m.modal != modalConfirm || !m.actionSession.confirm {
-		t.Fatalf("refresh closed confirmation without operator input: modal=%v focus=%t", m.modal, m.actionSession.confirm)
-	}
-	m.Update(keyType(tea.KeyEnter))
-	if len(m.activeOps) != 0 || !strings.Contains(m.banner, "Selection changed") {
-		t.Fatalf("stale confirmation bypassed preview recheck: operations=%d banner=%q", len(m.activeOps), m.banner)
+	if m.modal != modalNone || !strings.Contains(m.banner, "Selection changed") {
+		t.Fatalf("changed preview remained confirmable after refresh: modal=%v banner=%q", m.modal, m.banner)
 	}
 }
 
@@ -1199,7 +1253,7 @@ func TestWorkspaceConfirmationRechecksReadinessBeforeMutation(t *testing.T) {
 	m.readiness.Modes[1].Status = readiness.ReadinessReadOnly
 	m.readyErr = errors.New("readiness changed while confirming")
 	m.Update(keyType(tea.KeyEnter))
-	if m.modal != modalAction || len(m.activeOps) != 0 || !strings.Contains(m.banner, "readiness state is stale") {
+	if m.modal != modalConfirm || len(m.activeOps) != 0 || !strings.Contains(m.banner, "readiness state is stale") {
 		t.Fatalf("confirmation bypassed a changed readiness guard: modal=%v operations=%d banner=%q", m.modal, len(m.activeOps), m.banner)
 	}
 }
@@ -1247,7 +1301,7 @@ func TestWorkspaceActionModalKeysChooseWithoutArrowAndEnter(t *testing.T) {
 				t.Fatalf("space did not open action selector: modal=%v", m.modal)
 			}
 			view := m.View()
-			for _, label := range []string{"Disabled (d)", "Serve (s, tailnet only)", "Funnel (f, public internet)", "d/s/f choose"} {
+			for _, label := range []string{"Disabled (d)", "Serve HTTPS (s, tailnet only)", "Funnel HTTPS (f, public internet)", "d/s/f choose"} {
 				if !strings.Contains(view, label) {
 					t.Fatalf("action selector omitted shortcut %q: %q", label, view)
 				}
@@ -1263,7 +1317,7 @@ func TestWorkspaceActionModalKeysChooseWithoutArrowAndEnter(t *testing.T) {
 			if test.mode == exposuredata.ExposureFunnel && !strings.Contains(m.View(), "WARNING: public internet exposure") {
 				t.Fatalf("Funnel shortcut omitted public exposure warning: %q", m.View())
 			}
-			if test.mode == exposuredata.ExposureDisabled && (m.actionSession.routeID != "route-app" || m.actionSession.routeKey != "tcp:3000") {
+			if test.mode == exposuredata.ExposureDisabled && (m.actionSession.routeID != "route-app" || m.actionSession.routeKey != "serve:tcp=3000") {
 				t.Fatalf("Disable shortcut lost exact route identity: routeID=%q selector=%q", m.actionSession.routeID, m.actionSession.routeKey)
 			}
 		})
@@ -1383,7 +1437,7 @@ func TestWorkspaceAmbiguousDuplicateRoutesCannotOpenDisableChooser(t *testing.T)
 	}
 }
 
-func TestBrowserHTTPSRootShortcutPreviewsAndConvertsExactRawTCPRoute(t *testing.T) {
+func TestServeShortcutPreviewsAndConvertsExactRawTCPRouteToHTTPS(t *testing.T) {
 	m := workspaceFixture()
 	target := m.view.Items[0].Listener.Target.Normalized()
 	raw := exposuredata.ExposureRoute{ID: "raw-3000", ProviderKey: "serve:tcp=3000", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:3000", Target: target, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive}
@@ -1392,12 +1446,13 @@ func TestBrowserHTTPSRootShortcutPreviewsAndConvertsExactRawTCPRoute(t *testing.
 	m.view.Items[0].State, m.view.Items[0].Mode = exposuredata.ExposureActive, exposuredata.ExposureServe
 	provider := &httpsRootTestProvider{snapshot: m.view.Exposures, caps: httpsRootCapabilities(), readiness: httpsRootReadiness()}
 	m.controller = exposure.NewController(&httpsRootTestListener{snapshot: m.view.Listeners}, provider)
-	m.Update(keyRune('b'))
+	m.Update(keyRune('s'))
+	m.Update(keyRune('s'))
 	if m.modal != modalConfirm || m.actionSession.confirm {
-		t.Fatalf("browser HTTPS shortcut did not open a Cancel-first preview: modal=%v confirm=%t", m.modal, m.actionSession.confirm)
+		t.Fatalf("Serve shortcut did not open a Cancel-first HTTPS preview: modal=%v confirm=%t", m.modal, m.actionSession.confirm)
 	}
 	preview := m.View()
-	for _, want := range []string{"https://<Tailscale DNS>:3000/", "Provider selector: serve:https=3000", "Local HTTP backend: http://127.0.0.1:3000", "Replacing exact raw-TCP route: serve:tcp=3000", "ownership=unknown", "[Cancel]"} {
+	for _, want := range []string{"https://<Tailscale DNS>:3000/", "Provider selector: serve:https=3000", "Local HTTP backend: http://127.0.0.1:3000", "Replacing exact observed route: serve selector=serve:tcp=3000", "ownership=unknown", "Discovery proves TCP only", "[Cancel]"} {
 		if !strings.Contains(preview, want) {
 			t.Fatalf("same-port HTTPS preview omitted %q: %s", want, preview)
 		}
@@ -1406,50 +1461,150 @@ func TestBrowserHTTPSRootShortcutPreviewsAndConvertsExactRawTCPRoute(t *testing.
 	if m.modal != modalNone || len(provider.removes) != 0 || len(provider.sets) != 0 {
 		t.Fatalf("default Cancel changed the exact route: modal=%v removes=%#v sets=%#v", m.modal, provider.removes, provider.sets)
 	}
-	m.Update(keyRune('b'))
+	m.Update(keyRune('s'))
+	m.Update(keyRune('s'))
 	m.Update(keyType(tea.KeyTab))
 	_, cmd := m.Update(keyType(tea.KeyEnter))
 	if cmd == nil {
-		t.Fatal("confirmed private HTTPS-root conversion did not invoke the controller")
+		t.Fatal("confirmed private HTTPS Serve conversion did not invoke the controller")
 	}
 	result, ok := cmd().(operationDoneMsg)
 	if !ok || result.err != nil || !result.receipt.Verified {
 		t.Fatalf("same-port conversion was not verified: message=%#v", result)
 	}
 	if len(provider.removes) != 1 || provider.removes[0].ID != raw.ProviderKey || len(provider.sets) != 1 || !provider.sets[0].HTTPSRoot || provider.sets[0].ProviderKey != "serve:https=3000" || provider.sets[0].Backend != "http://127.0.0.1:3000" {
-		t.Fatalf("TUI did not replace only the exact raw route with private HTTPS: removes=%#v sets=%#v", provider.removes, provider.sets)
+		t.Fatalf("TUI did not replace only the exact raw route with private HTTPS Serve: removes=%#v sets=%#v", provider.removes, provider.sets)
 	}
 	if len(provider.snapshot.Routes) != 1 || provider.snapshot.Routes[0].Kind != exposuredata.RouteKindHTTPSRoot || provider.snapshot.Routes[0].URL != "https://dev.example.ts.net:3000/" {
 		t.Fatalf("TUI root route was not verified on the exact port: %#v", provider.snapshot.Routes)
 	}
-	m.Update(keyRune('p'))
+	m.Update(keyRune('b'))
 	if m.modal != modalNone || m.httpsRootAction {
-		t.Fatalf("obsolete p named-path shortcut is still active: modal=%v rootAction=%t", m.modal, m.httpsRootAction)
+		t.Fatalf("obsolete B/p shortcuts are still active: modal=%v rootAction=%t", m.modal, m.httpsRootAction)
 	}
 }
 
-func TestHTTPSRootShortcutStatusTracksReadiness(t *testing.T) {
+func TestFunnelShortcutConvertsExactTCPRouteToHTTPSOnObservedPort(t *testing.T) {
+	m := workspaceFixture()
+	target := m.view.Items[0].Listener.Target.Normalized()
+	raw := exposuredata.ExposureRoute{ID: "funnel-tcp-10000", ProviderKey: "funnel:tcp=10000", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:3000", Target: target, Mode: exposuredata.ExposureFunnel, Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive}
+	m.view.Exposures.Routes = []exposuredata.ExposureRoute{raw}
+	m.view.Items[0].Routes = []exposuredata.ExposureRoute{raw}
+	m.view.Items[0].State, m.view.Items[0].Mode = exposuredata.ExposureActive, exposuredata.ExposureFunnel
+	provider := &httpsRootTestProvider{snapshot: m.view.Exposures, caps: httpsRootCapabilities(), readiness: httpsRootReadiness()}
+	m.controller = exposure.NewController(&httpsRootTestListener{snapshot: m.view.Listeners}, provider)
+
+	m.Update(keyRune('f'))
+	m.Update(keyRune('f'))
+	if m.modal != modalConfirm || m.actionSession.confirm {
+		t.Fatalf("Funnel shortcut did not open a Cancel-first HTTPS preview: modal=%v confirm=%t", m.modal, m.actionSession.confirm)
+	}
+	preview := m.View()
+	for _, want := range []string{"https://<Tailscale DNS>:10000/", "Provider selector: funnel:https=10000", "Local HTTP backend: http://127.0.0.1:3000", "Replacing exact observed route: funnel selector=funnel:tcp=10000", "WARNING: public internet exposure", "Discovery proves TCP only", "[Cancel]"} {
+		if !strings.Contains(preview, want) {
+			t.Fatalf("public HTTPS preview omitted %q: %s", want, preview)
+		}
+	}
+	m.Update(keyType(tea.KeyTab))
+	_, command := m.Update(keyType(tea.KeyEnter))
+	if command == nil {
+		t.Fatal("confirmed Funnel HTTPS conversion did not invoke the controller")
+	}
+	result, ok := command().(operationDoneMsg)
+	if !ok || result.err != nil || !result.receipt.Verified {
+		t.Fatalf("Funnel HTTPS conversion was not verified: %#v", result)
+	}
+	if len(provider.removes) != 1 || provider.removes[0].ID != raw.ProviderKey || len(provider.sets) != 1 || provider.sets[0].Mode != exposuredata.ExposureFunnel || !provider.sets[0].HTTPSRoot || provider.sets[0].ProviderKey != "funnel:https=10000" || provider.sets[0].Backend != "http://127.0.0.1:3000" {
+		t.Fatalf("Funnel did not replace only the exact raw route with HTTPS: removes=%#v sets=%#v", provider.removes, provider.sets)
+	}
+	if len(provider.snapshot.Routes) != 1 || provider.snapshot.Routes[0].Mode != exposuredata.ExposureFunnel || provider.snapshot.Routes[0].Kind != exposuredata.RouteKindHTTPSRoot || provider.snapshot.Routes[0].URL != "https://dev.example.ts.net:10000/" {
+		t.Fatalf("public HTTPS route was not verified on the observed port: %#v", provider.snapshot.Routes)
+	}
+}
+
+func TestServeShortcutRemovesExactPublicRouteWhenSwitchingToPrivateHTTPS(t *testing.T) {
+	m := workspaceFixture()
+	target := m.view.Items[0].Listener.Target.Normalized()
+	publicTCP := exposuredata.ExposureRoute{ID: "funnel-tcp-10000", ProviderKey: "funnel:tcp=10000", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:3000", Target: target, Mode: exposuredata.ExposureFunnel, Ownership: exposuredata.OwnershipUnknown, State: exposuredata.ExposureActive}
+	m.view.Exposures.Routes = []exposuredata.ExposureRoute{publicTCP}
+	m.view.Items[0].Routes = []exposuredata.ExposureRoute{publicTCP}
+	m.view.Items[0].State, m.view.Items[0].Mode = exposuredata.ExposureActive, exposuredata.ExposureFunnel
+	provider := &httpsRootTestProvider{snapshot: m.view.Exposures, caps: httpsRootCapabilities(), readiness: httpsRootReadiness()}
+	m.controller = exposure.NewController(&httpsRootTestListener{snapshot: m.view.Listeners}, provider)
+	m.openHTTPSRootPreview(exposuredata.ExposureServe)
+	if m.modal != modalConfirm || !strings.Contains(m.View(), "Serve is private to authenticated tailnet devices") || !strings.Contains(m.View(), "Replacing exact observed route: funnel selector=funnel:tcp=10000") {
+		t.Fatalf("private switch preview did not show the exact public route replacement: modal=%v view=%s", m.modal, m.View())
+	}
+	m.Update(keyType(tea.KeyTab))
+	_, command := m.Update(keyType(tea.KeyEnter))
+	if command == nil {
+		t.Fatal("confirmed private scope change did not invoke the controller")
+	}
+	result, ok := command().(operationDoneMsg)
+	if !ok || result.err != nil || !result.receipt.Verified {
+		t.Fatalf("private scope change was not verified: %#v", result)
+	}
+	if len(provider.removes) != 1 || provider.removes[0].Mode != exposuredata.ExposureFunnel || provider.removes[0].ID != publicTCP.ProviderKey || len(provider.sets) != 1 || provider.sets[0].Mode != exposuredata.ExposureServe || provider.sets[0].ProviderKey != "serve:https=3000" || !provider.sets[0].HTTPSRoot {
+		t.Fatalf("S did not remove public Funnel and install private HTTPS: removes=%#v sets=%#v", provider.removes, provider.sets)
+	}
+}
+
+func TestHTTPSRootRoutePlanSelectsScopeSpecificPorts(t *testing.T) {
+	m := workspaceFixture()
+	item := m.view.Items[0]
+	item.Routes = nil
+	item.State, item.Mode = exposuredata.ExposureState("disabled"), exposuredata.ExposureDisabled
+	for _, test := range []struct {
+		mode exposuredata.ExposureMode
+		port int
+	}{{exposuredata.ExposureServe, 3000}, {exposuredata.ExposureFunnel, 443}} {
+		port, replacement, already, reason := httpsRootRoutePlan(nil, item, test.mode)
+		if reason != "" || port != test.port || replacement != nil || already {
+			t.Errorf("new %s HTTPS plan = port %d replacement=%#v already=%t reason=%q", test.mode, port, replacement, already, reason)
+		}
+	}
+	root := exposuredata.ExposureRoute{ID: "funnel-root-8443", ProviderKey: "funnel:https=8443", Kind: exposuredata.RouteKindHTTPSRoot, Path: "/", Backend: "http://127.0.0.1:3000", Target: item.Listener.Target, Mode: exposuredata.ExposureFunnel, State: exposuredata.ExposureActive}
+	item.Routes = []exposuredata.ExposureRoute{root}
+	item.State, item.Mode = exposuredata.ExposureActive, exposuredata.ExposureFunnel
+	port, replacement, already, reason := httpsRootRoutePlan([]exposuredata.ExposureRoute{root}, item, exposuredata.ExposureFunnel)
+	if reason != "" || port != 8443 || replacement != nil || !already {
+		t.Fatalf("existing Funnel HTTPS port was not retained as a verified no-op: port=%d replacement=%#v already=%t reason=%q", port, replacement, already, reason)
+	}
+}
+
+func TestHTTPSRootPlanRejectsUnrestorableFunnelPort(t *testing.T) {
+	m := workspaceFixture()
+	item := m.view.Items[0]
+	root := exposuredata.ExposureRoute{ID: "funnel-root-invalid", ProviderKey: "funnel:https=3000", Kind: exposuredata.RouteKindHTTPSRoot, Path: "/", Backend: "http://127.0.0.1:3000", Target: item.Listener.Target, Mode: exposuredata.ExposureFunnel, State: exposuredata.ExposureActive}
+	item.Routes = []exposuredata.ExposureRoute{root}
+	item.State, item.Mode = exposuredata.ExposureActive, exposuredata.ExposureFunnel
+	if _, replacement, already, reason := httpsRootRoutePlan([]exposuredata.ExposureRoute{root}, item, exposuredata.ExposureServe); reason == "" || replacement != nil || already {
+		t.Fatalf("unrestorable Funnel HTTPS source reached a replacement plan: replacement=%#v already=%t reason=%q", replacement, already, reason)
+	}
+}
+
+func TestHTTPSActionStatusTracksReadiness(t *testing.T) {
 	m := workspaceFixture()
 	m.view.Items[0].Routes = nil
 	m.view.Exposures.Routes = nil
 	m.view.Items[0].State, m.view.Items[0].Mode = exposuredata.ExposureState("disabled"), exposuredata.ExposureDisabled
-	if status := m.httpsRootStatusLabel(); status != "b HTTPS root[ok]" {
-		t.Fatalf("ready explicit root shortcut status = %q", status)
+	if status := m.httpsActionStatusLabel(); status != "s:ok f:ok" {
+		t.Fatalf("ready HTTPS action status = %q", status)
 	}
 	second := m.view.Items[0]
 	second.ID = "listener-two"
 	second.Listener = &discovery.Listener{ID: "listener-two", Target: targetmodel.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}}
 	m.view.Items = append(m.view.Items, second)
 	m.selectedItems = map[string]bool{m.view.Items[0].ID: true, second.ID: true}
-	if status := m.httpsRootStatusLabel(); status != "b HTTPS root[off]" {
-		t.Fatalf("multi-listener selection advertised a single-listener root action: %q", status)
+	if status := m.httpsActionStatusLabel(); status != "s:ok f:off" {
+		t.Fatalf("multi-listener selection advertised unavailable HTTPS actions as ready: %q", status)
 	}
 	m.selectedItems = nil
 	m.readiness.Modes[0].HTTPPathStatus = readiness.ReadinessReadOnly
 	m.readiness.Modes[0].HTTPPathMessage = "--set-path is unavailable"
 	m.readiness.Modes[0].HTTPPathRemediation = "Upgrade Tailscale"
-	if status := m.httpsRootStatusLabel(); status != "b HTTPS root[off]" {
-		t.Fatalf("unsupported exact HTTPS-root capability was advertised as available: %q", status)
+	if status := m.httpsActionStatusLabel(); status != "s:off f:ok" {
+		t.Fatalf("unsupported private HTTPS capability was advertised as available: %q", status)
 	}
 }
 
@@ -1461,8 +1616,8 @@ func TestHTTPSRootShortcutRejectsConflictingRootBackend(t *testing.T) {
 	m.view.Exposures.Routes = []exposuredata.ExposureRoute{conflict}
 	m.view.Items[0].Routes = []exposuredata.ExposureRoute{conflict}
 	m.view.Items[0].State, m.view.Items[0].Mode = exposuredata.ExposureActive, exposuredata.ExposureServe
-	m.Update(keyRune('b'))
-	if m.modal != modalNone || !strings.Contains(m.banner, "different backend identity") {
+	m.openHTTPSRootPreview(exposuredata.ExposureServe)
+	if m.modal != modalNone || !strings.Contains(m.banner, "existing HTTPS root does not match") {
 		t.Fatalf("conflicting root handler was not rejected before confirmation: modal=%v banner=%q", m.modal, m.banner)
 	}
 }
@@ -1474,7 +1629,7 @@ func TestHTTPSRootShortcutRejectsRawRouteWithMismatchedBackend(t *testing.T) {
 	m.view.Exposures.Routes = []exposuredata.ExposureRoute{raw}
 	m.view.Items[0].Routes = []exposuredata.ExposureRoute{raw}
 	m.view.Items[0].State, m.view.Items[0].Mode = exposuredata.ExposureActive, exposuredata.ExposureServe
-	m.Update(keyRune('b'))
+	m.openHTTPSRootPreview(exposuredata.ExposureServe)
 	if m.modal != modalNone || !strings.Contains(m.banner, "does not match the exact local listener backend") {
 		t.Fatalf("mismatched raw backend reached the root confirmation: modal=%v banner=%q", m.modal, m.banner)
 	}
@@ -1487,7 +1642,7 @@ func TestHTTPSRootPreviewInvalidatesWhenConfirmedIdentityChanges(t *testing.T) {
 	m.view.Exposures.Routes = []exposuredata.ExposureRoute{raw}
 	m.view.Items[0].Routes = []exposuredata.ExposureRoute{raw}
 	m.view.Items[0].State, m.view.Items[0].Mode = exposuredata.ExposureActive, exposuredata.ExposureServe
-	m.Update(keyRune('b'))
+	m.openHTTPSRootPreview(exposuredata.ExposureServe)
 	if m.modal != modalConfirm || !m.httpsRootAction {
 		t.Fatal("HTTPS-root preview did not open")
 	}
@@ -1498,7 +1653,7 @@ func TestHTTPSRootPreviewInvalidatesWhenConfirmedIdentityChanges(t *testing.T) {
 	}
 }
 
-func TestHTTPSRootTUIExplicitlyOptsIntoIPv6LocalhostBackend(t *testing.T) {
+func TestHTTPSActionPreservesExactIPv6BackendWithoutAdditionalShortcut(t *testing.T) {
 	m := workspaceFixture()
 	listener := *m.view.Items[0].Listener
 	listener.Target = targetmodel.Target{Address: "::1", Port: 3000, Protocol: "tcp"}.Normalized()
@@ -1509,15 +1664,17 @@ func TestHTTPSRootTUIExplicitlyOptsIntoIPv6LocalhostBackend(t *testing.T) {
 	m.view.Exposures.Routes = nil
 	provider := &httpsRootTestProvider{snapshot: m.view.Exposures, caps: httpsRootCapabilities(), readiness: httpsRootReadiness()}
 	m.controller = exposure.NewController(&httpsRootTestListener{snapshot: m.view.Listeners}, provider)
-	m.Update(keyRune('b'))
+	m.openHTTPSRootPreview(exposuredata.ExposureServe)
 	if m.modal != modalConfirm || m.actionSession.confirm {
-		t.Fatalf("IPv6 root preview was not Cancel-first: modal=%v confirm=%t", m.modal, m.actionSession.confirm)
+		t.Fatalf("IPv6 HTTPS preview was not Cancel-first: modal=%v confirm=%t", m.modal, m.actionSession.confirm)
+	}
+	backend := tailscale.HTTPPathBackendArgument(listener.Target)
+	if !strings.Contains(m.View(), "Local HTTP backend: "+backend) {
+		t.Fatalf("preview did not preserve the exact IPv6 backend %q: %s", backend, m.View())
 	}
 	m.Update(keyType(tea.KeyCtrlB))
-	for _, want := range []string{"Local HTTP backend: http://localhost:3000", "hostname resolution weakens the exact IPv6 address guarantee"} {
-		if !strings.Contains(m.View(), want) {
-			t.Fatalf("explicit IPv6 alias preview omitted %q: %s", want, m.View())
-		}
+	if strings.Contains(m.View(), "localhost:3000") {
+		t.Fatalf("an extra shortcut silently changed the exact IPv6 backend: %s", m.View())
 	}
 	m.Update(keyType(tea.KeyTab))
 	_, command := m.Update(keyType(tea.KeyEnter))
@@ -1525,8 +1682,8 @@ func TestHTTPSRootTUIExplicitlyOptsIntoIPv6LocalhostBackend(t *testing.T) {
 		t.Fatal("confirmed HTTPS-root operation did not start")
 	}
 	result, ok := command().(operationDoneMsg)
-	if !ok || result.err != nil || !result.receipt.Verified || len(provider.sets) != 1 || provider.sets[0].Backend != "http://localhost:3000" {
-		t.Fatalf("explicit IPv6 alias was not passed to the exact root operation: result=%#v changes=%#v", result, provider.sets)
+	if !ok || result.err != nil || !result.receipt.Verified || len(provider.sets) != 1 || provider.sets[0].Backend != backend {
+		t.Fatalf("exact IPv6 backend was not passed to the root operation: result=%#v changes=%#v", result, provider.sets)
 	}
 }
 
@@ -1942,14 +2099,14 @@ func TestOpenShortcutExplainsHTTPSSetupWithoutCreatingRoutes(t *testing.T) {
 	if command := m.openSelectedURL(); command != nil {
 		t.Fatal("o unexpectedly created or opened a route without an observed URL or Serve TCP route")
 	}
-	if !strings.Contains(m.banner, "No observed browser URL or Serve TCP preview") || !strings.Contains(m.banner, "Use b to preview a private HTTPS root") {
+	if !strings.Contains(m.banner, "No observed browser URL or Serve TCP preview") || !strings.Contains(m.banner, "Use s for private HTTPS or f for public HTTPS") {
 		t.Fatalf("missing URL feedback did not explain the HTTPS setup action: %q", m.banner)
 	}
 	m.banner = ""
 	if command := m.copyURL(); command != nil {
 		t.Fatal("y unexpectedly copied a URL without an observed route or Serve TCP route")
 	}
-	if !strings.Contains(m.banner, "No observed browser URL or Serve TCP preview") || !strings.Contains(m.banner, "Use b to preview a private HTTPS root") {
+	if !strings.Contains(m.banner, "No observed browser URL or Serve TCP preview") || !strings.Contains(m.banner, "Use s for private HTTPS or f for public HTTPS") {
 		t.Fatalf("missing URL feedback did not explain the copy setup action: %q", m.banner)
 	}
 }
@@ -2254,6 +2411,27 @@ func TestListenerListShowsCPUAndResidentMemory(t *testing.T) {
 	}
 }
 
+func TestListenerTableModeColumnFitsFullModeLabelAcrossWidths(t *testing.T) {
+	item := workspaceFixture().view.Items[0]
+	item.Mode = exposuredata.ExposureFunnel
+	item.Routes[0].Mode = exposuredata.ExposureFunnel
+
+	for _, width := range []int{100, 52, 51, 50, 44, 43, 42, 41, 39, 38, 32, 31} {
+		layout := listenerTableWidths(width)
+		header := listenerTableHeader(width)
+		row := listenerTableRow(item, width, false, false, false, "")
+		if got := lipgloss.Width(header); got > width {
+			t.Errorf("header exceeded width %d: got %d: %q", width, got, header)
+		}
+		if got := lipgloss.Width(row); got > width {
+			t.Errorf("row exceeded width %d: got %d: %q", width, got, row)
+		}
+		if layout.mode >= len("FUNNEL") && !strings.Contains(row, "FUNNEL") {
+			t.Errorf("mode column truncated FUNNEL at width %d (column width %d): %q", width, layout.mode, row)
+		}
+	}
+}
+
 func TestListenerDetailsLabelPhysicalFootprintAndKeepLargeMemoryPrecision(t *testing.T) {
 	m := workspaceFixture()
 	m.view.Items[0].Listener.Usage = &discovery.ProcessUsage{
@@ -2300,6 +2478,7 @@ func TestWorkspaceBatchActionStartsForSelectedItems(t *testing.T) {
 	m.view.Items[0].State = exposuredata.ExposureState("disabled")
 	m.view.Items[0].Mode = exposuredata.ExposureDisabled
 	m.view.Items[0].Routes = nil
+	m.view.Exposures.Routes = nil
 	second := discovery.Listener{ID: "listener-two", Name: "api", Process: "node", PID: 4343, Target: targetmodel.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}, Scope: targetmodel.ScopeLoopback, Metadata: discovery.MetadataComplete}
 	m.view.Items = append(m.view.Items, exposure.ReconciledItem{ID: second.ID, Listener: &second, State: exposuredata.ExposureState("disabled"), Mode: exposuredata.ExposureDisabled})
 	m.Update(keyRune('V'))
@@ -2329,6 +2508,11 @@ func TestWorkspaceWildcardBackendIsNotVerifiedNoOp(t *testing.T) {
 
 func TestWorkspaceActionSafetyAndVerifiedNoOp(t *testing.T) {
 	m := workspaceFixture()
+	root := m.view.Exposures.Routes[0]
+	root.ProviderKey, root.Kind, root.Path = "serve:https=3000", exposuredata.RouteKindHTTPSRoot, "/"
+	root.Backend, root.URL = "http://127.0.0.1:3000", "https://dev.example.ts.net:3000/"
+	m.view.Exposures.Routes[0] = root
+	m.view.Items[0].Routes[0] = root
 	m.Update(keyRune(' '))
 	if m.modal != modalAction || m.actionSession.index != modeIndex(exposuredata.ExposureServe) {
 		t.Fatalf("space did not open selector at current mode: modal=%v index=%d", m.modal, m.actionSession.index)
@@ -2336,7 +2520,7 @@ func TestWorkspaceActionSafetyAndVerifiedNoOp(t *testing.T) {
 	m.modal = modalNone
 	m.openAction(ptrMode(exposuredata.ExposureServe))
 	m.Update(keyType(tea.KeyEnter))
-	if m.modal != modalNone || m.transient != "Already active: serve" {
+	if m.modal != modalNone || m.transient != "Already serve HTTPS for 1 selected service(s)" {
 		t.Fatalf("verified same-state action was not a no-op: modal=%v status=%q", m.modal, m.transient)
 	}
 	m.openAction(ptrMode(exposuredata.ExposureFunnel))
@@ -2466,7 +2650,7 @@ func TestWorkspaceGuardsQuitAndDuplicateOperations(t *testing.T) {
 	}
 	m.Update(keyType(tea.KeyTab))
 	m.Update(keyType(tea.KeyEnter))
-	if m.modal != modalNone || !strings.Contains(m.banner, "already has an operation") {
+	if m.modal != modalNone || !strings.Contains(m.banner, "operation is Applying") {
 		t.Fatalf("duplicate operation was not rejected: modal=%v banner=%q", m.modal, m.banner)
 	}
 }

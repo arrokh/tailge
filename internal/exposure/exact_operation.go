@@ -82,6 +82,8 @@ type exactExposureOperation struct {
 	localhostBackendAlias bool
 	replaceRawTCP         bool
 	expectedRawTCPRouteID string
+	replaceExistingRoute  bool
+	expectedRouteID       string
 	confirmFunnel         bool
 	confirmExternal       bool
 	timeout               time.Duration
@@ -140,14 +142,20 @@ func (op *exactExposureOperation) validate() error {
 	if op.expectedRawTCPRouteID != "" && !op.replaceRawTCP {
 		return fault.NewError(fault.ErrInvalidInput, "exposure", "an expected raw-TCP route identity requires replacement intent", false, "invalid", "Select an exact HTTPS-root conversion before binding a route identity.")
 	}
+	if op.replaceExistingRoute && (!op.httpsRootIntent || op.expectedRouteID == "") {
+		return fault.NewError(fault.ErrInvalidInput, "exposure", "exact route replacement requires HTTPS-root intent and a captured route identity", false, "invalid", "Select one exact existing route before confirming its HTTPS replacement.")
+	}
+	if op.expectedRouteID != "" && !op.replaceExistingRoute {
+		return fault.NewError(fault.ErrInvalidInput, "exposure", "an expected route identity requires exact replacement intent", false, "invalid", "Refresh and confirm an exact HTTPS-root replacement.")
+	}
 	if op.localhostBackendAlias && !op.httpPathIntent && !op.httpsRootIntent {
 		return fault.NewError(fault.ErrInvalidInput, "exposure", "localhost backend alias requires an explicit HTTPS handler", false, "invalid", "Use the exact listener backend or explicitly select a named HTTPS path or root route.")
 	}
 	if op.localhostBackendAlias && op.target.Address != "::1" && op.target.Address != "::" {
 		return fault.NewError(fault.ErrInvalidInput, "exposure", "localhost backend alias is only supported for IPv6 listeners", false, "invalid", "Omit `--localhost-backend` to preserve the selected address exactly.")
 	}
-	if op.httpsRootIntent && (op.mode != exposuredata.ExposureServe || op.httpPath != "/" || op.httpsPort < 1 || op.httpsPort > 65535) {
-		return fault.NewError(fault.ErrInvalidInput, "exposure", "explicit HTTPS root route requires private Serve mode, path `/`, and a valid HTTPS port", false, "invalid", "Use a valid HTTPS port and Serve; custom root routes are currently tailnet-private.")
+	if op.httpsRootIntent && (op.mode != exposuredata.ExposureServe && op.mode != exposuredata.ExposureFunnel || op.httpPath != "/" || op.httpsPort < 1 || op.httpsPort > 65535 || (op.mode == exposuredata.ExposureFunnel && !tailscale.FunnelHTTPSPortSupported(op.httpsPort))) {
+		return fault.NewError(fault.ErrInvalidInput, "exposure", "explicit HTTPS root route requires Serve or Funnel mode, path `/`, and a valid HTTPS port", false, "invalid", "Use a valid Serve port or a Funnel HTTPS port of 443, 8443, or 10000.")
 	}
 	if op.dependencies.provider == nil || op.dependencies.discoverer == nil {
 		return fault.NewError(fault.ErrDependency, "exposure", "exposure providers are unavailable", true, "unavailable", "Run the readiness check and retry.")
@@ -228,7 +236,7 @@ func (op exactExposureOperation) run(ctx context.Context) (receipt exposuredata.
 		if op.httpsRootIntent {
 			path = "/"
 		}
-		return c.applyHTTPPathRoute(operationCtx, target, path, op.httpsPort, op.httpsRootIntent, op.localhostBackendAlias, op.replaceRawTCP, op.expectedRawTCPRouteID, confirmExternal, mode, candidates[0], exposures.Routes, operationID, operationStarted)
+		return c.applyHTTPPathRoute(operationCtx, target, path, op.httpsPort, op.httpsRootIntent, op.localhostBackendAlias, op.replaceRawTCP, op.expectedRawTCPRouteID, op.replaceExistingRoute, op.expectedRouteID, confirmExternal, mode, candidates[0], exposures.Routes, operationID, operationStarted)
 	}
 	if mode != exposuredata.ExposureDisabled {
 		for _, route := range exposures.Routes {
@@ -617,16 +625,11 @@ func exactRollbackSelector(route exposuredata.ExposureRoute, caps tailscale.Capa
 	if route.Path != "" && !strings.HasPrefix(route.Path, "/") {
 		return false
 	}
-	parts := strings.SplitN(route.ProviderKey, ":", 2)
-	if len(parts) != 2 || parts[0] != string(route.Mode) {
+	selector, err := tailscale.ParseListenerSelector(route.ProviderKey, route.Mode)
+	if err != nil {
 		return false
 	}
-	service := parts[1]
-	if !strings.HasPrefix(service, "https=") && !strings.HasPrefix(service, "tcp=") {
-		return false
-	}
-	port, err := strconv.Atoi(strings.TrimPrefix(strings.TrimPrefix(service, "https="), "tcp="))
-	return err == nil && port >= 1 && port <= 65535
+	return route.Mode != exposuredata.ExposureFunnel || selector.Transport != "https" || tailscale.FunnelHTTPSPortSupported(selector.Port)
 }
 
 func verificationContextError(message string, cause error) *fault.AppError {
@@ -653,12 +656,12 @@ func matchingListeners(listeners []discovery.Listener, target targetmodel.Target
 	return result
 }
 
-func (c exactOperationDependencies) applyHTTPPathRoute(ctx context.Context, target targetmodel.Target, path string, httpsPort int, root, localhostBackendAlias, replaceRawTCP bool, expectedRawTCPRouteID string, confirmExternal bool, mode exposuredata.ExposureMode, listener discovery.Listener, routes []exposuredata.ExposureRoute, operationID string, operationStarted time.Time) (exposuredata.OperationReceipt, error) {
+func (c exactOperationDependencies) applyHTTPPathRoute(ctx context.Context, target targetmodel.Target, path string, httpsPort int, root, localhostBackendAlias, replaceRawTCP bool, expectedRawTCPRouteID string, replaceExistingRoute bool, expectedRouteID string, confirmExternal bool, mode exposuredata.ExposureMode, listener discovery.Listener, routes []exposuredata.ExposureRoute, operationID string, operationStarted time.Time) (exposuredata.OperationReceipt, error) {
 	if listener.Target.Normalized().Key() != target.Normalized().Key() {
 		return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "HTTPS route requires the exact discovered listener address", false, "changed", "Refresh and select the exact local listener before configuring HTTPS.")
 	}
-	if httpsPort < 1 || httpsPort > 65535 || (root && mode != exposuredata.ExposureServe) || (!root && httpsPort != 443) {
-		return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrInvalidInput, "exposure", "HTTPS route port or mode is invalid", false, "invalid", "Named paths use port 443; explicit root routes currently require private Serve and a valid port.")
+	if httpsPort < 1 || httpsPort > 65535 || (root && mode != exposuredata.ExposureServe && mode != exposuredata.ExposureFunnel) || (root && mode == exposuredata.ExposureFunnel && !tailscale.FunnelHTTPSPortSupported(httpsPort)) || (!root && httpsPort != 443) {
+		return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrInvalidInput, "exposure", "HTTPS route port or mode is invalid", false, "invalid", "Named paths use port 443; Funnel roots use port 443, 8443, or 10000; Serve roots accept a valid port.")
 	}
 	providerKey := string(mode) + ":https=" + strconv.Itoa(httpsPort)
 	backend := tailscale.HTTPPathBackendArgument(target)
@@ -685,6 +688,12 @@ func (c exactOperationDependencies) applyHTTPPathRoute(ctx context.Context, targ
 	}
 	if (mode == exposuredata.ExposureServe && (!caps.Serve || !caps.ExactServe || !caps.ServeHTTPS)) || (mode == exposuredata.ExposureFunnel && (!caps.Funnel || !caps.ExactFunnel || !caps.FunnelHTTPS || caps.FunnelLegacy)) {
 		return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsupported, "exposure", string(mode)+" HTTPS routes are unsupported by the installed Tailscale client", false, "read_only", "Use a Tailscale version with exact HTTPS listener operations; existing handlers will not be reset.")
+	}
+	if replaceExistingRoute {
+		if !root || expectedRouteID == "" {
+			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrInvalidInput, "exposure", "exact route replacement requires an HTTPS root and captured route identity", false, "invalid", "Refresh and preview one exact route before replacing it.")
+		}
+		return c.replaceExactRouteWithHTTPSRoot(ctx, target, expectedRouteID, mode, path, httpsPort, localhostBackendAlias, backend, confirmExternal, routes, operationID, operationStarted)
 	}
 	seenEndpointSelectors := make(map[string]struct{})
 	var rawTCPReplacement *exposuredata.ExposureRoute

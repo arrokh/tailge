@@ -152,8 +152,8 @@ func (a *Adapter) Set(ctx context.Context, change ExposureChange) (exposuredata.
 			return receipt, appErr
 		}
 	} else if rootHTTPS {
-		if change.Mode != exposuredata.ExposureServe || change.Path != "/" || change.HTTPSPort < 1 || change.HTTPSPort > 65535 {
-			appErr := fault.NewError(fault.ErrInvalidInput, "tailscale", "explicit HTTPS root route requires Serve mode, path `/`, and a valid HTTPS port", false, "invalid", "Use a private Serve HTTPS port and an explicit root selection.")
+		if (change.Mode != exposuredata.ExposureServe && change.Mode != exposuredata.ExposureFunnel) || change.Path != "/" || change.HTTPSPort < 1 || change.HTTPSPort > 65535 || (change.Mode == exposuredata.ExposureFunnel && !FunnelHTTPSPortSupported(change.HTTPSPort)) {
+			appErr := fault.NewError(fault.ErrInvalidInput, "tailscale", "explicit HTTPS root route requires Serve or Funnel mode, path `/`, and a supported HTTPS port", false, "invalid", "Use a valid Serve port or Funnel HTTPS port 443, 8443, or 10000.")
 			receipt.Error = ptr(appErr.Safe())
 			receipt.FinishedAt = a.now()
 			return receipt, appErr
@@ -326,7 +326,7 @@ func (a *Adapter) Set(ctx context.Context, change ExposureChange) (exposuredata.
 			(selected.Address == "::1" || selected.Address == "::") &&
 			(change.Backend == "" || HTTPPathBackendMatches(change.Backend, HTTPPathBackendArgument(selected))) &&
 			strings.Contains(strings.ToLower(result.Stderr), "unknown proxy destination") {
-			appErr.Remediation = "Refresh provider status and inspect the exact HTTPS handler. If it exists, disable that exact path or root first; then retry with `--localhost-backend` (or Ctrl+B when previewing a TUI HTTPS root). Hostname resolution weakens the exact IPv6 address guarantee."
+			appErr.Remediation = "Refresh provider status and inspect the exact HTTPS handler. If it exists, disable that exact path or root first; then retry the CLI operation with `--localhost-backend`. The TUI preserves numeric IPv6 backends and has no hostname-resolution override. Hostname resolution weakens the exact IPv6 address guarantee."
 		}
 		receipt.Error = ptr(appErr.Safe())
 		return receipt, appErr

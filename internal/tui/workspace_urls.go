@@ -27,8 +27,8 @@ import (
 )
 
 const unavailableURLBanner = "No observed HTTPS URL is available"
-const unavailableOpenURLBanner = "No observed browser URL or Serve TCP preview is available. Use b to preview a private HTTPS root (only if this listener speaks HTTP) or refresh Tailscale status."
-const unavailableCopyURLBanner = "No observed browser URL or Serve TCP preview is available to copy. Use b to preview a private HTTPS root (only if this listener speaks HTTP) or refresh Tailscale status."
+const unavailableOpenURLBanner = "No observed browser URL or Serve TCP preview is available. Use s for private HTTPS or f for public HTTPS after confirming the listener speaks HTTP, or refresh Tailscale status."
+const unavailableCopyURLBanner = "No observed browser URL or Serve TCP preview is available to copy. Use s for private HTTPS or f for public HTTPS after confirming the listener speaks HTTP, or refresh Tailscale status."
 const insecureURLBanner = "Observed route URL is not HTTPS. Configure an explicit HTTPS route before opening or copying it."
 const magicDNSPreviewUnavailableBanner = "Tailscale did not report a valid MagicDNS name for this Serve TCP preview. Check Tailscale status and try again."
 const magicDNSStatusTimeout = 5 * time.Second

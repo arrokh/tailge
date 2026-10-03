@@ -116,20 +116,20 @@ func TestRawModeActionIsUnavailableForNamedHTTPPath(t *testing.T) {
 	item.Routes[0].Backend = "http://127.0.0.1:3000"
 	view := authoritativeView(item)
 	got := ActionAvailabilityForItems([]exposure.ReconciledItem{item}, exposuredata.ExposureFunnel, ActionContext{View: view, Readiness: readyWorkspaceReadiness()})
-	if !got.Disabled || !strings.Contains(got.Reason, "Explicit HTTPS handlers") {
-		t.Fatalf("raw mode action was not blocked for a named path: %#v", got)
+	if !got.Disabled || !strings.Contains(got.Reason, "Named HTTPS paths") {
+		t.Fatalf("scope action was not blocked for a named path: %#v", got)
 	}
 }
 
-func TestRawModeActionIsUnavailableForExplicitHTTPSRoot(t *testing.T) {
+func TestHTTPSRootCanChangeVisibilityThroughAnExactScopeAction(t *testing.T) {
 	item := workspaceItem()
 	item.Routes[0].ProviderKey = "serve:https=4321"
 	item.Routes[0].Kind = exposuredata.RouteKindHTTPSRoot
 	item.Routes[0].Path = "/"
 	view := authoritativeView(item)
 	got := ActionAvailabilityForItems([]exposure.ReconciledItem{item}, exposuredata.ExposureFunnel, ActionContext{View: view, Readiness: readyWorkspaceReadiness()})
-	if !got.Disabled || !strings.Contains(got.Reason, "Explicit HTTPS handlers") {
-		t.Fatalf("raw mode action was not blocked for an explicit root handler: %#v", got)
+	if got.Disabled {
+		t.Fatalf("exact HTTPS root was blocked from a controlled visibility change: %#v", got)
 	}
 }
 

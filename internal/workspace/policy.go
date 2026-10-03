@@ -120,8 +120,8 @@ func actionAvailabilityForItem(item exposure.ReconciledItem, mode exposuredata.E
 			return unavailable("Action unavailable: readiness state is stale")
 		}
 	}
-	if len(item.Routes) == 1 && (item.Routes[0].Kind == exposuredata.RouteKindHTTPPath || item.Routes[0].Kind == exposuredata.RouteKindHTTPSRoot) && !SameStateForItem(context.View, item, mode) {
-		return unavailable("Explicit HTTPS handlers can only be changed through their exact route action")
+	if len(item.Routes) == 1 && item.Routes[0].Kind == exposuredata.RouteKindHTTPPath && !SameStateForItem(context.View, item, mode) {
+		return unavailable("Named HTTPS paths can only be changed through their exact route action")
 	}
 	if item.Listener == nil {
 		return unavailable("Enable unavailable: no current exact local listener")

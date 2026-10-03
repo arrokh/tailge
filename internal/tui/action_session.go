@@ -67,8 +67,8 @@ func (s *exposureActionSession) open(itemID string, target targetmodel.Target, m
 func (s *exposureActionSession) refreshChoices(availability func(exposuredata.ExposureMode) workspace.ActionAvailability) {
 	s.choices = []exposureActionChoice{
 		{mode: exposuredata.ExposureDisabled, label: "Disabled (d)"},
-		{mode: exposuredata.ExposureServe, label: "Serve (s, tailnet only)"},
-		{mode: exposuredata.ExposureFunnel, label: "Funnel (f, public internet)"},
+		{mode: exposuredata.ExposureServe, label: "Serve HTTPS (s, tailnet only)"},
+		{mode: exposuredata.ExposureFunnel, label: "Funnel HTTPS (f, public internet)"},
 	}
 	for index := range s.choices {
 		state := availability(s.choices[index].mode)
