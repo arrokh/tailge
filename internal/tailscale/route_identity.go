@@ -52,6 +52,12 @@ type ListenerSelector struct {
 	Port      int
 }
 
+// FunnelHTTPSPortSupported reports whether Tailscale Funnel can expose HTTPS
+// on port. Funnel's public HTTPS endpoints are restricted to these ports.
+func FunnelHTTPSPortSupported(port int) bool {
+	return port == 443 || port == 8443 || port == 10000
+}
+
 func ParseListenerSelector(value string, expectedMode exposuredata.ExposureMode) (ListenerSelector, error) {
 	parts := strings.SplitN(value, ":", 2)
 	if len(parts) != 2 || parts[0] != string(expectedMode) {
@@ -125,35 +131,25 @@ func isTargetField(key string) bool {
 	}
 }
 
-func targetArgument(target nettarget.Target) string {
+// localBackendTarget makes wildcard listener addresses dialable while retaining
+// every specific address unchanged. The wildcard itself is never a valid dial
+// destination, and loopback is necessarily included in its bind scope.
+func localBackendTarget(target nettarget.Target) nettarget.Target {
 	target = target.Normalized()
-	wildcard := target.Address == "0.0.0.0" || target.Address == "::"
-	if wildcard {
-		if target.Address == "0.0.0.0" {
-			target.Address = "127.0.0.1"
-		} else {
-			target.Address = "::1"
-		}
-	}
-	if !wildcard && nettarget.ScopeForAddress(target.Address) == nettarget.ScopeLoopback {
-		if strings.Contains(target.Address, ":") {
-			return "http://localhost:" + strconv.Itoa(target.Port)
-		}
-		return target.String()
-	}
-	return "http://" + target.String()
-}
-
-// HTTPPathBackendArgument preserves the selected listener address as the exact
-// local HTTP backend. Any alternate host such as localhost must be explicit.
-func HTTPPathBackendArgument(target nettarget.Target) string {
-	target = target.Normalized()
-	if target.Address == "0.0.0.0" {
+	switch target.Address {
+	case "0.0.0.0":
 		target.Address = "127.0.0.1"
-	} else if target.Address == "::" {
+	case "::":
 		target.Address = "::1"
 	}
-	return "http://" + target.String()
+	return target
+}
+
+// HTTPPathBackendArgument preserves a specific listener address. Wildcard
+// listeners use the corresponding loopback address because a wildcard cannot
+// be dialed directly; alternate aliases such as localhost remain explicit.
+func HTTPPathBackendArgument(target nettarget.Target) string {
+	return "http://" + localBackendTarget(target).String()
 }
 
 // HTTPSBackendArgument optionally uses localhost for IPv6 listeners when the
@@ -191,24 +187,45 @@ func parseHTTPPathBackend(value string) (nettarget.Target, bool) {
 	return parsed.Normalized(), true
 }
 
-func targetArgumentForTransport(target nettarget.Target, transport string) string {
-	target = target.Normalized()
-	wildcard := target.Address == "0.0.0.0" || target.Address == "::"
-	if wildcard {
-		if target.Address == "0.0.0.0" {
-			target.Address = "127.0.0.1"
-		} else {
-			target.Address = "::1"
+// RawTCPBackendMatchesTarget reports whether an observed raw-TCP backend is the
+// exact selected listener address or the loopback covered by a wildcard bind.
+func RawTCPBackendMatchesTarget(selected nettarget.Target, observed string) bool {
+	if strings.TrimSpace(observed) == "" {
+		return false
+	}
+	_, err := rawTCPBackendArgument(selected, observed)
+	return err == nil
+}
+
+// rawTCPBackendArgument restores an observed raw-TCP backend without losing its
+// transport scheme. Scheme-less status values are accepted only when their
+// exact normalized target matches the selected listener (or its wildcard's
+// corresponding loopback backend).
+func rawTCPBackendArgument(selected nettarget.Target, observed string) (string, error) {
+	expected := localBackendTarget(selected)
+	if strings.TrimSpace(observed) == "" {
+		return "tcp://" + expected.String(), nil
+	}
+	rawBackend := strings.TrimSpace(observed)
+	if scheme, remainder, ok := strings.Cut(rawBackend, "://"); ok {
+		if !strings.EqualFold(scheme, "tcp") {
+			return "", fmt.Errorf("raw TCP backend uses a non-TCP scheme")
 		}
+		rawBackend = remainder
 	}
-	host := target.String()
-	if !wildcard && nettarget.ScopeForAddress(target.Address) == nettarget.ScopeLoopback && strings.Contains(target.Address, ":") {
-		host = "localhost:" + strconv.Itoa(target.Port)
+	backend, err := nettarget.ParseTarget(observed, "tcp")
+	if err != nil {
+		return "", fmt.Errorf("raw TCP backend is invalid: %w", err)
 	}
-	if transport == "tcp" {
-		return "tcp://" + host
+	backend = backend.Normalized()
+	if backend.Key() != expected.Key() {
+		return "", fmt.Errorf("raw TCP backend does not match the exact listener address")
 	}
-	return "http://" + host
+	backendAddress := backend.String()
+	if rawAddress, rawPort, err := net.SplitHostPort(rawBackend); err == nil && strings.EqualFold(rawAddress, "localhost") && rawPort == strconv.Itoa(backend.Port) {
+		backendAddress = net.JoinHostPort(rawAddress, rawPort)
+	}
+	return "tcp://" + backendAddress, nil
 }
 
 func validateHandlerSelection(service, path, backend string) error {

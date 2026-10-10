@@ -62,6 +62,7 @@ func safeOperationFailure(err error) string {
 
 func (m *workspaceModel) applyStatus(message statusMsg) {
 	if message.sticky {
+		m.transient = ""
 		m.setBanner(message.value, true)
 	} else {
 		m.transient = message.value

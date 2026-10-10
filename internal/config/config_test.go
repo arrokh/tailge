@@ -10,6 +10,18 @@ import (
 	"time"
 )
 
+func TestSortDefaultsToNameAndAcceptsDescendingOrUnsorted(t *testing.T) {
+	if got := Defaults().Sort; got != "name" {
+		t.Fatalf("default sort = %q, want ascending name", got)
+	}
+	for _, sortKey := range []string{"name", "name-desc", "none"} {
+		cfg := Defaults()
+		if err := SetValue(&cfg, "sort", sortKey); err != nil {
+			t.Errorf("sort %q rejected: %v", sortKey, err)
+		}
+	}
+}
+
 func TestEnsureCreatesExpectedConfigWithSafePermissions(t *testing.T) {
 	home := t.TempDir()
 	manager, err := NewManager(home)

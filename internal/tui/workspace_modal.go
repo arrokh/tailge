@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/arrokh/tailge/internal/exposuredata"
-	"github.com/arrokh/tailge/internal/readiness"
 	"github.com/arrokh/tailge/internal/workspace"
 	"github.com/charmbracelet/lipgloss"
 	ansi "github.com/charmbracelet/x/ansi"
@@ -89,50 +88,11 @@ func (m *workspaceModel) modalView() string {
 			lines = append(lines, marker+command)
 		}
 		lines = append(lines, "", "↑/↓ select · Enter run · Esc cancel")
-	case modalHTTPPath:
-		title = "ADD NAMED HTTP PATH"
-		item, ok := m.actionAnchorItem()
-		if ok && item.Listener != nil {
-			lines = append(lines, "Listener: "+item.Listener.Target.String())
-			backend := httpPathBackend(item.Listener.Target, m.httpPathLocalhostBackend)
-			lines = append(lines, "Backend: "+backend)
-			if supportsLocalhostBackendAlias(item.Listener.Target) {
-				aliasState := "off"
-				if m.httpPathLocalhostBackend {
-					aliasState = "on"
-					lines = append(lines, "WARNING: hostname resolution weakens the exact IPv6 address guarantee")
-				} else {
-					lines = append(lines, "If numeric IPv6 fails, disable its exact route before retrying with Ctrl+B")
-				}
-				lines = append(lines, "Ctrl+B toggles explicit localhost backend alias ["+aliasState+"]")
-			}
-			process := item.Listener.Process
-			if process == "" {
-				process = item.Listener.Name
-			}
-			generated, _ := exposuredata.GeneratedHTTPPath(process, item.Listener.Target.Port)
-			lines = append(lines, "Blank path generates and persists: "+generated)
-		}
-		serveStatus, serveMessage, _ := workspace.HTTPPathStatus(m.readiness, exposuredata.ExposureServe)
-		funnelStatus, funnelMessage, _ := workspace.HTTPPathStatus(m.readiness, exposuredata.ExposureFunnel)
-		lines = append(lines, "Serve: "+string(serveStatus), "Funnel: "+string(funnelStatus))
-		if m.httpPathMode == exposuredata.ExposureServe {
-			lines = append(lines, "Requested: Serve (private to the tailnet)")
-			if serveMessage != "" && serveStatus != readiness.ReadinessReady {
-				lines = append(lines, "Unavailable: "+serveMessage)
-			}
-		} else {
-			lines = append(lines, "Requested: Funnel (public internet)")
-			if funnelMessage != "" && funnelStatus != readiness.ReadinessReady {
-				lines = append(lines, "Unavailable: "+funnelMessage)
-			}
-		}
-		lines = append(lines, "HTTPS endpoint: standard port 443", "Path slug (one segment):", "  "+pathInputView(m.pathInput), "The existing app stays on local HTTP; Tailscale strips the path prefix.", "", "Tab switches Serve/Funnel · Enter previews · Esc cancels")
 	case modalChooseURL:
-		title = "CHOOSE OBSERVED URL"
-		lines = append(lines, "Select one exact provider-observed browser URL:")
+		title = "CHOOSE OBSERVED HTTPS URL"
+		lines = append(lines, "Select one exact provider-observed HTTPS URL:")
 		if item, ok := m.selectedItem(); ok {
-			routes := observedHTTPURLRoutes(item)
+			routes := observedHTTPSURLRoutes(item)
 			for index, route := range routes {
 				marker := "  "
 				if index == m.urlRouteIndex {
@@ -167,7 +127,7 @@ func (m *workspaceModel) modalView() string {
 				}
 			}
 		}
-		lines = append(lines, "", "Choose one action:")
+		lines = append(lines, "", "Choose one action or press d, s, or f:")
 		choices := m.actionSession.choices
 		for i, choice := range choices {
 			marker := "  "
@@ -189,7 +149,7 @@ func (m *workspaceModel) modalView() string {
 			}
 			lines = append(lines, marker+label)
 		}
-		lines = append(lines, "", "↑/↓ or j/k select · Enter preview · Esc cancel")
+		lines = append(lines, "", "↑/↓ or j/k select · Enter preview · d/s/f choose · Esc cancel")
 	case modalDisableRoute:
 		title = "CHOOSE ROUTE TO DISABLE"
 		lines = append(lines, "Target: "+m.actionSession.target.String(), "Select exactly one observed route:")
@@ -216,16 +176,67 @@ func (m *workspaceModel) modalView() string {
 		lines = append(lines, "", "This removes only the selected exact route.", "↑/↓ or j/k select · Enter preview · Esc back")
 	case modalConfirm:
 		title = "CONFIRM EXPOSURE"
-		if count := len(m.actionItems()); count > 1 {
+		count := len(m.actionItems())
+		if count > 1 {
 			lines = append(lines, fmt.Sprintf("Selected: %d services", count))
+		} else {
+			lines = append(lines, "Target: "+m.actionSession.target.String())
 		}
-		lines = append(lines, "Target: "+m.actionSession.target.String(), "Requested: "+string(m.actionSession.mode))
-		if m.httpPathAction {
-			lines = append(lines, "Named HTTP path: "+m.httpPath, "Provider endpoint: standard HTTPS port 443", "Local HTTP backend: "+httpPathBackend(m.actionSession.target, m.httpPathLocalhostBackend))
-			if m.httpPathLocalhostBackend {
-				lines = append(lines, "WARNING: localhost uses hostname resolution; the exact IPv6 address guarantee is weakened")
+		lines = append(lines, "Requested: "+string(m.actionSession.mode))
+		if m.httpsRootAction {
+			if count > 1 {
+				for _, item := range m.actionItems() {
+					target, ok := itemTarget(item)
+					if !ok {
+						continue
+					}
+					port, replacement, already, reason := httpsRootRoutePlan(m.view.Exposures.Routes, item, m.actionSession.mode)
+					if reason != "" {
+						lines = append(lines, item.ID+": "+reason)
+						continue
+					}
+					if already {
+						lines = append(lines, fmt.Sprintf("%s: already active on HTTPS port %d", item.ID, port))
+						continue
+					}
+					lines = append(lines, fmt.Sprintf("%s: https://<Tailscale DNS>:%d/ → %s", target.String(), port, httpsRootBackend(target)))
+					if replacement != nil {
+						lines = append(lines, "  Replacing exact route: "+string(replacement.Mode)+" selector="+valueOr(replacement.ProviderKey, "unavailable")+" (ownership="+string(replacement.Ownership)+")")
+					}
+				}
+			} else {
+				selector := string(m.actionSession.mode) + ":https=" + fmt.Sprint(m.httpsRootPort)
+				lines = append(lines,
+					fmt.Sprintf("Browser URL: https://<Tailscale DNS>:%d/", m.httpsRootPort),
+					"Provider selector: "+selector,
+					"Local HTTP backend: "+httpsRootBackend(m.actionSession.target),
+				)
+				if m.httpsRootReplaceRoute {
+					ownership := "unknown"
+					previous := "unknown exact route"
+					if item, ok := m.actionAnchorItem(); ok {
+						if route := workspace.PreviewRoute(item, m.httpsRootRouteID); route != nil {
+							previous = string(route.Mode) + " selector=" + valueOr(route.ProviderKey, "unavailable")
+							if route.Path != "" {
+								previous += " path=" + route.Path
+							}
+							if route.Ownership != "" {
+								ownership = string(route.Ownership)
+							}
+						}
+					}
+					lines = append(lines, "Replacing exact observed route: "+previous+" (ownership="+ownership+")", "Route conversion may briefly interrupt access")
+				}
 			}
-			lines = append(lines, "Tailscale removes the mount prefix; application health is not checked")
+			lines = append(lines,
+				"Discovery proves TCP only; this action explicitly assumes the selected service speaks HTTP",
+				"No app, process, or local listener port changes",
+			)
+			if m.actionSession.mode == exposuredata.ExposureFunnel {
+				lines = append(lines, "Every handler on this HTTPS endpoint is public to the internet")
+			} else {
+				lines = append(lines, "Serve is private to authenticated tailnet devices")
+			}
 		}
 		if item, ok := m.actionAnchorItem(); ok {
 			if item.Warning != "" {
@@ -246,13 +257,7 @@ func (m *workspaceModel) modalView() string {
 			}
 		}
 		if m.actionSession.mode == exposuredata.ExposureFunnel {
-			if m.httpPathAction {
-				lines = append(lines, "WARNING: Funnel makes EVERY path on this shared HTTPS endpoint public")
-			} else {
-				lines = append(lines, "WARNING: public internet exposure")
-			}
-		} else if m.httpPathAction {
-			lines = append(lines, "Serve remains private to authenticated tailnet access")
+			lines = append(lines, "WARNING: public internet exposure")
 		}
 		if m.externalPreview() {
 			lines = append(lines, "WARNING: existing route is external/unknown")
@@ -365,6 +370,9 @@ func helpLines() []string {
 		"  j/k or Up/Down       move or scroll the focused pane",
 		"  n/N                  next/previous item in normal workspace mode",
 		"  h/l or Left/Right    focus list/details; Tab toggles; Shift-Tab reverses",
+		"  z                    zoom the focused pane; z restores the split",
+		"  e/S                  cycle Name ↑, Name ↓, and unsorted order",
+		"  w                    toggle mode filter (not OFF only); default shows all",
 		"  Enter                focus/expand details; never mutates",
 		"  Home/End             first/last item",
 		"  gg/G                 first/last item; lone g waits briefly",
@@ -391,19 +399,20 @@ func helpLines() []string {
 		"",
 		"ACTION PREVIEW",
 		"  Space                open the exposure action selector",
-		"  s                    preview private Serve for the selection",
-		"  f                    preview public Funnel for the selection",
+		"  s                    preview private HTTPS Serve for the selection",
+		"  f                    preview public HTTPS Funnel for the selection",
 		"  d                    preview Disable for the selection",
-		"  p                    add one named HTTP path to the selected listener",
-		"  v/V selection        action previews apply sequentially to selected items; each target is verified independently",
+		"  v/V selection        Serve HTTPS batches distinct ports; Funnel HTTPS requires one service; verify each target",
 		"  j/k or Up/Down       choose an action",
 		"  Enter                continue to route selection/confirmation or show a no-op",
+		"  s/f/d in selector    jump to private HTTPS/public HTTPS/Disable; confirmation remains required",
 		"  Esc                  cancel the preview",
-		"  o                    open URL; choose among paths; Serve TCP uses HTTP preview",
-		"  O                    open the selected listener at localhost",
-		"  y                    copy URL; choose among paths; Serve TCP preview",
+		"  o                    open observed HTTPS URLs (choose among exact paths) or preview Serve TCP via MagicDNS",
+		"  O                    open http://localhost:<port>/ for the selected local listener",
+		"  y                    copy observed HTTPS URLs (choose among exact paths) or a Serve TCP preview",
 		"  c                    open confirmed cancellation for Applying",
 		"  x                    terminate selected process(es) sequentially (SIGTERM only)",
+		"  CPU% / MEM           per-process CPU and platform memory metric in the list",
 		"",
 		"CONFIRMATION / APPLYING",
 		"  Tab/Shift-Tab        move focus between Confirm/Cancel",
@@ -413,8 +422,8 @@ func helpLines() []string {
 		"  Funnel               remains public; review the warning and explicitly focus Confirm",
 		"  Disable               uses exact-route selection plus focused Confirm",
 		"  Disable with multiple routes opens an exact-route chooser; only the selected route is removed",
-		"  p                    explicitly configure a local listener as an HTTP path; blank slug is generated from process name and port",
-		"  HTTP path Funnel     makes every path on the shared HTTPS endpoint public; readiness and provider support are shown before confirmation",
+		"  s/f HTTPS            replace only one exact raw-TCP or HTTPS-root route; Cancel is selected first and conversion may briefly interrupt access",
+		"  HTTP backend         the selected local service must speak HTTP; discovery proves only TCP",
 		"  Serve                remains private, but exact readiness,",
 		"                       target identity, confirmation, and verification remain",
 		"                       required so a stale or ambiguous route is never changed",

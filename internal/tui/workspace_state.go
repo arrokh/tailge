@@ -32,8 +32,10 @@ type workspaceState struct {
 	width  int
 	height int
 	focus  paneFocus
+	zoomed bool
 
 	query             string
+	modeNotOffOnly    bool
 	searching         bool
 	previousQ         string
 	selectedID        string
@@ -45,25 +47,25 @@ type workspaceState struct {
 	listScroll        int
 	detailOffset      int
 
-	modal                    modalKind
-	disableRouteIndex        int
-	modalItemID              string
-	modalTarget              target.Target
-	modalProcess             discovery.Listener
-	modalProcessFingerprint  string
-	actionSession            exposureActionSession
-	httpPathAction           bool
-	httpPath                 string
-	httpPathMode             exposuredata.ExposureMode
-	httpPathLocalhostBackend bool
-	urlAction                string
-	urlItemID                string
-	urlRoutesFingerprint     string
-	urlRouteIndex            int
-	confirmFocus             bool
-	modalChoice              bool
-	helpOffset               int
-	paletteIndex             int
+	modal                   modalKind
+	disableRouteIndex       int
+	modalItemID             string
+	modalTarget             target.Target
+	modalProcess            discovery.Listener
+	modalProcessFingerprint string
+	actionSession           exposureActionSession
+	httpsRootAction         bool
+	httpsRootPort           int
+	httpsRootRouteID        string
+	httpsRootReplaceRoute   bool
+	urlAction               string
+	urlItemID               string
+	urlRoutesFingerprint    string
+	urlRouteIndex           int
+	confirmFocus            bool
+	modalChoice             bool
+	helpOffset              int
+	paletteIndex            int
 
 	refreshState        refreshCoordinator
 	hasView             bool
@@ -283,7 +285,19 @@ func (s *workspaceState) selectedItem() (exposure.ReconciledItem, bool) {
 }
 
 func (s workspaceState) items() []exposure.ReconciledItem {
-	return newWorkspaceSnapshot(s.view, s.query, s.cfg).Items()
+	return newWorkspaceSnapshot(s.view, s.query, s.cfg, s.modeNotOffOnly).Items()
+}
+
+func (s *workspaceState) toggleModeNotOffFilter() {
+	previousID, previousIndex := s.selectedID, s.selectedIdx
+	s.modeNotOffOnly = !s.modeNotOffOnly
+	s.reselect(previousID, previousIndex)
+	s.updateVisualSelection()
+	if s.modeNotOffOnly {
+		s.transient = "Mode filter: showing services whose mode is not OFF; press w to show all"
+	} else {
+		s.transient = "Mode filter: showing all services"
+	}
 }
 
 func (s *workspaceState) reselect(previousID string, previousIndex int) {

@@ -16,13 +16,14 @@ import (
 // and the list, details, and action flows. It applies the same filtering,
 // ordering, sectioning, and port identity rules for every consumer.
 type workspaceSnapshot struct {
-	view  exposure.View
-	query string
-	cfg   config.Config
+	view           exposure.View
+	query          string
+	cfg            config.Config
+	modeNotOffOnly bool
 }
 
-func newWorkspaceSnapshot(view exposure.View, query string, cfg config.Config) workspaceSnapshot {
-	return workspaceSnapshot{view: view, query: query, cfg: cfg}
+func newWorkspaceSnapshot(view exposure.View, query string, cfg config.Config, modeNotOffOnly bool) workspaceSnapshot {
+	return workspaceSnapshot{view: view, query: query, cfg: cfg, modeNotOffOnly: modeNotOffOnly}
 }
 
 func itemTarget(item exposure.ReconciledItem) (target.Target, bool) {
@@ -46,7 +47,20 @@ func itemSection(item exposure.ReconciledItem) string {
 }
 
 func (s workspaceSnapshot) Items() []exposure.ReconciledItem {
-	items := deduplicatePortItems(sectioned(ordered(displayed(s.view, "", s.cfg), s.cfg.Sort)))
+	// Choose each shared-port row's primary identity using a fixed order before
+	// applying the user's presentation sort. Otherwise changing sort can change
+	// which listener receives exposure actions for the collapsed row.
+	items := deduplicatePortItems(sectioned(ordered(displayed(s.view, "", s.cfg), "port")))
+	items = sectioned(ordered(items, s.cfg.Sort))
+	if s.modeNotOffOnly {
+		filtered := make([]exposure.ReconciledItem, 0, len(items))
+		for _, item := range items {
+			if item.Mode != exposuredata.ExposureDisabled {
+				filtered = append(filtered, item)
+			}
+		}
+		items = filtered
+	}
 	return visible(exposure.View{Items: items}, s.query)
 }
 
@@ -128,20 +142,41 @@ func sameDisplayedRoute(left, right exposuredata.ExposureRoute) bool {
 
 func ordered(items []exposure.ReconciledItem, key string) []exposure.ReconciledItem {
 	result := append([]exposure.ReconciledItem(nil), items...)
+	if key == "none" {
+		return result
+	}
+	if key == "name" || key == "name-desc" {
+		name := func(item exposure.ReconciledItem) string {
+			value := item.ID
+			if item.Listener != nil {
+				value = valueOr(item.Listener.Name, item.ID)
+			}
+			return strings.ToLower(value)
+		}
+		tie := func(item exposure.ReconciledItem) string {
+			target, _ := itemTarget(item)
+			return fmt.Sprintf("%s\x00%06d\x00%s", target.Normalized().Address, target.Port, item.ID)
+		}
+		sort.SliceStable(result, func(i, j int) bool {
+			left, right := name(result[i]), name(result[j])
+			if left != right {
+				if key == "name-desc" {
+					return left > right
+				}
+				return left < right
+			}
+			return tie(result[i]) < tie(result[j])
+		})
+		return result
+	}
 	field := func(item exposure.ReconciledItem) string {
 		target, _ := itemTarget(item)
-		name := item.ID
-		if item.Listener != nil {
-			name = valueOr(item.Listener.Name, item.ID)
-		}
 		address, port := target.Normalized().Address, target.Port
 		exposureName := string(item.Mode)
 		if len(item.Routes) > 0 {
 			exposureName = string(item.Routes[0].Mode)
 		}
 		switch key {
-		case "name":
-			return fmt.Sprintf("%s\x00%s\x00%06d\x00%s", name, address, port, item.ID)
 		case "address":
 			return fmt.Sprintf("%s\x00%06d\x00%s", address, port, item.ID)
 		case "exposure":

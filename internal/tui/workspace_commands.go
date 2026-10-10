@@ -13,7 +13,48 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-var paletteCommands = []string{":refresh", ":retry", ":serve selected", ":funnel selected", ":disable selected", ":sort port", ":sort name", ":config show", ":config set key value", ":config validate", ":help", ":quit"}
+var paletteCommands = []string{":refresh", ":retry", ":serve selected", ":funnel selected", ":disable selected", ":sort name", ":sort name-desc", ":sort none", ":sort port", ":sort address", ":sort exposure", ":config show", ":config set key value", ":config validate", ":help", ":quit"}
+
+func nextWorkspaceSort(current string) string {
+	switch current {
+	case "name":
+		return "name-desc"
+	case "name-desc":
+		return "none"
+	default:
+		return "name"
+	}
+}
+
+func sortDescription(sortKey string) string {
+	switch sortKey {
+	case "name":
+		return "Name ascending"
+	case "name-desc":
+		return "Name descending"
+	case "none":
+		return "Unsorted"
+	case "address":
+		return "Address ascending"
+	case "exposure":
+		return "Exposure ascending"
+	default:
+		return "Port ascending"
+	}
+}
+
+func (m *workspaceModel) cycleSort() tea.Cmd {
+	previousID, previousIndex := m.selectedID, m.selectedIdx
+	candidate := m.cfg
+	candidate.Sort = nextWorkspaceSort(candidate.Sort)
+	m.cfg = candidate
+	m.reselect(previousID, previousIndex)
+	if m.visualSelection {
+		m.updateVisualSelection()
+	}
+	m.transient = "Sort: " + sortDescription(candidate.Sort)
+	return saveConfigCmd(m.ctx, m.manager, candidate)
+}
 
 func (m *workspaceModel) openCancel() {
 	item, ok := m.selectedItem()
@@ -101,7 +142,7 @@ func (m *workspaceModel) executePalette(query string) tea.Cmd {
 		m.openAction(&mode)
 	case "sort":
 		if len(parts) != 2 {
-			m.setBanner("Usage: :sort port|name|address|exposure", true)
+			m.setBanner("Usage: :sort name|name-desc|none|port|address|exposure", true)
 			return nil
 		}
 		candidate := m.cfg
@@ -109,7 +150,12 @@ func (m *workspaceModel) executePalette(query string) tea.Cmd {
 			m.setBanner(safeMessage(err), true)
 			return nil
 		}
+		previousID, previousIndex := m.selectedID, m.selectedIdx
 		m.cfg = candidate
+		m.reselect(previousID, previousIndex)
+		if m.visualSelection {
+			m.updateVisualSelection()
+		}
 		return saveConfigCmd(m.ctx, m.manager, candidate)
 	case "config":
 		if len(parts) == 2 && parts[1] == "show" {

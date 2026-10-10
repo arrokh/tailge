@@ -178,6 +178,9 @@ func (a *Adapter) Readiness(ctx context.Context, options ReadinessOptions) (read
 		} else if !exact {
 			modeReady.Status = readinessmodel.ReadinessReadOnly
 			modeReady.Checks = append(modeReady.Checks, readinessmodel.ReadinessCheck{Name: string(mode) + " exact route operations", Status: readinessmodel.ReadinessReadOnly, Message: "exact route replacement/removal is not available", Remediation: "Tailge will not use a broad reset.", CheckedAt: now})
+		} else if mode == exposuredata.ExposureFunnel && caps.FunnelLegacy {
+			modeReady.Status = readinessmodel.ReadinessReadOnly
+			modeReady.Checks = append(modeReady.Checks, readinessmodel.ReadinessCheck{Name: "funnel raw TCP capability", Status: readinessmodel.ReadinessReadOnly, Message: "legacy Funnel syntax cannot represent an exact raw-TCP listener", Remediation: "Use a Tailscale version exposing exact `--tcp` listener flags; Tailge will not infer an HTTP service.", CheckedAt: now})
 		} else if mode == exposuredata.ExposureFunnel {
 			// Funnel uses the exact listener flags discovered from the installed
 			// CLI. The mutation path performs its own bounded set/read-after-write
@@ -198,8 +201,8 @@ func (a *Adapter) Readiness(ctx context.Context, options ReadinessOptions) (read
 	}
 	report.Status = aggregateReadiness(report.Modes, report.Checks)
 	// Mode-specific readiness is returned in the report. Funnel can be ready
-	// from exact CLI capabilities without a manual public probe; its public
-	// confirmation and per-operation verification gates remain mandatory.
+	// from exact raw-TCP CLI capabilities without a manual public probe; its
+	// public confirmation and per-operation verification gates remain mandatory.
 	return report, nil
 }
 
