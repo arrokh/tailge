@@ -167,7 +167,7 @@ tailge config set color_theme dark
 
 Supported settings also include `show_system_listeners` and `show_inactive_configured_ports`. `color_theme` accepts `auto` (the default), `dark`, and `light`. `config validate` checks an existing file without creating a missing one. Invalid or unsafe configuration is preserved and mutations fail closed.
 
-In the TUI, `s`, `f`, and `d` open explicitly labeled Serve, Funnel, and Disabled previews; no provider mutation occurs until confirmation. `C` or `Ctrl-l` clears an accepted filter; `/` edits it and `Ctrl-u` clears the active search text.
+In the TUI, `s`, `f`, and `d` open explicitly labeled Serve, Funnel, and Disabled previews; no provider mutation occurs until confirmation. `C` or `Ctrl-l` clears an accepted filter; `/` edits it and `Ctrl-u` clears the active search text. The top SEARCH ribbon shows incremental matches and the accepted filter until cleared.
 
 ### Shell completion
 
@@ -187,7 +187,7 @@ Start it with:
 tailge
 ```
 
-The workspace uses Bubble Tea's alternate screen and raw keyboard mode only after TTY validation, and restores terminal state on exit. On terminals at least 100 columns by 24 rows it uses a roughly 40/60 service-list/detail split; smaller terminals collapse to one focused pane. The list is selected first, and refreshes preserve stable item identity.
+The workspace uses Bubble Tea's alternate screen and raw keyboard mode only after TTY validation, and restores terminal state on exit. On terminals at least 100 columns by 24 rows it uses a roughly 40/60 service-list/detail split; smaller terminals collapse to one focused pane. The list is selected first, and refreshes preserve stable item identity. A high-contrast SEARCH ribbon stays below the top status and warning lines, shows the active or accepted query, and works in either pane focus. Narrow target cells abbreviate the address before the port so the listener port remains visible.
 
 ### Shortcuts
 

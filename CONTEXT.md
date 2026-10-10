@@ -17,8 +17,8 @@ The default workspace focus where `j`/`k` and `Up`/`Down` move through service i
 _Avoid_: cursor navigation through unrelated panels
 
 **Incremental search**:
-Workspace search updates the visible service items as each character is entered, while preserving the current selection whenever that item remains visible.
-_Avoid_: submit-only filtering
+Workspace search updates the visible service items as each character is entered, while preserving the current selection whenever that item remains visible. A persistent, high-contrast SEARCH ribbon sits below the top status and warning lines, shows the active or accepted query, and remains visible in either pane focus.
+_Avoid_: submit-only filtering, hidden search affordance
 
 **Adaptive split**:
 The service workspace gives the list about 40% of a wide terminal and the detail pane the remaining space, while protecting a minimum readable list width. On narrow terminals it collapses to one focused pane rather than squeezing text.
@@ -75,7 +75,7 @@ The single navigable list groups items visually into local listeners, inactive c
 _Avoid_: hidden route tabs, separate list modes
 
 **Workspace chrome**:
-Persistent top and bottom status areas keep identity, source freshness, Serve/Funnel and HTTPS-path readiness, focus, search, operation state, warnings, and available keys visible while the user navigates. The bottom bar also displays the running build's short SHA for checked-out `HEAD` and a link to the Tailge repository. At constrained widths the link label compacts to `GitHub` and the status line prioritizes active progress or focus/path status. The `p` named-HTTP-path shortcut indicates whether an exact HTTPS path mode is currently ready. In its IPv6 path dialog, `Ctrl+B` toggles the explicit localhost backend alias and the confirmation preview calls out the weakened address guarantee; `o` stays an open-only shortcut.
+Persistent top and bottom status areas keep identity, source freshness, Serve/Funnel and HTTPS-path readiness, focus, operation state, warnings, and available keys visible while the user navigates. The SEARCH ribbon sits directly below the top status and warning lines. The bottom bar also displays the running build's short SHA for checked-out `HEAD` and a link to the Tailge repository. At constrained widths the link label compacts to `GitHub` and the status line prioritizes active progress or focus/path status. The `p` named-HTTP-path shortcut indicates whether an exact HTTPS path mode is currently ready. In its IPv6 path dialog, `Ctrl+B` toggles the explicit localhost backend alias and the confirmation preview calls out the weakened address guarantee; `o` stays an open-only shortcut.
 _Avoid_: hidden readiness, stderr-only warnings
 
 **Sticky feedback**:
@@ -127,8 +127,8 @@ An accepted search query remains visible and filters the workspace until deliber
 _Avoid_: disappearing filter, irreversible search edit
 
 **Compact service row**:
-A fixed-height list row carries only the selection state, concise service/target identity, exposure state, and relevant ownership; full diagnostics belong to details.
-_Avoid_: multiline list row, hidden diagnostics
+A fixed-height list row carries only the selection state, concise service/target identity, exposure state, and relevant ownership; full diagnostics belong to details. When the target address must be abbreviated, keep its complete numeric port visible.
+_Avoid_: multiline list row, hidden diagnostics, elided listener port
 
 **Redundant state indicator**:
 A state is communicated with a compact written badge plus an icon and optional color, so the distinction remains available with NO_COLOR or limited visual perception.
@@ -203,7 +203,7 @@ When active search hides every item, details clear and show search-clearing guid
 _Avoid_: stale hidden details
 
 **Automatic pane sizing**:
-The first workspace version chooses pane geometry from terminal dimensions and does not expose manual split-resize controls. Split view requires at least 100 columns and 24 rows; below either threshold the workspace collapses to one pane.
+The first workspace version chooses pane geometry from terminal dimensions and does not expose manual split-resize controls. Split view requires at least 100 columns and 24 rows; below either threshold the workspace collapses to one pane. Compact content requires at least 30 columns and 10 rows so the top SEARCH ribbon, list, and status remain usable.
 _Avoid_: squeezed fixed layout, premature resize key
 
 **Safe Vim sequence**:

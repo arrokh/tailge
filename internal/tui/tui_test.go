@@ -558,6 +558,65 @@ func TestFooterKeepsApplyingStatusAtMinimumWidth(t *testing.T) {
 	}
 }
 
+func TestSearchRibbonIsVisibleAtTopAndTracksIncrementalSearch(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	m := workspaceFixture()
+	m.width, m.height = 64, 24
+	m.banner = "Listener/exposure refresh: exposure status timed out"
+
+	view := m.View()
+	visible := ansi.Strip(view)
+	searchIndex := strings.Index(visible, "/ SEARCH")
+	listIndex := strings.Index(visible, "SERVICE LIST")
+	if searchIndex < 0 || listIndex < 0 || searchIndex >= listIndex {
+		t.Fatalf("search affordance was not prominent above the service list: %q", visible)
+	}
+	if !strings.Contains(visible, ":3000") {
+		t.Fatalf("the 64-column workspace hid the listener port: %q", visible)
+	}
+	if !strings.Contains(view, "\x1b[1;7m / SEARCH \x1b[0m") {
+		t.Fatalf("search label lacks a visible style: %q", view)
+	}
+	for _, line := range strings.Split(visible, "\n") {
+		if width := lipgloss.Width(line); width > m.width {
+			t.Fatalf("search layout line exceeds terminal width %d: %q", m.width, line)
+		}
+	}
+
+	m.Update(keyRune('/'))
+	m.Update(keyRune('3'))
+	if !strings.Contains(ansi.Strip(m.View()), "/ SEARCH 3▌") {
+		t.Fatalf("incremental query was not shown in the top search ribbon: %q", ansi.Strip(m.View()))
+	}
+	m.Update(keyType(tea.KeyEnter))
+	if !strings.Contains(ansi.Strip(m.View()), "/ SEARCH 3 · 1 match") {
+		t.Fatalf("accepted filter or match count was not visible: %q", ansi.Strip(m.View()))
+	}
+	m.focus = focusDetails
+	if !strings.Contains(ansi.Strip(m.View()), "/ SEARCH 3 · 1 match") {
+		t.Fatalf("search ribbon disappeared when details received focus: %q", ansi.Strip(m.View()))
+	}
+	t.Setenv("NO_COLOR", "1")
+	noColor := m.renderSearchLine()
+	if strings.Contains(noColor, "\x1b[") || !strings.Contains(noColor, "SEARCH") {
+		t.Fatalf("search affordance depended on color: %q", noColor)
+	}
+}
+
+func TestNarrowServiceTargetKeepsPortVisible(t *testing.T) {
+	item := workspaceFixture().view.Items[0]
+	item.Listener.Target.Port = 3000
+	row := ansi.Strip(listenerTableRow(item, 40, false, false, false, "auto"))
+	if !strings.Contains(row, ":3000") {
+		t.Fatalf("narrow target cell hid the listener port: %q", row)
+	}
+	item.Listener.Target.Port = 65535
+	row = ansi.Strip(listenerTableRow(item, 40, false, false, false, "auto"))
+	if !strings.Contains(row, ":65535") {
+		t.Fatalf("narrow target cell hid the full-width port: %q", row)
+	}
+}
+
 func TestWorkspaceResponsiveLayoutAndFocusNavigation(t *testing.T) {
 	m := workspaceFixture()
 	m.selectedID = m.view.Items[0].ID
@@ -581,6 +640,19 @@ func TestWorkspaceResponsiveLayoutAndFocusNavigation(t *testing.T) {
 	m.width, m.height = 29, 7
 	if !strings.Contains(m.View(), "Terminal too small") {
 		t.Fatalf("small terminal lacked resize notice")
+	}
+	m.width, m.height = 64, 8
+	if !strings.Contains(m.View(), "at least 30 columns and 10 rows") {
+		t.Fatalf("compact layout did not account for the search ribbon's row: %q", m.View())
+	}
+	m.height = 9
+	if !strings.Contains(m.View(), "at least 30 columns and 10 rows") {
+		t.Fatalf("nine rows cannot fit the workspace chrome and list: %q", m.View())
+	}
+	m.height = 10
+	minimumView := m.View()
+	if strings.Contains(minimumView, "Terminal too small") || lipgloss.Height(minimumView) > m.height {
+		t.Fatalf("minimum compact layout was rejected or overflowed: height=%d view=%q", lipgloss.Height(minimumView), minimumView)
 	}
 	m.modal = modalAction
 	if strings.Contains(m.View(), "EXPOSURE ACTION") {

@@ -11,6 +11,7 @@ import (
 	"github.com/arrokh/tailge/internal/exposure"
 	"github.com/arrokh/tailge/internal/exposuredata"
 	readinessmodel "github.com/arrokh/tailge/internal/readiness"
+	targetmodel "github.com/arrokh/tailge/internal/target"
 	"github.com/arrokh/tailge/internal/workspace"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -39,10 +40,11 @@ func (m *workspaceModel) View() string {
 
 func (m *workspaceModel) workspaceView() string {
 	if m.height < minCompactRows || m.width < 30 {
-		return "Terminal too small — resize to at least 30 columns and 8 rows."
+		return "Terminal too small — resize to at least 30 columns and 10 rows."
 	}
 	top := m.renderTop()
-	contentHeight := maxInt(3, m.height-6)
+	search := m.renderSearchLine()
+	contentHeight := maxInt(3, m.height-7)
 	var body string
 	if m.width >= splitMinWidth && m.height >= splitMinHeight {
 		listWidth := maxInt(36, m.width*40/100)
@@ -58,7 +60,7 @@ func (m *workspaceModel) workspaceView() string {
 	} else {
 		body = paneStyle(m.width-2, contentHeight, true, m.cfg.ColorTheme).Render(m.renderList(m.width-4, contentHeight-2))
 	}
-	return top + "\n" + body + "\n" + m.renderBottom()
+	return top + "\n" + search + "\n" + body + "\n" + m.renderBottom()
 }
 
 func paneStyle(width, height int, focused bool, theme string) lipgloss.Style {
@@ -168,16 +170,30 @@ func compactFooterStatus(focus, pathStatus, progress string) string {
 	}
 }
 
+func (m *workspaceModel) renderSearchLine() string {
+	label := paint(m.cfg.ColorTheme, "1;7", " / SEARCH ")
+	suffix := "type to filter services, addresses, or ports"
+	switch {
+	case m.searching && m.query == "":
+		suffix = "▌ type service or port · Enter accept · Esc cancel"
+	case m.searching:
+		suffix = sanitizeTUIText(m.query) + "▌ · Enter accept · Esc cancel"
+	case m.query != "":
+		matches := len(m.items())
+		noun := "matches"
+		if matches == 1 {
+			noun = "match"
+		}
+		suffix = fmt.Sprintf("%s · %d %s · / edit · C clear", sanitizeTUIText(m.query), matches, noun)
+	}
+	suffix = ansi.Truncate(suffix, maxInt(0, m.width-lipgloss.Width(label)), "...")
+	return label + suffix
+}
+
 func (m *workspaceModel) renderBottom() string {
 	focus := "List"
 	if m.focus == focusDetails {
 		focus = "Details"
-	}
-	search := ""
-	if m.searching {
-		search = "  Search: /" + sanitizeTUIText(m.query) + "▌"
-	} else if m.query != "" {
-		search = "  Search: /" + sanitizeTUIText(m.query)
 	}
 	progress := sanitizeTUIText(m.transient)
 	if m.refreshState.isPending() {
@@ -205,7 +221,7 @@ func (m *workspaceModel) renderBottom() string {
 	} else {
 		keys = "j/k or ↑/↓ navigate  v toggle  V visual  U clear selection  p HTTP path  Tab/h/l focus  " + keys + "  ? help  : palette  q quit"
 	}
-	status := fmt.Sprintf("Focus: %s  %s%s%s  %s", focus, m.httpPathStatusLabel(), search, selection, progress)
+	status := fmt.Sprintf("Focus: %s  %s%s  %s", focus, m.httpPathStatusLabel(), selection, progress)
 	identityText, identityLink := footerBuildIdentity(m.width, status, m.cfg.ColorTheme)
 	statusWidth := maxInt(0, m.width-lipgloss.Width(identityText)-2)
 	if m.width < 60 && lipgloss.Width(status) > statusWidth {
@@ -300,6 +316,23 @@ func listenerTableDivider(width int) string {
 	return paint("auto", "2;36", "      "+strings.Repeat("─", service+target+mode+state+3))
 }
 
+func listTargetText(value targetmodel.Target, width int) string {
+	full := value.String()
+	if lipgloss.Width(full) <= width {
+		return full
+	}
+	portSuffix := ":" + strconv.Itoa(value.Port)
+	suffixWidth := lipgloss.Width(portSuffix)
+	if width <= suffixWidth {
+		return ansi.Truncate(portSuffix, width, "")
+	}
+	hostWidth := width - suffixWidth
+	if hostWidth == 1 {
+		return "…" + portSuffix
+	}
+	return ansi.Truncate(value.Address, hostWidth-1, "") + "…" + portSuffix
+}
+
 func listenerTableRow(item exposure.ReconciledItem, width int, active, marked, visual bool, theme string) string {
 	return listenerTableRowWithStatus(item, width, active, marked, visual, theme, "")
 }
@@ -312,7 +345,7 @@ func listenerTableRowWithStatus(item exposure.ReconciledItem, width int, active,
 	}
 	target := "—"
 	if targetValue, ok := itemTarget(item); ok {
-		target = targetValue.String()
+		target = listTargetText(targetValue, targetWidth)
 	}
 	statusState := item.State
 	status := stateBadgeText(item.State)
@@ -517,7 +550,7 @@ func (m *workspaceModel) renderDetails(width, height int) string {
 		lines = append(lines, actionItems...)
 	}
 
-	lines = append(lines, "", detailGroup("LISTENER"))
+	lines = append(lines, detailGroup("LISTENER"))
 	if item.Listener == nil {
 		lines = append(lines, "  no current local listener")
 	} else {
