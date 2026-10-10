@@ -17,8 +17,8 @@ The default workspace focus where `j`/`k` and `Up`/`Down` move through service i
 _Avoid_: cursor navigation through unrelated panels
 
 **Incremental search**:
-Workspace search updates the visible service items as each character is entered, while preserving the current selection whenever that item remains visible.
-_Avoid_: submit-only filtering
+Workspace search updates the visible service items as each character is entered, while preserving the current selection whenever that item remains visible. A persistent, high-contrast SEARCH ribbon sits below the top status and warning lines, shows the active or accepted query, and remains visible in either pane focus.
+_Avoid_: submit-only filtering, hidden search affordance
 
 **Adaptive split**:
 The service workspace gives the list about 40% of a wide terminal and the detail pane the remaining space, while protecting a 53-column minimum list-pane width for its process-usage columns. On narrow terminals it collapses to one focused pane rather than squeezing text. `z` zooms the focused left or right pane to the full workspace content area; pressing `z` again restores the split.
@@ -75,7 +75,7 @@ The single navigable list groups items visually into local listeners, inactive c
 _Avoid_: hidden route tabs, separate list modes
 
 **Workspace chrome**:
-Persistent top and bottom status areas keep identity, source freshness, Serve/Funnel and HTTPS-handler readiness, focus, search, operation state, warnings, and available keys visible while the user navigates. The `w` shortcut toggles a presentation filter that keeps services whose mode is not OFF; the default is unfiltered and the mode filter composes with text search. The bottom bar also displays the running build's short SHA for checked-out `HEAD` and a link to the Tailge repository. Grouped navigation hints adapt to terminal width; the selected mode-filter and sort states are shown where space allows, while `s`/`f`, `o`/`y`, and local `O` availability remain visible with compact labels when needed. At constrained widths the link label compacts to `GitHub` and the status line prioritizes active progress or focus/action status. `s` and `f` are the only HTTPS exposure shortcuts; both preview the exact endpoint and HTTP-backend assumption, while Funnel also warns that the endpoint is public. The CLI's `--localhost-backend` is not a separate TUI action; `o` stays open-only.
+Persistent top and bottom status areas keep identity, source freshness, Serve/Funnel and HTTPS-handler readiness, focus, search, operation state, warnings, and available keys visible while the user navigates. A high-contrast SEARCH ribbon sits directly below the top status and warning lines and remains visible in either pane focus. The `w` shortcut toggles a presentation filter that keeps services whose mode is not OFF; the default is unfiltered and the mode filter composes with text search. The bottom bar also displays the running build's short SHA for checked-out `HEAD` and a link to the Tailge repository. Grouped navigation hints adapt to terminal width; the selected mode-filter and sort states are shown where space allows, while `s`/`f`, `o`/`y`, and local `O` availability remain visible with compact labels when needed. At constrained widths the link label compacts to `GitHub` and the status line prioritizes active progress or focus/action status. `s` and `f` are the only HTTPS exposure shortcuts; both preview the exact endpoint and HTTP-backend assumption, while Funnel also warns that the endpoint is public. The CLI's `--localhost-backend` is not a separate TUI action; `o` stays open-only.
 _Avoid_: hidden readiness, stderr-only warnings
 
 **Sticky feedback**:
@@ -127,8 +127,8 @@ An accepted search query remains visible and filters the workspace until deliber
 _Avoid_: disappearing filter, irreversible search edit
 
 **Compact service row**:
-A fixed-height list row carries selection state, concise service/target identity, exposure state, and best-effort process CPU and memory when available. macOS uses physical footprint with RSS fallback; Linux uses RSS. Details and scan JSON include the best-effort process working directory when available. Unavailable measurements are marked with a dash, the source is identified in details/JSON, and full diagnostics belong to details.
-_Avoid_: multiline list row, hidden diagnostics
+A fixed-height list row carries selection state, concise service/target identity, exposure state, and best-effort process CPU and memory when available. macOS uses physical footprint with RSS fallback; Linux uses RSS. Details and scan JSON include the best-effort process working directory when available. Unavailable measurements are marked with a dash, the source is identified in details/JSON, and full diagnostics belong to details. When the target address must be abbreviated, keep its complete numeric port visible.
+_Avoid_: multiline list row, hidden diagnostics, elided listener port
 
 **Redundant state indicator**:
 A state is communicated with a compact written badge plus an icon and optional color, so the distinction remains available with NO_COLOR or limited visual perception.
@@ -203,7 +203,7 @@ When active search hides every item, details clear and show search-clearing guid
 _Avoid_: stale hidden details
 
 **Automatic pane sizing**:
-The workspace chooses pane geometry from terminal dimensions and does not expose manual split-resize controls. Split view requires at least 100 columns and 24 rows; below either threshold the workspace collapses to one pane. In split view, `z` toggles the focused list or details pane between the split and full-width/full-height content area.
+The workspace chooses pane geometry from terminal dimensions and does not expose manual split-resize controls. Split view requires at least 100 columns and 24 rows; below either threshold the workspace collapses to one pane. Compact content requires at least 30 columns and 10 rows so the top SEARCH ribbon, list, and status remain usable. In split view, `z` toggles the focused list or details pane between the split and full-width/full-height content area.
 _Avoid_: squeezed fixed layout, premature resize key
 
 **Safe Vim sequence**:

@@ -117,7 +117,7 @@ TCP listener discovery never implies HTTP: raw routes remain protocol-agnostic. 
 | `z` | Zoom the focused pane; press again to restore the split |
 | `?` | Open help |
 
-See the [interactive workspace guide](docs/usage.md#interactive-workspace) for the full shortcut reference, process metrics, and modal behavior.
+The workspace keeps a high-contrast SEARCH ribbon below status and warnings, shows the active or accepted query, and preserves listener ports when compact rows abbreviate target addresses. See the [interactive workspace guide](docs/usage.md#interactive-workspace) for the full shortcut reference, process metrics, and modal behavior.
 
 ## Documentation
 

@@ -62,7 +62,7 @@ workspaceModel  -- terminal adapter: messages, commands, rendering
 `internal/workspace` is the deep, framework-independent Service workspace module: it owns mutation availability, readiness explanations, exact URL/transport classification, process fingerprints, operation-state mapping, and typed shortcut effects. Its interface is data in and policy/effects out; it does not import Bubble Tea or open browsers, invoke commands, mutate providers, or terminate processes. `workspaceModel` and `workspaceState` remain the terminal adapter's interaction state and lifecycle owner: they translate Bubble Tea messages, supply observations to `internal/workspace`, execute typed effects, and project state through the render modules. The implementation is split by domain so each flow has locality:
 
 - `tui.go` owns refresh helper functions, the Bubble Tea update loop, and terminal entry/exit; `workspace_model.go` owns the Bubble Tea adapter type and model construction.
-- `workspace_messages.go` owns asynchronous Bubble Tea message types; `workspace_ui_types.go` owns pane/modal state types and values; `workspace_layout.go` owns split and list-width thresholds; the render adapter zooms the focused pane without changing selection.
+- `workspace_messages.go` owns asynchronous Bubble Tea message types; `workspace_ui_types.go` owns pane/modal state types and values; `workspace_layout.go` owns split and list-width thresholds plus the 10-row minimum needed for the persistent search ribbon; the render adapter zooms the focused pane without changing selection.
 - `workspace_input.go` owns keyboard scope, navigation, incremental search, the command-palette input, and modal transitions.
 - `workspace_exposure.go` owns exposure action previews, confirmation invalidation, mutation approvals, single-target operations, and sequential batch operations.
 - `workspace_process.go` owns guarded process termination orchestration and sequential process batches; process identity fingerprints come from `internal/workspace`.
@@ -70,7 +70,7 @@ workspaceModel  -- terminal adapter: messages, commands, rendering
 - `workspace_urls.go` owns browser launching, clipboard transport, and adapter-level URL actions; exact observed HTTPS URL selection and validation come from `internal/workspace`.
 - `workspace_feedback.go` owns banners and theme-aware text painting; readiness explanations come from `internal/workspace`; `workspace_text.go` owns ANSI-safe text sanitization and shared layout helpers.
 - `workspace_effects.go` owns external-effect dispatch and quit/cancellation timing; `internal/workspace/effects.go` owns the typed effect vocabulary; exposure and process-specific operation types stay beside their orchestration modules.
-- `workspace_policy.go`, `workspace_render.go`, `workspace_modal.go`, `workspace_snapshot.go`, `action_session.go`, and `refresh_coordinator.go` retain their focused adapter, projection, snapshot, preview, and refresh seams.
+- `workspace_policy.go`, `workspace_render.go`, `workspace_modal.go`, `workspace_snapshot.go`, `action_session.go`, and `refresh_coordinator.go` retain their focused adapter, projection, snapshot, preview, and refresh seams. The workspace renderer keeps a high-contrast SEARCH ribbon below status and warnings, shows it in either pane focus, and preserves the complete listener port when it abbreviates a narrow target cell.
 
 This keeps state transitions and safety decisions testable without terminal orchestration, while external effects remain explicit and the reusable policy has a small local seam.
 

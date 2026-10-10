@@ -6,7 +6,7 @@ const (
 	splitMinWidth    = 100
 	splitMinHeight   = 24
 	minListPaneWidth = 53
-	minCompactRows   = 8
+	minCompactRows   = 10
 	minModalRows     = 12
 )
 

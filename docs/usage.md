@@ -175,7 +175,7 @@ tailge config set color_theme dark
 
 `sort` accepts `name` (default, ascending), `name-desc`, `none`, `port`, `address`, and `exposure`. In the workspace, `e` or `S` cycles `name` → `name-desc` → `none` and saves the preference. Existing explicit settings such as `port` remain respected. Other supported settings include `show_system_listeners` and `show_inactive_configured_ports`. `color_theme` accepts `auto` (the default), `dark`, and `light`. `config validate` checks an existing file without creating a missing one. Invalid or unsafe configuration is preserved and mutations fail closed.
 
-In the TUI, `s`, `f`, and `d` open the exposure selector focused on Serve, Funnel, and Disable. From the selector, pressing `s`, `f`, or `d` again chooses that action and advances directly to its Cancel-focused confirmation; arrow/j/k selection plus Enter remains available. No provider mutation occurs until the separate confirmation is explicitly focused and accepted. `C` or `Ctrl-l` clears an accepted filter; `/` edits it and `Ctrl-u` clears the active search text.
+In the TUI, `s`, `f`, and `d` open the exposure selector focused on Serve, Funnel, and Disable. From the selector, pressing `s`, `f`, or `d` again chooses that action and advances directly to its Cancel-focused confirmation; arrow/j/k selection plus Enter remains available. No provider mutation occurs until the separate confirmation is explicitly focused and accepted. `C` or `Ctrl-l` clears an accepted filter; `/` edits it and `Ctrl-u` clears the active search text. The high-contrast SEARCH ribbon stays below the top status and warning lines and shows the active query or accepted filter.
 
 ### Shell completion
 
@@ -195,7 +195,7 @@ Start it with:
 tailge
 ```
 
-The workspace uses Bubble Tea's alternate screen and raw keyboard mode only after TTY validation, and restores terminal state on exit. On terminals at least 100 columns by 24 rows it uses a roughly 40/60 service-list/detail split, with a 53-column minimum list pane for its usage columns; smaller terminals collapse to one focused pane. `z` zooms the focused left or right pane to fill the workspace content area, and `z` again restores the split. The list is selected first, and refreshes preserve stable item identity.
+The workspace uses Bubble Tea's alternate screen and raw keyboard mode only after TTY validation, and restores terminal state on exit. On terminals at least 100 columns by 24 rows it uses a roughly 40/60 service-list/detail split, with a 53-column minimum list pane for its usage columns; smaller terminals collapse to one focused pane. Compact content requires at least 30 columns and 10 rows. `z` zooms the focused left or right pane to fill the workspace content area, and `z` again restores the split. The list is selected first, and refreshes preserve stable item identity. A high-contrast SEARCH ribbon remains visible in either pane focus. Narrow target cells abbreviate the address before the complete port so the listener port remains visible.
 
 ### Shortcuts
 
