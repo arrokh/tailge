@@ -48,3 +48,8 @@ type configValidatedMsg struct {
 	cfg config.Config
 	err error
 }
+
+type paletteSubcommandDoneMsg struct {
+	success string
+	err     error
+}

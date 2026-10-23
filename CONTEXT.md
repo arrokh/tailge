@@ -5,7 +5,7 @@ Tailge helps a person inspect local services, deliberately manage their network 
 ## Interaction language
 
 **Media server**:
-An explicitly started, read-only HTTP browser for one or more operator-selected local directory roots. It browses subdirectories, displays supported images, and plays supported videos with browser-native controls and range requests. It binds to loopback by default, restricts browser Host headers to localhost/loopback/bound IP to prevent DNS-rebinding access, serves only regular supported media files beneath the selected roots, prevents symlinks from escaping a selected root, and does not upload, edit, or delete files. An explicit allowed host supports reverse proxies; Tailscale exposure remains a separate explicit operation.
+An explicitly started, read-only HTTP browser for one or more operator-selected local directory roots. It browses subdirectories, displays supported images, and plays supported videos with browser-native controls and range requests. It binds to loopback by default, restricts browser Host headers to localhost/loopback/bound IP to prevent DNS-rebinding access, serves only regular supported media files beneath the selected roots, prevents symlinks from escaping a selected root, and does not upload, edit, or delete files. From the interactive workspace, `:media serve "DIRECTORY"` runs the foreground server until Ctrl-C returns to the workspace. An explicit allowed host supports reverse proxies; Tailscale exposure remains a separate explicit operation.
 _Avoid_: implicit public sharing, file-management server, access outside selected roots
 
 **Service workspace**:

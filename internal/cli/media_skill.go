@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -46,7 +47,9 @@ Run ` + "`tailge media serve DIRECTORY [DIRECTORY ...]`" + ` to start Tailge's r
 
 The server binds to ` + "`127.0.0.1:8765`" + ` by default. It accepts browser Host headers for localhost, loopback, and the bound IP; this blocks DNS-rebinding access through an attacker-controlled domain. ` + "`--listen ADDRESS:PORT`" + ` changes the bind address; direct non-loopback HTTP has no authentication or TLS and makes selected files reachable to other machines on that network. ` + "`--allow-host HOST`" + ` adds one exact browser host for reverse proxies or DNS aliases. The server serves only regular supported media files inside the selected directory trees, omits dot-prefixed entries and unsupported files, and does not upload, edit, or delete files. Keep it running while the browser uses it; Ctrl-C stops it. Video playback depends on the browser's codec support.
 
-To make a running media server available privately over Tailscale, start it with ` + "`--allow-host MACHINE-DNS-NAME`" + `, then configure a private HTTPS root for its observed local listener with ` + "`tailge exposure http serve ADDRESS:PORT --root --https-port PORT`" + `. Use Funnel only after deliberately reviewing its public scope.
+To make a running media server available privately over Tailscale, start it with ` + "`--allow-host MACHINE-DNS-NAME`" + `, then configure a private HTTPS root for its observed local listener with ` + "`tailge exposure http serve ADDRESS:PORT --root --https-port PORT`" + `. Use Funnel only after deliberately reviewing its public scope. In the interactive workspace, enter ` + "`:media serve \"DIRECTORY\"`" + ` in the ` + "`:`" + ` command palette; Ctrl-C stops the foreground server and returns to the workspace.
+
+Install the agent skill with ` + "`tailge skill install`" + ` or ` + "`:skill install`" + ` in the workspace. To remove it, use ` + "`tailge skill uninstall --confirm`" + ` or the Cancel-first ` + "`:skill uninstall`" + ` palette action; removal is limited to an unchanged Tailge-generated file.
 
 ## Safety
 
@@ -214,23 +217,50 @@ func isLoopbackAddress(address net.Addr) bool {
 }
 
 func (a app) skillCommand(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 || args[0] != "install" {
-		return reportError(stderr, invalidArgs("skill requires install [--force]"))
-	}
-	parsed, err := parseFlagValues(args[1:], map[string]bool{"force": false})
-	if err != nil {
-		return reportError(stderr, err)
-	}
-	if len(parsed.positionals) != 0 {
-		return reportError(stderr, invalidArgs("skill install does not accept positional arguments"))
+	if len(args) == 0 {
+		return reportError(stderr, invalidArgs("skill requires install [--force] or uninstall --confirm"))
 	}
 	path := filepath.Join(".agents", "skills", "tailge", "SKILL.md")
-	if err := installSkill(path, []byte(tailgeAgentSkill), parsed.bools["force"]); err != nil {
-		message := "cannot install the Tailge agent skill: " + err.Error()
-		return reportError(stderr, fault.WrapError(fault.ErrOperation, "skill", message, false, "install_failed", "Run this command from the project where agents should learn Tailge, and use `--force` only to replace an existing regular skill file.", err))
+	switch args[0] {
+	case "install":
+		parsed, err := parseFlagValues(args[1:], map[string]bool{"force": false})
+		if err != nil {
+			return reportError(stderr, err)
+		}
+		if len(parsed.positionals) != 0 {
+			return reportError(stderr, invalidArgs("skill install does not accept positional arguments"))
+		}
+		if err := installSkill(path, []byte(tailgeAgentSkill), parsed.bools["force"]); err != nil {
+			message := "cannot install the Tailge agent skill: " + err.Error()
+			return reportError(stderr, fault.WrapError(fault.ErrOperation, "skill", message, false, "install_failed", "Run this command from the project where agents should learn Tailge, and use `--force` only to replace an existing regular skill file.", err))
+		}
+		fmt.Fprintf(stdout, "Tailge agent skill installed at %s\n", path)
+		return 0
+	case "uninstall":
+		parsed, err := parseFlagValues(args[1:], map[string]bool{"confirm": false})
+		if err != nil {
+			return reportError(stderr, err)
+		}
+		if len(parsed.positionals) != 0 {
+			return reportError(stderr, invalidArgs("skill uninstall does not accept positional arguments"))
+		}
+		if !parsed.bools["confirm"] {
+			return reportError(stderr, invalidArgs("skill uninstall requires --confirm"))
+		}
+		removed, err := uninstallSkill(path, []byte(tailgeAgentSkill))
+		if err != nil {
+			message := "cannot uninstall the Tailge agent skill: " + err.Error()
+			return reportError(stderr, fault.WrapError(fault.ErrOperation, "skill", message, false, "uninstall_failed", "The skill is removed only when it is an unchanged Tailge-generated regular file; inspect the project and retry.", err))
+		}
+		if removed {
+			fmt.Fprintf(stdout, "Tailge agent skill removed from %s\n", path)
+		} else {
+			fmt.Fprintln(stdout, "Tailge agent skill is not installed in this project.")
+		}
+		return 0
+	default:
+		return reportError(stderr, invalidArgs("skill requires install [--force] or uninstall --confirm"))
 	}
-	fmt.Fprintf(stdout, "Tailge agent skill installed at %s\n", path)
-	return 0
 }
 
 func ensureSkillDirectory(directory string) error {
@@ -333,6 +363,68 @@ func installSkill(path string, content []byte, force bool) error {
 	}
 	if err := os.Rename(temporary, path); err != nil {
 		return fmt.Errorf("install skill file: %w", err)
+	}
+	return nil
+}
+
+func uninstallSkill(path string, expected []byte) (bool, error) {
+	clean := filepath.Clean(path)
+	if filepath.IsAbs(path) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return false, fmt.Errorf("skill path must stay within the current project")
+	}
+	root, err := os.OpenRoot(".")
+	if err != nil {
+		return false, fmt.Errorf("open project directory: %w", err)
+	}
+	defer root.Close()
+	if err := validateSkillDirectoryWithinRoot(root, filepath.Dir(clean)); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect skill directory: %w", err)
+	}
+	info, err := root.Lstat(clean)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect skill file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("refusing to remove non-regular skill path %q", path)
+	}
+	contents, err := root.ReadFile(clean)
+	if err != nil {
+		return false, fmt.Errorf("read skill file: %w", err)
+	}
+	if !bytes.Equal(contents, expected) {
+		return false, fmt.Errorf("refusing to remove modified skill file %q", path)
+	}
+	if err := root.Remove(clean); err != nil {
+		return false, fmt.Errorf("remove skill file: %w", err)
+	}
+	return true, nil
+}
+
+func validateSkillDirectoryWithinRoot(root *os.Root, directory string) error {
+	clean := filepath.Clean(directory)
+	if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("skill directory must stay within the current project")
+	}
+	current := "."
+	for _, component := range strings.Split(clean, string(filepath.Separator)) {
+		if component == "" || component == "." {
+			continue
+		}
+		next := filepath.Join(current, component)
+		info, err := root.Lstat(next)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("refusing to use non-directory or symlink path %q", next)
+		}
+		current = next
 	}
 	return nil
 }

@@ -19,6 +19,7 @@ const (
 	modalTerminateProcess
 	modalCancel
 	modalQuit
+	modalSkillUninstall
 	modalHelp
 	modalPalette
 	modalChooseURL

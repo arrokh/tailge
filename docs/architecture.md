@@ -102,6 +102,8 @@ cmd/tailge/main.go
 
 `internal/model` was removed as a cross-domain dependency hub. Target normalization/correlation lives in `internal/target`; listener observations and snapshots live in `internal/discovery`; exposure route, snapshot, and operation records live in `internal/exposuredata`; readiness records live in `internal/readiness`; and the small safe error/exit-code vocabulary lives in `internal/fault`. The domain packages own their invariants while callers retain explicit seams for discovery, exposure, readiness, provider adapters, and TUI policy. `internal/exposuredata` is deliberately named for the exposure domain rather than becoming a generic `internal/domain` dumping ground.
 
+The workspace command palette launches the existing `media serve` and `skill` CLI subcommands through Bubble Tea's terminal-suspending process adapter. Media serving stays foreground and loopback-first; Ctrl-C stops the child process and resumes the workspace. Skill removal uses a Cancel-first confirmation and the CLI removes only the unchanged generated skill file.
+
 ## Internal control flow
 
 Refreshes build a shared snapshot. Exposure actions use that snapshot for a preview, then repeat the safety checks immediately before an exact mutation and read-after-write verification.

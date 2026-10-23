@@ -135,7 +135,7 @@ func TestAllowedMediaHostsRequireHostnameOrIP(t *testing.T) {
 func TestUsageAndCompletionListMediaAndSkill(t *testing.T) {
 	var out, errOut bytes.Buffer
 	printUsage(&out)
-	for _, command := range []string{"tailge media serve DIRECTORY", "tailge skill install"} {
+	for _, command := range []string{"tailge media serve DIRECTORY", "tailge skill install", "tailge skill uninstall --confirm"} {
 		if !strings.Contains(out.String(), command) {
 			t.Errorf("usage omits %q: %s", command, out.String())
 		}
@@ -177,6 +177,27 @@ func TestSkillInstallCommandWritesIntoCurrentProject(t *testing.T) {
 	if code := application.run([]string{"skill", "install"}, nil, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "already exists") {
 		t.Fatalf("existing skill was not preserved: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := application.run([]string{"skill", "uninstall"}, nil, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "requires --confirm") {
+		t.Fatalf("unconfirmed uninstall was not refused: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := application.run([]string{"skill", "uninstall", "--confirm"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("confirmed uninstall failed: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("confirmed uninstall left the skill file: err=%v", err)
+	}
+	if err := os.WriteFile(path, []byte("customized skill"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := application.run([]string{"skill", "uninstall", "--confirm"}, nil, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "modified skill file") {
+		t.Fatalf("custom skill was removed: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
 }
 
 func TestEnsureSkillDirectoryRefusesSymlinkParents(t *testing.T) {
@@ -197,8 +218,21 @@ func TestEnsureSkillDirectoryRefusesSymlinkParents(t *testing.T) {
 	if err := os.Symlink(outside, ".agents"); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
+	outsideSkill := filepath.Join(outside, "skills", "tailge", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(outsideSkill), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outsideSkill, []byte("generated"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := ensureSkillDirectory(filepath.Join(".agents", "skills", "tailge")); err == nil {
 		t.Fatal("accepted a symlinked project skill directory")
+	}
+	if _, err := uninstallSkill(filepath.Join(".agents", "skills", "tailge", "SKILL.md"), []byte("generated")); err == nil {
+		t.Fatal("uninstall accepted a symlinked project skill directory")
+	}
+	if contents, err := os.ReadFile(outsideSkill); err != nil || string(contents) != "generated" {
+		t.Fatalf("uninstall changed file outside the project root: contents=%q err=%v", contents, err)
 	}
 }
 
@@ -209,6 +243,7 @@ func TestSkillDocumentIsAgentInvocableAndIncludesMediaSafety(t *testing.T) {
 		"tailge media serve DIRECTORY",
 		"127.0.0.1:8765",
 		"--confirm-public",
+		"tailge skill uninstall --confirm",
 		"selected directory trees",
 	} {
 		if !strings.Contains(tailgeAgentSkill, want) {

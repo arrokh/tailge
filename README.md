@@ -74,7 +74,7 @@ tailge media serve ~/Pictures ~/Movies
 # Open the printed loopback URL in a browser; Ctrl-C stops the server.
 ```
 
-The server binds to `127.0.0.1:8765` by default and restricts browser Host headers to local hosts to prevent DNS-rebinding access. To make it privately available over Tailscale, start it with `--allow-host` set to the machine's reported Tailscale DNS name, then in another terminal configure an explicit HTTPS root for its local listener, for example `tailge exposure http serve 127.0.0.1:8765 --root --https-port 8765`. No network exposure is created automatically.
+The server binds to `127.0.0.1:8765` by default and restricts browser Host headers to local hosts to prevent DNS-rebinding access. To make it privately available over Tailscale, start it with `--allow-host` set to the machine's reported Tailscale DNS name, then in another terminal configure an explicit HTTPS root for its local listener, for example `tailge exposure http serve 127.0.0.1:8765 --root --https-port 8765`. No network exposure is created automatically. From the interactive workspace, press `:` and run `:media serve "/path/to/My Photos"`; the workspace yields to the foreground server, and Ctrl-C stops it and returns to Tailge.
 
 ## Common commands
 
@@ -107,6 +107,8 @@ tailge media serve ~/Pictures ~/Movies
 
 # Create the Tailge agent skill in the current project
 tailge skill install
+# Remove only an unchanged generated skill file
+tailge skill uninstall --confirm
 ```
 
 ## Exposure safety
@@ -134,7 +136,7 @@ TCP listener discovery never implies HTTP: raw routes remain protocol-agnostic. 
 
 The workspace keeps a high-contrast SEARCH ribbon below status and warnings, shows the active or accepted query, and preserves listener ports when compact rows abbreviate target addresses. See the [interactive workspace guide](docs/usage.md#interactive-workspace) for the full shortcut reference, process metrics, and modal behavior.
 
-`tailge media serve` shows supported images and videos in a browser, supports subdirectory navigation and video seeking, and serves only supported regular files under the selected directories; symlinks cannot escape a selected root. Video playback depends on browser codec support. The server is read-only and loopback-only by default, and validates Host headers to block DNS rebinding. `--allow-host HOST` explicitly permits one reverse-proxy or DNS-alias host. Use `--listen ADDRESS:PORT` only when you deliberately want to bind another interface; a non-loopback bind uses plain HTTP without authentication or TLS and makes the selected files reachable to other machines that can access it. `tailge skill install` creates `.agents/skills/tailge/SKILL.md` in the current project and refuses to replace an existing file; `--force` explicitly replaces an existing regular skill file.
+`tailge media serve` shows supported images and videos in a browser, supports subdirectory navigation and video seeking, and serves only supported regular files under the selected directories; symlinks cannot escape a selected root. Video playback depends on browser codec support. The server is read-only and loopback-only by default, and validates Host headers to block DNS rebinding. `--allow-host HOST` explicitly permits one reverse-proxy or DNS-alias host. Use `--listen ADDRESS:PORT` only when you deliberately want to bind another interface; a non-loopback bind uses plain HTTP without authentication or TLS and makes the selected files reachable to other machines that can access it. `tailge skill install` creates `.agents/skills/tailge/SKILL.md` in the current project and refuses to replace an existing file; `--force` explicitly replaces an existing regular skill file. `tailge skill uninstall --confirm` removes only an unchanged generated skill file; the workspace palette offers `:skill install` and a Cancel-first `:skill uninstall` action.
 
 ## Documentation
 

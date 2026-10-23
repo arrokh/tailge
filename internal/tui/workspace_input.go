@@ -316,8 +316,31 @@ func (m *workspaceModel) updateModal(msg tea.KeyMsg, key string) (tea.Model, tea
 		return m.updateTerminateProcessModal(msg, key)
 	case modalCancel, modalQuit:
 		return m.updateChoiceModal(msg, key)
+	case modalSkillUninstall:
+		return m.updateSkillUninstallModal(key)
 	}
 	return m, nil
+}
+
+func (m *workspaceModel) updateSkillUninstallModal(key string) (tea.Model, tea.Cmd) {
+	if key == "esc" {
+		m.modal = modalNone
+		return m, nil
+	}
+	if key == "tab" || key == "shift+tab" || key == "left" || key == "right" {
+		m.modalChoice = !m.modalChoice
+		return m, nil
+	}
+	if key != "enter" {
+		return m, nil
+	}
+	if !m.modalChoice {
+		m.modal = modalNone
+		m.transient = "Skill removal cancelled; no files changed"
+		return m, nil
+	}
+	m.modal = modalNone
+	return m, m.runTailgeSubcommand("Tailge agent skill removal finished", "skill", "uninstall", "--confirm")
 }
 
 func (m *workspaceModel) updateActionModal(_ tea.KeyMsg, key string) (tea.Model, tea.Cmd) {

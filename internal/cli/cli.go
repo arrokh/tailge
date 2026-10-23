@@ -875,7 +875,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "       tailge exposure http serve TARGET --root --https-port PORT [--replace-raw-tcp [--confirm-external]] [--localhost-backend] [--address ADDR] [--json]")
 	fmt.Fprintln(w, "       tailge exposure http disable TARGET (--path SLUG | --root --https-port PORT) [--address ADDR] [--confirm-external] [--json]")
 	fmt.Fprintln(w, "       tailge media serve DIRECTORY [DIRECTORY ...] [--listen ADDRESS:PORT] [--allow-host HOST]")
-	fmt.Fprintln(w, "       tailge skill install [--force]")
+	fmt.Fprintln(w, "       tailge skill install [--force] | tailge skill uninstall --confirm")
 	fmt.Fprintln(w, "       tailge config path|show|set KEY VALUE|validate | tailge completion bash|zsh|fish")
 }
 func printListeners(w io.Writer, listeners []discovery.Listener) {

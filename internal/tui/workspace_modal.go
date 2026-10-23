@@ -88,6 +88,19 @@ func (m *workspaceModel) modalView() string {
 			lines = append(lines, marker+command)
 		}
 		lines = append(lines, "", "↑/↓ select · Enter run · Esc cancel")
+	case modalSkillUninstall:
+		title = "REMOVE TAILGE SKILL"
+		lines = append(lines,
+			"Remove the Tailge agent skill from this project?",
+			"Only the unchanged generated file will be removed.",
+			"Path: .agents/skills/tailge/SKILL.md",
+			"",
+			"[Cancel]    Confirm",
+			"Tab/←/→ choose · Enter select · Esc cancel",
+		)
+		if m.modalChoice {
+			lines[len(lines)-2] = "Cancel    [Confirm]"
+		}
 	case modalChooseURL:
 		title = "CHOOSE OBSERVED HTTPS URL"
 		lines = append(lines, "Select one exact provider-observed HTTPS URL:")
@@ -327,7 +340,7 @@ func (m *workspaceModel) modalView() string {
 	}
 	modalTitle := paint(m.cfg.ColorTheme, "1;36", sanitizeTUIText(title))
 	borderColor := "62"
-	if m.modal == modalConfirm || m.modal == modalTerminateProcess || m.modal == modalQuit {
+	if m.modal == modalConfirm || m.modal == modalTerminateProcess || m.modal == modalQuit || m.modal == modalSkillUninstall {
 		borderColor = "33"
 	}
 	modalStyle := lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).Padding(0, 1).Width(modalWidth)
@@ -433,6 +446,9 @@ func helpLines() []string {
 		"  Up/Down or Ctrl-p/n  select a command",
 		"  Enter                run the selected command",
 		"  Esc                  close without running a command",
+		"  :media serve PATH... starts the server; Ctrl-C stops it and returns here",
+		"  :skill install       install agent guidance in the current project",
+		"  :skill uninstall     review and confirm removal of unchanged generated guidance",
 		"",
 		"HELP",
 		"  ?                    open or close this help",
