@@ -30,7 +30,7 @@ flowchart LR
 
 ## Prerequisites
 
-- Go 1.25.10+ and `make` to build from source
+- Go 1.26.10+ and `make` to build from source
 - macOS or Linux for listener discovery
 - An installed and logged-in Tailscale client for exposure features (optional for local scans)
 - An interactive TTY for the workspace; CLI commands also work in scripts and CI

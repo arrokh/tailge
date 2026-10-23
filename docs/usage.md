@@ -9,7 +9,7 @@ Tailge observes local listeners and the local Tailscale client. Exposure managem
 
 ## Requirements and installation
 
-- Go 1.25.10 or newer to build from source.
+- Go 1.26.10 or newer to build from source.
 - macOS or Linux for local TCP discovery.
 - An installed, logged-in Tailscale client for exposure features.
 - An interactive TTY for the workspace.
