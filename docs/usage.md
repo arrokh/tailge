@@ -5,11 +5,11 @@ Tailge has two interfaces:
 - `tailge` starts the interactive service workspace when attached to a TTY.
 - Subcommands provide scriptable, JSON-capable operations.
 
-Tailge observes local listeners and the local Tailscale client. It does not proxy application traffic or control services on remote machines.
+Tailge observes local listeners and the local Tailscale client. Exposure management remains a control plane; the explicit `media serve` command is the exception, serving selected local media to a browser. Tailge does not control services on remote machines.
 
 ## Requirements and installation
 
-- Go 1.25.10 or newer to build from source.
+- Go 1.26.10 or newer to build from source.
 - macOS or Linux for local TCP discovery.
 - An installed, logged-in Tailscale client for exposure features.
 - An interactive TTY for the workspace.
@@ -57,6 +57,38 @@ tailge scan --json
 ```
 
 The scan reports address, port, process, PID when available, metadata quality, and network scope. Its JSON form adds an optional `usage` object with `cpu_percent`, `memory_bytes`, and `memory_source` when process metrics are available. macOS prefers `phys_footprint` (`physical_footprint`) and falls back to RSS; Linux reports RSS. Linux listener discovery uses `lsof` when available and falls back to `ss`.
+
+### Serve local media
+
+Start Tailge's embedded, read-only HTTP media server with one or more local directories:
+
+```sh
+tailge media serve ~/Pictures ~/Movies
+```
+
+Open the printed URL in a browser. The default listener is `127.0.0.1:8765`; use `--listen ADDRESS:PORT` to choose another bind address or port. Browser Host headers are limited to localhost, loopback, and the bound IP by default, preventing DNS-rebinding access through an unrelated domain. Use `--allow-host HOST` to add one exact hostname/IP for a reverse proxy or DNS alias. A non-loopback bind uses plain HTTP without authentication or TLS and allows other machines that can reach that address to read the selected media, so use it deliberately. No Tailscale route is configured automatically. From the interactive workspace, press `:` and enter `:media serve "/path/to/My Photos"`; Tailge yields the terminal to the foreground server, and Ctrl-C stops it and returns to the workspace.
+
+The page lists supported image and video files and subdirectories. It recognizes JPG/JPEG, PNG, GIF, WebP, AVIF, and BMP images, plus MP4/M4V, WebM, OGV, and MOV videos. Images render in the browser; videos use native controls and support range requests for seeking, subject to browser codec support. The server serves only regular supported media files within the selected directories; symlinks cannot escape a selected root. It omits dot-prefixed entries and does not upload, modify, or delete files. It remains in the foreground until Ctrl-C.
+
+For private tailnet access, allow the machine's Tailscale DNS name in the media server, then separately configure a private HTTPS root for its exact local listener:
+
+```sh
+# Terminal 1: keep the media server running
+tailge media serve ~/Pictures --allow-host MACHINE-DNS-NAME
+
+# Terminal 2: configure the private HTTPS root
+tailge exposure http serve 127.0.0.1:8765 --root --https-port 8765
+```
+
+### Create the Tailge agent skill
+
+From a project directory, run:
+
+```sh
+tailge skill install
+```
+
+This creates `.agents/skills/tailge/SKILL.md` with agent-facing Tailge command and safety guidance. Existing files are preserved; `--force` replaces an existing regular skill file. To remove the unchanged generated file, run `tailge skill uninstall --confirm`; modified or non-regular files are refused. In the workspace command palette, `:skill install` installs the guidance and `:skill uninstall` opens a Cancel-first confirmation before removal.
 
 ### Check readiness and routes
 
@@ -226,7 +258,7 @@ The workspace uses Bubble Tea's alternate screen and raw keyboard mode only afte
 | `?` | Open scrollable help |
 | `q` / `Ctrl-c` | Quit; guarded while Applying |
 
-The command palette supports `:refresh`, `:retry`, `:serve 3000`, `:funnel 3000`, `:disable 3000`, `:sort name|name-desc|none|port|address|exposure`, `:config show`, `:config set key value`, `:config validate`, and `:quit`.
+The command palette supports `:refresh`, `:retry`, `:serve 3000`, `:funnel 3000`, `:disable 3000`, `:media serve DIRECTORY...`, `:skill install`, `:skill uninstall`, `:sort name|name-desc|none|port|address|exposure`, `:config show`, `:config set key value`, `:config validate`, and `:quit`. Quote directory paths containing spaces. Media serving takes over the terminal until Ctrl-C stops the foreground server and returns to the workspace; no Tailscale exposure is created automatically.
 
 The service list uses one `SELECT` column: `[ ]` is unselected, `[✓]` is selected, and `[V]` is in the active visual range. Process rows include OS-reported CPU percentage and memory; `CPU%` is the platform's `ps %CPU` value, while `MEM` is macOS physical footprint (RSS fallback) or Linux RSS. Details and scan JSON name the memory source and include the OS-reported process working directory when available. These best-effort details do not participate in process identity or termination safety. Measurements show `—` when unavailable. Listeners sharing a port collapse into one row and use the available local port as the target. During confirmed process termination, the active row shows `TERMINATING`; selected batches advance one process at a time. Exposure actions and process termination on multiple items run sequentially and report each result independently. Serve HTTPS roots can batch only across distinct local ports; Funnel HTTPS roots are limited to one selected service because they share the public hostname/port.
 

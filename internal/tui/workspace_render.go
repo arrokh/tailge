@@ -300,8 +300,9 @@ func (m *workspaceModel) renderSearchLine() string {
 		}
 		suffix = fmt.Sprintf("%s · %d %s · / edit · C clear", sanitizeTUIText(m.query), matches, noun)
 	}
-	suffix = ansi.Truncate(suffix, maxInt(0, m.width-lipgloss.Width(label)), "...")
-	return label + suffix
+	gap := " "
+	suffix = ansi.Truncate(suffix, maxInt(0, m.width-lipgloss.Width(label)-lipgloss.Width(gap)), "...")
+	return label + gap + suffix
 }
 
 func (m *workspaceModel) renderBottom() string {

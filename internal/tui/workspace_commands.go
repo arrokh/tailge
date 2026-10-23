@@ -4,7 +4,11 @@ package tui
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"os/exec"
 	"strings"
+	"unicode"
 
 	"github.com/arrokh/tailge/internal/config"
 	"github.com/arrokh/tailge/internal/exposure"
@@ -13,7 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-var paletteCommands = []string{":refresh", ":retry", ":serve selected", ":funnel selected", ":disable selected", ":sort name", ":sort name-desc", ":sort none", ":sort port", ":sort address", ":sort exposure", ":config show", ":config set key value", ":config validate", ":help", ":quit"}
+var paletteCommands = []string{":refresh", ":retry", ":serve selected", ":funnel selected", ":disable selected", ":media serve DIRECTORY...", ":skill install", ":skill uninstall", ":sort name", ":sort name-desc", ":sort none", ":sort port", ":sort address", ":sort exposure", ":config show", ":config set key value", ":config validate", ":help", ":quit"}
 
 func nextWorkspaceSort(current string) string {
 	switch current {
@@ -84,7 +88,11 @@ func (m *workspaceModel) quitCommand() tea.Cmd {
 func (m *workspaceModel) executePalette(query string) tea.Cmd {
 	query = strings.TrimSpace(query)
 	query = strings.TrimPrefix(query, ":")
-	parts := strings.Fields(query)
+	parts, err := splitPaletteWords(query)
+	if err != nil {
+		m.setBanner("Invalid command quoting: "+err.Error(), true)
+		return nil
+	}
 	if len(parts) == 0 {
 		return nil
 	}
@@ -140,6 +148,26 @@ func (m *workspaceModel) executePalette(query string) tea.Cmd {
 			m.reselect(m.selectedID, 0)
 		}
 		m.openAction(&mode)
+	case "media":
+		if len(parts) < 3 || parts[1] != "serve" {
+			m.setBanner("Usage: :media serve DIRECTORY... (Ctrl-C stops the server and returns to the workspace)", true)
+			return nil
+		}
+		args := append([]string{"media", "serve"}, parts[2:]...)
+		return m.runTailgeSubcommand("Media server stopped; returned to the workspace", args...)
+	case "skill":
+		if len(parts) != 2 {
+			m.setBanner("Usage: :skill install|uninstall", true)
+			return nil
+		}
+		switch parts[1] {
+		case "install":
+			return m.runTailgeSubcommand("Tailge agent skill installation finished", "skill", "install")
+		case "uninstall":
+			m.modal, m.modalChoice = modalSkillUninstall, false
+		default:
+			m.setBanner("Usage: :skill install|uninstall", true)
+		}
 	case "sort":
 		if len(parts) != 2 {
 			m.setBanner("Usage: :sort name|name-desc|none|port|address|exposure", true)
@@ -179,6 +207,73 @@ func (m *workspaceModel) executePalette(query string) tea.Cmd {
 		m.setBanner("Unknown palette command", true)
 	}
 	return nil
+}
+
+func splitPaletteWords(input string) ([]string, error) {
+	words := make([]string, 0)
+	var current strings.Builder
+	var quote rune
+	escaped, started := false, false
+	for _, character := range input {
+		if escaped {
+			current.WriteRune(character)
+			escaped, started = false, true
+			continue
+		}
+		if character == '\\' && quote != '\'' {
+			escaped, started = true, true
+			continue
+		}
+		if quote != 0 {
+			if character == quote {
+				quote = 0
+			} else {
+				current.WriteRune(character)
+			}
+			continue
+		}
+		switch {
+		case character == '\'' || character == '"':
+			quote, started = character, true
+		case unicode.IsSpace(character):
+			if started {
+				words = append(words, current.String())
+				current.Reset()
+				started = false
+			}
+		default:
+			current.WriteRune(character)
+			started = true
+		}
+	}
+	if escaped {
+		return nil, fmt.Errorf("command ends with an escape character")
+	}
+	if quote != 0 {
+		return nil, fmt.Errorf("command has an unclosed quote")
+	}
+	if started {
+		words = append(words, current.String())
+	}
+	return words, nil
+}
+
+func tailgeExecCommand(args ...string) (*exec.Cmd, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	return exec.Command(executable, args...), nil
+}
+
+func (m *workspaceModel) runTailgeSubcommand(success string, args ...string) tea.Cmd {
+	command, err := tailgeExecCommand(args...)
+	if err != nil {
+		return func() tea.Msg { return paletteSubcommandDoneMsg{success: success, err: err} }
+	}
+	return tea.ExecProcess(command, func(err error) tea.Msg {
+		return paletteSubcommandDoneMsg{success: success, err: err}
+	})
 }
 
 func (m *workspaceModel) startRetry() tea.Cmd {

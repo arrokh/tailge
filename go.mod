@@ -1,6 +1,6 @@
 module github.com/arrokh/tailge
 
-go 1.25.10
+go 1.26.10
 
 require (
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1

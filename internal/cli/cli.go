@@ -81,6 +81,10 @@ func (a app) run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		return a.exposure(args[1:], stdout, stderr)
 	case "config":
 		return a.configCommand(args[1:], stdout, stderr)
+	case "media":
+		return a.mediaCommand(args[1:], stdout, stderr)
+	case "skill":
+		return a.skillCommand(args[1:], stdout, stderr)
 	case "doctor":
 		return a.doctor(args[1:], stdout, stderr)
 	case "completion":
@@ -746,14 +750,14 @@ func completion(args []string, stdout, stderr io.Writer) int {
 	case "bash":
 		fmt.Fprintln(stdout, `_tailge() {
   local cur="${COMP_WORDS[COMP_CWORD]}"
-  COMPREPLY=( $(compgen -W "scan exposure config doctor version help completion" -- "$cur") )
+  COMPREPLY=( $(compgen -W "scan exposure config doctor media skill version help completion" -- "$cur") )
 }
 complete -F _tailge tailge`)
 	case "zsh":
 		fmt.Fprintln(stdout, `#compdef tailge
-_arguments '1:command:(scan exposure config doctor version help completion)'`)
+_arguments '1:command:(scan exposure config doctor media skill version help completion)'`)
 	case "fish":
-		fmt.Fprintln(stdout, `complete -c tailge -f -n '__fish_use_subcommand' -a 'scan exposure config doctor version help completion'`)
+		fmt.Fprintln(stdout, `complete -c tailge -f -n '__fish_use_subcommand' -a 'scan exposure config doctor media skill version help completion'`)
 	default:
 		return reportError(stderr, invalidArgs("completion requires bash, zsh, or fish"))
 	}
@@ -861,7 +865,7 @@ func printError(w io.Writer, err error) {
 	}
 }
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "tailge — local service exposure TUI")
+	fmt.Fprintln(w, "tailge — local service exposure and media server")
 	fmt.Fprintln(w, "usage: tailge | tailge scan [--json] | tailge doctor --tailscale [--json]")
 	fmt.Fprintln(w, "       tailge doctor --tailscale --probe serve|funnel --target ADDRESS:PORT --confirm-test-route [--confirm-public]")
 	fmt.Fprintln(w, "       tailge doctor --tailscale --probe serve|funnel --self-test-listener --confirm-test-route [--confirm-public]")
@@ -870,6 +874,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "       tailge exposure http serve|funnel TARGET [--path SLUG] [--localhost-backend] [--address ADDR] [--confirm-public] [--json]")
 	fmt.Fprintln(w, "       tailge exposure http serve TARGET --root --https-port PORT [--replace-raw-tcp [--confirm-external]] [--localhost-backend] [--address ADDR] [--json]")
 	fmt.Fprintln(w, "       tailge exposure http disable TARGET (--path SLUG | --root --https-port PORT) [--address ADDR] [--confirm-external] [--json]")
+	fmt.Fprintln(w, "       tailge media serve DIRECTORY [DIRECTORY ...] [--listen ADDRESS:PORT] [--allow-host HOST]")
+	fmt.Fprintln(w, "       tailge skill install [--force] | tailge skill uninstall --confirm")
 	fmt.Fprintln(w, "       tailge config path|show|set KEY VALUE|validate | tailge completion bash|zsh|fish")
 }
 func printListeners(w io.Writer, listeners []discovery.Listener) {

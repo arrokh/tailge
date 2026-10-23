@@ -299,6 +299,13 @@ func (m *workspaceModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.transient = "Configuration is valid"
 		}
 		return m, nil
+	case paletteSubcommandDoneMsg:
+		if message.err != nil {
+			m.setBanner("Interactive command failed: "+sanitizeTUIText(message.err.Error()), true)
+		} else {
+			m.transient = message.success
+		}
+		return m, nil
 	case gTimeoutMsg:
 		if m.gGeneration == message.generation {
 			m.gGeneration = 0

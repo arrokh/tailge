@@ -185,6 +185,67 @@ func TestPaletteSortPreservesSelectionAndOffersEverySupportedSort(t *testing.T) 
 	}
 }
 
+func TestPaletteOffersMediaAndSkillActions(t *testing.T) {
+	m := workspaceFixture()
+	available := strings.Join(m.filteredPalette(), "\n")
+	for _, command := range []string{":media serve DIRECTORY...", ":skill install", ":skill uninstall"} {
+		if !strings.Contains(available, command) {
+			t.Errorf("palette omits %q: %s", command, available)
+		}
+	}
+	help := strings.Join(helpLines(), "\n")
+	for _, command := range []string{":media serve", ":skill install", ":skill uninstall"} {
+		if !strings.Contains(help, command) {
+			t.Errorf("workspace help omits %q", command)
+		}
+	}
+	if cmd := m.executePalette(`:media serve "/Users/alice/My Photos"`); cmd == nil {
+		t.Fatal("media command did not launch the existing CLI subcommand")
+	}
+	if cmd := m.executePalette(":skill install"); cmd == nil {
+		t.Fatal("skill install did not launch the existing CLI subcommand")
+	}
+}
+
+func TestPaletteWordsPreserveQuotedDirectoryNames(t *testing.T) {
+	words, err := splitPaletteWords(`media serve "/Users/alice/My Photos" '/Users/alice/Movies'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"media", "serve", "/Users/alice/My Photos", "/Users/alice/Movies"}
+	if strings.Join(words, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("palette words = %#v, want %#v", words, want)
+	}
+	command, err := tailgeExecCommand(words...)
+	if err != nil || strings.Join(command.Args[1:], "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("interactive subcommand args = %#v, err=%v; want %#v", command, err, want)
+	}
+	if _, err := splitPaletteWords(`media serve "unclosed`); err == nil {
+		t.Fatal("accepted an unclosed quoted path")
+	}
+}
+
+func TestPaletteSkillUninstallRequiresExplicitConfirmation(t *testing.T) {
+	m := workspaceFixture()
+	if cmd := m.executePalette(":skill uninstall"); cmd != nil || m.modal != modalSkillUninstall || m.modalChoice {
+		t.Fatalf("uninstall did not open a Cancel-first confirmation: cmd=%v modal=%v confirm=%t", cmd, m.modal, m.modalChoice)
+	}
+	confirmation := ansi.Strip(m.modalView())
+	if !strings.Contains(confirmation, "Only the unchanged generated file will be removed.") || !strings.Contains(confirmation, "[Cancel]") {
+		t.Fatalf("uninstall confirmation lacks safety details or Cancel focus: %q", confirmation)
+	}
+	_, cmd := m.updateSkillUninstallModal("enter")
+	if cmd != nil || m.modal != modalNone || !strings.Contains(m.transient, "cancelled") {
+		t.Fatalf("default choice did not cancel removal: cmd=%v modal=%v transient=%q", cmd, m.modal, m.transient)
+	}
+	m.executePalette(":skill uninstall")
+	m.modalChoice = true
+	_, cmd = m.updateSkillUninstallModal("enter")
+	if cmd == nil || m.modal != modalNone {
+		t.Fatalf("confirmed uninstall did not invoke the CLI: cmd=%v modal=%v", cmd, m.modal)
+	}
+}
+
 func TestCopySelectedURLKeepsURLVisibleWhenClipboardFails(t *testing.T) {
 	items := []exposure.ReconciledItem{{Routes: []exposuredata.ExposureRoute{{URL: "https://dev.example.ts.net"}}}}
 	var out, errOut bytes.Buffer
@@ -792,21 +853,36 @@ func TestSearchRibbonIsVisibleAtTopAndTracksIncrementalSearch(t *testing.T) {
 
 	m.Update(keyRune('/'))
 	m.Update(keyRune('3'))
-	if !strings.Contains(ansi.Strip(m.View()), "/ SEARCH 3▌") {
+	if !strings.Contains(ansi.Strip(m.View()), "/ SEARCH  3▌") {
 		t.Fatalf("incremental query was not shown in the top search ribbon: %q", ansi.Strip(m.View()))
 	}
 	m.Update(keyType(tea.KeyEnter))
-	if !strings.Contains(ansi.Strip(m.View()), "/ SEARCH 3 · 1 match") {
+	if !strings.Contains(ansi.Strip(m.View()), "/ SEARCH  3 · 1 match") {
 		t.Fatalf("accepted filter or match count was not visible: %q", ansi.Strip(m.View()))
 	}
 	m.focus = focusDetails
-	if !strings.Contains(ansi.Strip(m.View()), "/ SEARCH 3 · 1 match") {
+	if !strings.Contains(ansi.Strip(m.View()), "/ SEARCH  3 · 1 match") {
 		t.Fatalf("search ribbon disappeared when details received focus: %q", ansi.Strip(m.View()))
 	}
 	t.Setenv("NO_COLOR", "1")
 	noColor := m.renderSearchLine()
 	if strings.Contains(noColor, "\x1b[") || !strings.Contains(noColor, "SEARCH") {
 		t.Fatalf("search affordance depended on color: %q", noColor)
+	}
+}
+
+func TestSearchRibbonKeepsGapWithinNarrowWidth(t *testing.T) {
+	m := workspaceFixture()
+	m.width = 30
+	m.searching = true
+	m.query = strings.Repeat("filter", 12)
+
+	line := ansi.Strip(m.renderSearchLine())
+	if !strings.HasPrefix(line, " / SEARCH  ") {
+		t.Fatalf("search value lost its separator: %q", line)
+	}
+	if width := lipgloss.Width(line); width > m.width {
+		t.Fatalf("search ribbon exceeded narrow width: got %d, want <= %d: %q", width, m.width, line)
 	}
 }
 
