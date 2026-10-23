@@ -1,10 +1,10 @@
 # Tailge
 
-Tailge is a local-first Tailscale exposure manager with an opinionated, keyboard-first workspace heavily inspired by Vim: `j`/`k` navigation, `gg`/`G` jumps, and `v`/`V` selection, alongside arrow-key navigation. It discovers local TCP listeners and lets you deliberately share selected services through exact raw-TCP routes, explicit named HTTPS paths, or private/public HTTPS roots for listeners the operator confirms speak HTTP. This matters because a listening port alone does not tell Tailge whether a service speaks HTTP. Tailge never implicitly starts, stops, or restarts services; its TUI may send one explicitly confirmed SIGTERM to a revalidated local process.
+Tailge is a local-first Tailscale exposure manager with an opinionated, keyboard-first workspace heavily inspired by Vim: `j`/`k` navigation, `gg`/`G` jumps, and `v`/`V` selection, alongside arrow-key navigation. It discovers local TCP listeners and lets you deliberately share selected services through exact raw-TCP routes, explicit named HTTPS paths, or private/public HTTPS roots for listeners the operator confirms speak HTTP. A separate `tailge media serve` command starts Tailge's read-only web server for browsing images and playing videos from selected local directories. A listening port alone does not tell Tailge whether a service speaks HTTP. Tailge never implicitly starts, stops, or restarts other services; its TUI may send one explicitly confirmed SIGTERM to a revalidated local process.
 
 ## How it works
 
-Tailge is a local control and observation plane. Application traffic flows through Tailscale directly to the selected local service.
+Tailge's exposure features are a local control and observation plane: application traffic flows through Tailscale directly to the selected local service. Its separate, explicitly started Media command runs an embedded read-only HTTP server that streams selected local media directories to browser clients.
 
 ```mermaid
 flowchart LR
@@ -67,6 +67,15 @@ tailge exposure http serve 127.0.0.1:3000 --root --https-port 3000
 
 Open the provider-observed HTTPS URL shown by Tailge or `tailge exposure status`. For arbitrary non-web services, use the raw-TCP `tailge exposure serve` command shown below and connect with the service's own client.
 
+Serve local media with Tailge's embedded, read-only web server:
+
+```sh
+tailge media serve ~/Pictures ~/Movies
+# Open the printed loopback URL in a browser; Ctrl-C stops the server.
+```
+
+The server binds to `127.0.0.1:8765` by default and restricts browser Host headers to local hosts to prevent DNS-rebinding access. To make it privately available over Tailscale, start it with `--allow-host` set to the machine's reported Tailscale DNS name, then in another terminal configure an explicit HTTPS root for its local listener, for example `tailge exposure http serve 127.0.0.1:8765 --root --https-port 8765`. No network exposure is created automatically.
+
 ## Common commands
 
 ```sh
@@ -92,6 +101,12 @@ tailge exposure http serve '[::1]:4321' --root --https-port 4321
 # Unknown/external ownership also requires --confirm-external
 tailge exposure http serve '[::1]:4321' --root --https-port 4321 --replace-raw-tcp --confirm-external
 tailge exposure http disable '[::1]:4321' --root --https-port 4321 --confirm-external
+
+# Read-only local media browser; Ctrl-C stops it
+tailge media serve ~/Pictures ~/Movies
+
+# Create the Tailge agent skill in the current project
+tailge skill install
 ```
 
 ## Exposure safety
@@ -118,6 +133,8 @@ TCP listener discovery never implies HTTP: raw routes remain protocol-agnostic. 
 | `?` | Open help |
 
 The workspace keeps a high-contrast SEARCH ribbon below status and warnings, shows the active or accepted query, and preserves listener ports when compact rows abbreviate target addresses. See the [interactive workspace guide](docs/usage.md#interactive-workspace) for the full shortcut reference, process metrics, and modal behavior.
+
+`tailge media serve` shows supported images and videos in a browser, supports subdirectory navigation and video seeking, and serves only supported regular files under the selected directories; symlinks cannot escape a selected root. Video playback depends on browser codec support. The server is read-only and loopback-only by default, and validates Host headers to block DNS rebinding. `--allow-host HOST` explicitly permits one reverse-proxy or DNS-alias host. Use `--listen ADDRESS:PORT` only when you deliberately want to bind another interface; a non-loopback bind uses plain HTTP without authentication or TLS and makes the selected files reachable to other machines that can access it. `tailge skill install` creates `.agents/skills/tailge/SKILL.md` in the current project and refuses to replace an existing file; `--force` explicitly replaces an existing regular skill file.
 
 ## Documentation
 

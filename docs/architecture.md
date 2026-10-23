@@ -4,7 +4,7 @@ This document describes Tailge's system context, internal control flow, implemen
 
 ## System context
 
-Tailge runs on the same machine as the local services it discovers. It observes local listeners and controls the local Tailscale client; it does not proxy application traffic or control processes on remote machines.
+Tailge runs on the same machine as the local services it discovers. Its exposure features observe listeners and control the local Tailscale client without proxying application traffic. Separately, the explicit `tailge media serve` command starts an embedded read-only HTTP server that streams supported media from operator-selected local directories to browser clients. Tailge does not control services on remote machines.
 
 ```mermaid
 flowchart LR
@@ -32,11 +32,21 @@ flowchart LR
     TSClient <-->|Funnel: public route| Internet
 ```
 
+The media command is an independent local data path:
+
+```mermaid
+flowchart TD
+    Folders[Selected folders] -->|read| Media[Tailge Media]
+    Operator[Operator] -->|starts| Media
+    Media -->|HTTP| Browser[Browser]
+```
+
 The exposure paths have different audiences:
 
 - **Serve** forwards a selected local listener to authenticated tailnet peers.
 - **Funnel** forwards a selected local listener to the public internet and always requires explicit public confirmation.
-- **Tailge** remains a control and observation plane. Application data flows between the local service, Tailscale, and the selected client network.
+- **Tailge exposure management** is a control and observation plane. Application data flows between the local service, Tailscale, and the selected client network.
+- **Tailge Media** is an explicitly started exception: it serves read-only HTTP pages and media bytes directly from selected local directory roots to browser clients. It binds to loopback by default, restricts Host headers to local/bound hosts to block DNS rebinding, and creates no Tailscale route automatically. Reverse-proxy hosts require an explicit allowlist entry.
 - A route is not proof that the local process is healthy. Tailge refreshes listener state and provider state independently and reports unknown or unverified outcomes instead of guessing.
 
 ## Runtime shape
@@ -76,7 +86,7 @@ This keeps state transitions and safety decisions testable without terminal orch
 
 ## CLI bootstrap and domain ownership
 
-The repository follows the conservative [official Go module layout guidance](https://go.dev/doc/modules/layout): `cmd/tailge` is the executable entrypoint and supporting application code remains under `internal/`; no public `pkg/` promise is made for this self-contained CLI/TUI. The Medium folder proposal is used selectively: HTTP-specific handlers/routes and generic utility folders are not meaningful seams for Tailge, so they are intentionally absent.
+The repository follows the conservative [official Go module layout guidance](https://go.dev/doc/modules/layout): `cmd/tailge` is the executable entrypoint and supporting application code remains under `internal/`; no public `pkg/` promise is made for this self-contained CLI/TUI. `internal/media` owns the embedded read-only media HTTP handler, while Tailscale route syntax remains in the provider adapter; no generic HTTP framework or utility package is introduced.
 
 The CLI has one narrow process entrypoint and two internal modules:
 
@@ -87,7 +97,7 @@ cmd/tailge/main.go
         |
         +--> internal/cli.Run             command parsing, orchestration, output, exit policy
                     |
-                    +--> internal/{config,discovery,exposure,probe,tailscale}
+                    +--> internal/{config,discovery,exposure,media,probe,tailscale}
 ```
 
 `internal/model` was removed as a cross-domain dependency hub. Target normalization/correlation lives in `internal/target`; listener observations and snapshots live in `internal/discovery`; exposure route, snapshot, and operation records live in `internal/exposuredata`; readiness records live in `internal/readiness`; and the small safe error/exit-code vocabulary lives in `internal/fault`. The domain packages own their invariants while callers retain explicit seams for discovery, exposure, readiness, provider adapters, and TUI policy. `internal/exposuredata` is deliberately named for the exposure domain rather than becoming a generic `internal/domain` dumping ground.
@@ -271,6 +281,7 @@ The module tests are intentionally close to their seams:
 - `internal/tui/workspace_input.go`, `workspace_urls.go`, `workspace_feedback.go`, and `workspace_text.go` are covered by the keyboard, URL/clipboard, rendering, ANSI-safety, and modal-layout cases in `tui_test.go`.
 - `internal/tui/refresh_coordinator.go` has direct generation, coalescing, retry, and failure tests in `refresh_coordinator_test.go`.
 - `internal/tui/workspace_snapshot.go` has direct target-collapse tests in `workspace_snapshot_test.go`, plus selection, filtering, sorting, port collapse, and batch-target tests in `tui_test.go`.
+- `internal/media/server.go` has HTTP handler tests for directory browsing, safe file scope, inline image/video pages, and video range requests in `server_test.go`; `internal/cli/media_skill.go` owns foreground server lifecycle and project-local agent skill installation.
 
 Run the complete local validation from the repository root:
 
