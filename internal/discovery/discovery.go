@@ -206,6 +206,10 @@ func (d *OSListenerObserver) enrich(ctx context.Context, snapshot *ListenerSnaps
 }
 
 func processWorkingDirectories(ctx context.Context, goos string, pids []int) map[int]string {
+	return processWorkingDirectoriesWithTimeout(ctx, goos, pids, 2*time.Second)
+}
+
+func processWorkingDirectoriesWithTimeout(ctx context.Context, goos string, pids []int, timeout time.Duration) map[int]string {
 	result := map[int]string{}
 	switch goos {
 	case "linux":
@@ -229,7 +233,7 @@ func processWorkingDirectories(ctx context.Context, goos string, pids []int) map
 				requestedBatch[pid] = true
 			}
 
-			lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			lookupCtx, cancel := context.WithTimeout(ctx, timeout)
 			command := exec.CommandContext(lookupCtx, "lsof", "-nP", "-a", "-p", strings.Join(pidList, ","), "-d", "cwd", "-Fpn")
 			command.WaitDelay = 250 * time.Millisecond
 			var output, diagnostics boundedMetadataBuffer

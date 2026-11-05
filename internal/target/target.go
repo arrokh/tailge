@@ -38,6 +38,9 @@ func (t Target) Validate() error {
 	if address == "" {
 		return fmt.Errorf("address is required")
 	}
+	if strings.Contains(address, "%") {
+		return fmt.Errorf("IPv6 zone identifiers are not supported for exact targets")
+	}
 	if len(address) > 255 || strings.IndexFunc(address, func(r rune) bool { return r <= ' ' || r == '\\' || r == '"' }) >= 0 {
 		return fmt.Errorf("address contains unsupported whitespace or characters")
 	}
@@ -166,9 +169,6 @@ func NormalizeAddress(address string) string {
 	address = strings.TrimSpace(address)
 	address = strings.TrimPrefix(address, "[")
 	address = strings.TrimSuffix(address, "]")
-	if zone := strings.LastIndexByte(address, '%'); zone > 0 && strings.Contains(address, ":") {
-		address = address[:zone]
-	}
 	lower := strings.ToLower(address)
 	switch lower {
 	case "", "*":

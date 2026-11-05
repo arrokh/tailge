@@ -757,6 +757,47 @@ func TestSetRestoresOnlyAnExactRawTCPBackend(t *testing.T) {
 	}
 }
 
+func TestSetRefusesMutatingWhenExistingRouteHasNoExactProviderEndpoint(t *testing.T) {
+	const status = `{"Web":{"dev.example.ts.net":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3000"}}}}}`
+	calls := []string{}
+	adapter := &Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+		command := strings.Join(args, " ")
+		calls = append(calls, command)
+		switch command {
+		case "version":
+			return runner.Result{Stdout: "1.102.4\n"}, nil
+		case "serve --help":
+			return runner.Result{Stdout: "status clear --https --tcp"}, nil
+		case "funnel --help":
+			return runner.Result{Stdout: "status reset --https --tcp"}, nil
+		case "serve status --json", "funnel status --json":
+			return runner.Result{Stdout: status}, nil
+		default:
+			if strings.HasPrefix(command, "serve --bg --yes ") {
+				return runner.Result{}, nil
+			}
+			return runner.Result{}, errors.New("unexpected command: " + command)
+		}
+	})}
+	listener := target.Target{Address: "127.0.0.1", Port: 443, Protocol: "tcp"}.Normalized()
+	snapshot, err := adapter.List(context.Background())
+	if err != nil || !snapshot.Authoritative || len(snapshot.Routes) != 1 || snapshot.Routes[0].ProviderKey != "" {
+		t.Fatalf("expected one authoritative but unaddressable handler: snapshot=%#v err=%v", snapshot, err)
+	}
+	_, err = adapter.Set(context.Background(), ExposureChange{
+		Target: listener, Mode: exposuredata.ExposureServe,
+		Preconditions: ExposurePrecondition{RouteIDsHash: RouteIDsHash(snapshot.Routes, listener), AllRoutesHash: RoutesHash(snapshot.Routes)},
+	})
+	if err == nil || fault.AsAppError(err).Code != fault.ErrUnknown {
+		t.Fatalf("raw TCP mutation was not blocked by incomplete existing endpoint identity: %v", err)
+	}
+	for _, command := range calls {
+		if strings.HasPrefix(command, "serve --bg --yes ") {
+			t.Fatalf("raw TCP mutation ran despite incomplete endpoint identity: %v", calls)
+		}
+	}
+}
+
 func TestSetRefusesProviderEndpointCollision(t *testing.T) {
 	calls := []string{}
 	adapter := &Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {

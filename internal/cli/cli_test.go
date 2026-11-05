@@ -500,6 +500,14 @@ func TestCompletionOutputsFixedShellScript(t *testing.T) {
 	}
 }
 
+func TestConfigPathRejectsUnavailableManager(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := (app{}).configCommand([]string{"path"}, &stdout, &stderr)
+	if code != fault.ErrConfig.ExitCode() || stdout.Len() != 0 || !strings.Contains(stderr.String(), "cannot determine the config file path") {
+		t.Fatalf("empty config manager path was reported as success: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestReadinessExitAndJSONPreserveReadOnlyFailureClass(t *testing.T) {
 	readiness := readinessmodel.Readiness{Status: readinessmodel.ReadinessReadOnly, Modes: []readinessmodel.ModeReadiness{{Mode: exposuredata.ExposureServe, Status: readinessmodel.ReadinessReadOnly}}}
 	var stdout, stderr bytes.Buffer
@@ -529,6 +537,62 @@ func TestSelfTestListenerIsLoopbackAndEphemeral(t *testing.T) {
 	}
 	if err := target.Validate(); err != nil {
 		t.Fatalf("self-test target is invalid: %v", err)
+	}
+}
+
+func TestHTTPPathCLIHonorsConfiguredOperationTimeoutAfterPreflight(t *testing.T) {
+	manager, err := config.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manager.Path, []byte("version: 1\nserve_probe_version: 1.102.4\noperation_timeout: \"45s\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listenerTarget := target.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
+	observer := &staticListenerObserver{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{{ID: "node-listener", Target: listenerTarget, Name: "Node.js", Process: "node", PID: 41, Scope: target.ScopeLoopback, Metadata: discovery.MetadataComplete}}}}
+	active := false
+	var calls []string
+	adapter := httpPathTestAdapter(&active, &calls)
+	baseRunner := adapter.Runner
+	var statusDeadline time.Duration
+	adapter.Runner = runner.FuncRunner(func(ctx context.Context, name string, args ...string) (runner.Result, error) {
+		if strings.Join(args, " ") == "status --json" {
+			if deadline, ok := ctx.Deadline(); ok {
+				statusDeadline = time.Until(deadline)
+			}
+		}
+		return baseRunner.Run(ctx, name, args...)
+	})
+	application := app{config: manager, discoverer: observer, tailscale: adapter}
+	var stdout, stderr bytes.Buffer
+	code := application.exposure([]string{"http", "serve", listenerTarget.String(), "--path", "node-4321"}, &stdout, &stderr)
+	if code != 0 || !active {
+		t.Fatalf("HTTP route command failed: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if statusDeadline <= 30*time.Second {
+		t.Fatalf("provider operation inherited the short preflight deadline: remaining=%v", statusDeadline)
+	}
+}
+
+func TestTargetParsingRejectsConflictingAddressOverride(t *testing.T) {
+	for _, raw := range []string{"127.0.0.1:8080", "[::1]:8080"} {
+		if _, err := parseTarget(raw, "::1", "tcp"); err == nil || !strings.Contains(err.Error(), "--address cannot be used") {
+			t.Errorf("parseTarget(%q, --address) err=%v, want conflicting-address error", raw, err)
+		}
+	}
+}
+
+func TestTTYCheckRejectsNullDevice(t *testing.T) {
+	file, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if isTTY(file) || isTTYFile(file) {
+		t.Fatal("treated /dev/null as an interactive terminal")
 	}
 }
 
@@ -610,6 +674,43 @@ func TestServeProbeVerifiesCleanupAndPersistsVersionEvidence(t *testing.T) {
 	loaded, _, missing, err := manager.Load(context.Background())
 	if err != nil || missing || loaded.ServeProbeVersion != cfg.ServeProbeVersion {
 		t.Fatalf("persisted evidence missing=%t cfg=%#v err=%v", missing, loaded, err)
+	}
+}
+
+func TestDoctorReadinessCheckDoesNotCreateMissingConfig(t *testing.T) {
+	manager, err := config.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	provider := &tailscale.Adapter{Binary: "tailscale", Now: time.Now, Runner: runner.FuncRunner(func(_ context.Context, _ string, args ...string) (runner.Result, error) {
+		command := strings.Join(args, " ")
+		calls = append(calls, command)
+		switch command {
+		case "version":
+			return runner.Result{Stdout: "1.102.4\n"}, nil
+		case "status --json":
+			return runner.Result{Stdout: `{"BackendState":"Stopped","HaveNodeKey":true,"TailscaleIPs":["100.64.0.2"],"Self":{"HostName":"dev","Online":false}}`}, nil
+		case "serve --help":
+			return runner.Result{Stdout: "status clear --tcp"}, nil
+		case "funnel --help":
+			return runner.Result{Stdout: "status reset"}, nil
+		default:
+			return runner.Result{}, errors.New("unexpected provider command: " + command)
+		}
+	})}
+	var stdout, stderr bytes.Buffer
+	code := (app{config: manager, tailscale: provider}).doctor([]string{"--tailscale"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("unavailable node returned success: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(manager.Path); !os.IsNotExist(err) {
+		t.Fatalf("readiness-only doctor created a config file: err=%v", err)
+	}
+	for _, call := range calls {
+		if strings.Contains(call, "--bg") {
+			t.Fatalf("readiness-only doctor mutated provider state: %v", calls)
+		}
 	}
 }
 

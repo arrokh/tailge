@@ -71,7 +71,13 @@ func actionAvailabilityForItem(item exposure.ReconciledItem, mode exposuredata.E
 	}
 	if mode == exposuredata.ExposureDisabled {
 		if len(item.Routes) == 0 {
-			if item.State == exposuredata.ExposureState("disabled") {
+			if context.RefreshPending {
+				return ActionAvailability{Disabled: true, Reason: "Action unavailable: refresh is in progress", Wait: true}
+			}
+			if ObservationsUnavailableForMutation(context) {
+				return unavailable("Action unavailable: listener/exposure state is stale")
+			}
+			if SameStateForItem(context.View, item, mode) {
 				return ActionAvailability{}
 			}
 			return unavailable("Disable unavailable: no exact route is observed")
@@ -328,7 +334,25 @@ func ProcessGroupFingerprint(listener discovery.Listener) string {
 // OperationStateForError maps an uncertain operation to a visible workspace
 // state without claiming that provider state is known.
 func OperationStateForError(err error) exposuredata.ExposureState {
-	switch fault.AsAppError(err).Code {
+	appErr := fault.AsAppError(err)
+	return operationStateForOutcome(appErr.Code, appErr.State)
+}
+
+// OperationStateForSafeError preserves structured uncertainty when a receipt is
+// replayed from a later provider refresh.
+func OperationStateForSafeError(err *fault.SafeError) exposuredata.ExposureState {
+	if err == nil {
+		return ""
+	}
+	return operationStateForOutcome(err.Code, err.State)
+}
+
+func operationStateForOutcome(code fault.ErrorCode, state string) exposuredata.ExposureState {
+	switch state {
+	case "unknown", "unverified", "timeout", "partial_failure":
+		return exposuredata.ExposureUnverified
+	}
+	switch code {
 	case fault.ErrCancelled:
 		return exposuredata.ExposureCancelled
 	case fault.ErrVerification, fault.ErrUnknown, fault.ErrTimeout:

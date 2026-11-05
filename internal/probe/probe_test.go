@@ -44,7 +44,12 @@ func (p *probeProvider) Version(context.Context) (string, error) {
 
 type probeConfigStore struct{}
 
-func (probeConfigStore) Save(context.Context, config.Config) error { return nil }
+func (probeConfigStore) Update(_ context.Context, fallback config.Config, update func(*config.Config) error) (config.Config, error) {
+	if err := update(&fallback); err != nil {
+		return config.Config{}, err
+	}
+	return fallback, nil
+}
 
 func TestRunnerRejectsNonLoopbackBeforeMutation(t *testing.T) {
 	provider := &probeProvider{}

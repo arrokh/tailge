@@ -8,6 +8,7 @@ import (
 	"github.com/arrokh/tailge/internal/discovery"
 	"github.com/arrokh/tailge/internal/exposure"
 	"github.com/arrokh/tailge/internal/exposuredata"
+	"github.com/arrokh/tailge/internal/fault"
 	"github.com/arrokh/tailge/internal/readiness"
 	"github.com/arrokh/tailge/internal/target"
 )
@@ -130,6 +131,41 @@ func TestHTTPSRootCanChangeVisibilityThroughAnExactScopeAction(t *testing.T) {
 	got := ActionAvailabilityForItems([]exposure.ReconciledItem{item}, exposuredata.ExposureFunnel, ActionContext{View: view, Readiness: readyWorkspaceReadiness()})
 	if got.Disabled {
 		t.Fatalf("exact HTTPS root was blocked from a controlled visibility change: %#v", got)
+	}
+}
+
+func TestDisabledNoopRequiresFreshObservations(t *testing.T) {
+	item := workspaceItem()
+	item.Routes = nil
+	item.Mode = exposuredata.ExposureDisabled
+	item.State = exposuredata.ExposureState("disabled")
+	view := authoritativeView(item)
+	context := ActionContext{View: view, Readiness: readyWorkspaceReadiness()}
+
+	if got := ActionAvailabilityForItems([]exposure.ReconciledItem{item}, exposuredata.ExposureDisabled, context); got.Disabled {
+		t.Fatalf("fresh disabled item was not recognized as a verified no-op: %#v", got)
+	}
+
+	context.RefreshPending = true
+	if got := ActionAvailabilityForItems([]exposure.ReconciledItem{item}, exposuredata.ExposureDisabled, context); !got.Disabled || !got.Wait {
+		t.Fatalf("refresh-pending disabled item was treated as a verified no-op: %#v", got)
+	}
+
+	context.RefreshPending = false
+	context.View.Exposures.Stale = true
+	if got := ActionAvailabilityForItems([]exposure.ReconciledItem{item}, exposuredata.ExposureDisabled, context); !got.Disabled || !strings.Contains(got.Reason, "stale") {
+		t.Fatalf("stale disabled item was treated as a verified no-op: %#v", got)
+	}
+}
+
+func TestOperationErrorMappingPreservesStructuredUncertainty(t *testing.T) {
+	partial := fault.NewError(fault.ErrOperation, "exposure", "rollback failed", false, "partial_failure", "Inspect provider state.")
+	if got := OperationStateForError(partial); got != exposuredata.ExposureUnverified {
+		t.Fatalf("partial failure mapped to %q, want Unverified", got)
+	}
+	unknown := &fault.SafeError{Code: fault.ErrCancelled, State: "unknown"}
+	if got := OperationStateForSafeError(unknown); got != exposuredata.ExposureUnverified {
+		t.Fatalf("structured unknown cancellation mapped to %q, want Unverified", got)
 	}
 }
 

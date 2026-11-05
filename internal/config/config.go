@@ -132,17 +132,82 @@ func (m Manager) Load(ctx context.Context) (Config, []string, bool, error) {
 
 func (m Manager) Ensure(ctx context.Context) (Config, []string, error) {
 	cfg, warnings, missing, err := m.Load(ctx)
+	if err != nil || !missing {
+		return cfg, warnings, err
+	}
+	if err := ctx.Err(); err != nil {
+		warnings = append(warnings, "config could not be persisted; in-memory defaults remain active")
+		return cfg, warnings, fault.WrapError(fault.ErrCancelled, "config", "config creation cancelled", true, "cancelled", "Retry the command.", err)
+	}
+	if err := m.ensureDir(); err != nil {
+		warnings = append(warnings, "config could not be persisted; in-memory defaults remain active")
+		return cfg, warnings, err
+	}
+	lock, unlock, err := m.openWriteLock(ctx)
 	if err != nil {
-		return Config{}, warnings, err
+		warnings = append(warnings, "config could not be persisted; in-memory defaults remain active")
+		return cfg, warnings, err
+	}
+	defer lock.Close()
+	defer unlock()
+
+	// Another process may have created or changed the config after the initial
+	// missing-file read. Recheck while holding the write lock before creating
+	// defaults so first-run startup cannot overwrite that file.
+	return m.ensureLocked(ctx)
+}
+
+func (m Manager) ensureLocked(ctx context.Context) (Config, []string, error) {
+	cfg, warnings, missing, err := m.Load(ctx)
+	if err != nil || !missing {
+		return cfg, warnings, err
+	}
+	cfg = Defaults()
+	if err := m.saveLocked(ctx, cfg); err != nil {
+		warnings = append(warnings, "config could not be persisted; in-memory defaults remain active")
+		return cfg, warnings, err
+	}
+	warnings = append(warnings, "created "+m.Path)
+	return cfg, warnings, nil
+}
+
+// Update applies a small config change to the latest persisted values under the
+// same lock used by Set and Save. fallback is used only when no config file
+// exists; it lets a caller preserve its loaded in-memory config on first write.
+func (m Manager) Update(ctx context.Context, fallback Config, update func(*Config) error) (Config, error) {
+	if update == nil {
+		return Config{}, fault.NewError(fault.ErrInvalidInput, "config", "config update is nil", false, "invalid", "Provide a config update and retry.")
+	}
+	if err := ctx.Err(); err != nil {
+		return Config{}, fault.WrapError(fault.ErrCancelled, "config", "config update cancelled", true, "cancelled", "Retry the command.", err)
+	}
+	if err := m.ensureDir(); err != nil {
+		return Config{}, err
+	}
+	lock, unlock, err := m.openWriteLock(ctx)
+	if err != nil {
+		return Config{}, err
+	}
+	defer lock.Close()
+	defer unlock()
+
+	current, _, missing, err := m.Load(ctx)
+	if err != nil {
+		return Config{}, err
 	}
 	if missing {
-		if err := m.Save(ctx, cfg); err != nil {
-			warnings = append(warnings, "config could not be persisted; in-memory defaults remain active")
-			return cfg, warnings, err
-		}
-		warnings = append(warnings, "created "+m.Path)
+		current = fallback
 	}
-	return cfg, warnings, nil
+	if err := update(&current); err != nil {
+		return Config{}, err
+	}
+	if err := current.Validate(); err != nil {
+		return Config{}, fault.WrapError(fault.ErrConfig, "config", err.Error(), false, "invalid", "Correct the value and retry.", err)
+	}
+	if err := m.saveLocked(ctx, current); err != nil {
+		return Config{}, err
+	}
+	return current, nil
 }
 
 func (m Manager) Save(ctx context.Context, cfg Config) error {

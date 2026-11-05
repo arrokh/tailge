@@ -123,6 +123,65 @@ func TestSaveRefusesSymlinkedConfigAndBackup(t *testing.T) {
 	}
 }
 
+func TestEnsureLockedDoesNotOverwriteConfigCreatedByAnotherProcess(t *testing.T) {
+	manager, err := NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ensureDir(); err != nil {
+		t.Fatal(err)
+	}
+	lock, unlock, err := manager.openWriteLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	defer unlock()
+
+	created := Defaults()
+	created.Sort = "port"
+	if err := os.WriteFile(manager.Path, []byte(created.YAML()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := manager.ensureLocked(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != created {
+		t.Fatalf("Ensure replaced the concurrently created config: got %#v want %#v", got, created)
+	}
+}
+
+func TestUpdatePreservesLatestConfigValues(t *testing.T) {
+	manager, err := NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted := Defaults()
+	persisted.Sort = "port"
+	persisted.FunnelProbeVersion = "1.102.0"
+	persisted.FunnelProbeAt = "2026-01-02T03:04:05Z"
+	if err := manager.Save(context.Background(), persisted); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := manager.Update(context.Background(), Defaults(), func(cfg *Config) error {
+		cfg.ServeProbeVersion = "1.102.4"
+		cfg.ServeProbeAt = "2026-01-02T03:05:06Z"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Sort != persisted.Sort || updated.FunnelProbeVersion != persisted.FunnelProbeVersion || updated.FunnelProbeAt != persisted.FunnelProbeAt || updated.ServeProbeVersion != "1.102.4" {
+		t.Fatalf("update did not merge into latest config: %#v", updated)
+	}
+	loaded, _, missing, err := manager.Load(context.Background())
+	if err != nil || missing || loaded != updated {
+		t.Fatalf("updated config did not persist: missing=%t loaded=%#v err=%v", missing, loaded, err)
+	}
+}
+
 func TestConcurrentSavesSerializeAndLeaveValidConfig(t *testing.T) {
 	manager, err := NewManager(t.TempDir())
 	if err != nil {

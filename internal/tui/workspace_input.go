@@ -346,6 +346,7 @@ func (m *workspaceModel) updateSkillUninstallModal(key string) (tea.Model, tea.C
 func (m *workspaceModel) updateActionModal(_ tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 	if key == "esc" {
 		m.modal = modalNone
+		m.retryAction = nil
 		return m, nil
 	}
 	choiceCount := len(m.actionSession.choices)
@@ -377,6 +378,7 @@ func (m *workspaceModel) chooseAction() (tea.Model, tea.Cmd) {
 	choice, ok := m.actionSession.selectedChoice()
 	if !ok {
 		m.modal = modalNone
+		m.retryAction = nil
 		m.setBanner("Exposure actions are unavailable", true)
 		return m, nil
 	}
@@ -389,6 +391,7 @@ func (m *workspaceModel) chooseAction() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.modal = modalNone
+		m.retryAction = nil
 		m.setBanner(choice.reason, true)
 		return m, nil
 	}
@@ -406,6 +409,7 @@ func (m *workspaceModel) chooseAction() (tea.Model, tea.Cmd) {
 	}
 	if allSame {
 		m.modal = modalNone
+		m.retryAction = nil
 		if len(items) == 1 {
 			m.transient = workspace.AlreadyMessage(mode)
 		} else {
@@ -431,6 +435,7 @@ func (m *workspaceModel) updateDisableRouteModal(_ tea.KeyMsg, key string) (tea.
 	item, ok := m.actionAnchorItem()
 	if !ok || len(item.Routes) < 2 {
 		m.modal = modalNone
+		m.retryAction = nil
 		m.setBanner("Selection changed — refresh required", true)
 		return m, nil
 	}
@@ -469,6 +474,7 @@ func (m *workspaceModel) beginConfirmation(mode exposuredata.ExposureMode) (tea.
 func (m *workspaceModel) updateConfirmModal(_ tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 	if key == "esc" {
 		m.modal = modalNone
+		m.retryAction = nil
 		if m.httpsRootAction {
 			m.discardHTTPSRootAction()
 		}
@@ -481,6 +487,7 @@ func (m *workspaceModel) updateConfirmModal(_ tea.KeyMsg, key string) (tea.Model
 	if key == "enter" {
 		if !m.actionSession.confirm {
 			m.modal = modalNone
+			m.retryAction = nil
 			if m.httpsRootAction {
 				m.discardHTTPSRootAction()
 			}

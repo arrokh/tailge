@@ -5,7 +5,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -29,13 +32,17 @@ func TestExactProcessListenersRequiresStableIdentity(t *testing.T) {
 }
 
 type fakeListenerObserver struct {
-	snapshot ListenerSnapshot
-	err      error
-	calls    int
+	snapshot  ListenerSnapshot
+	err       error
+	calls     int
+	afterList func()
 }
 
 func (f *fakeListenerObserver) List(context.Context) (ListenerSnapshot, error) {
 	f.calls++
+	if f.afterList != nil {
+		f.afterList()
+	}
 	return f.snapshot, f.err
 }
 
@@ -62,6 +69,51 @@ func TestProcessTerminatorHonorsCancellationBeforeObservation(t *testing.T) {
 	}
 	if observer.calls != 0 {
 		t.Fatalf("observer was called after cancellation: %d", observer.calls)
+	}
+}
+
+func TestProcessTerminatorDoesNotSignalAfterRevalidationCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	requested := Listener{PID: 4242, Process: "api", ProcessStart: "darwin:test", Target: target.Target{Address: "127.0.0.1", Port: 8080, Protocol: "tcp"}}
+	observer := &fakeListenerObserver{
+		snapshot:  ListenerSnapshot{Authoritative: true, Listeners: []Listener{requested}},
+		afterList: cancel,
+	}
+	terminator := &OSProcessTerminator{Observer: observer, OS: "darwin"}
+	signalled := false
+	err := terminator.terminate(ctx, requested,
+		func(context.Context, string, int) string { return requested.ProcessStart },
+		func(int, syscall.Signal) error {
+			signalled = true
+			return nil
+		},
+	)
+	if err == nil || fault.AsAppError(err).Code != fault.ErrCancelled {
+		t.Fatalf("termination after cancellation returned %v", err)
+	}
+	if signalled {
+		t.Fatal("process was signalled after cancellation")
+	}
+}
+
+func TestDarwinProcessStartIdentityUsesSubsecondTime(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin process identity is only available on macOS")
+	}
+	first := processStartIdentity(context.Background(), "darwin", os.Getpid())
+	second := processStartIdentity(context.Background(), "darwin", os.Getpid())
+	if first == "" || first != second {
+		t.Fatalf("Darwin process identity is empty or unstable: first=%q second=%q", first, second)
+	}
+	parts := strings.Split(strings.TrimPrefix(first, "darwin:"), ":")
+	if len(parts) != 2 {
+		t.Fatalf("Darwin process identity %q lacks seconds and microseconds", first)
+	}
+	seconds, secondsErr := strconv.ParseInt(parts[0], 10, 64)
+	microseconds, microsecondsErr := strconv.ParseInt(parts[1], 10, 64)
+	if secondsErr != nil || microsecondsErr != nil || seconds <= 0 || microseconds < 0 || microseconds >= 1_000_000 {
+		t.Fatalf("Darwin process identity %q has invalid start time", first)
 	}
 }
 
@@ -132,7 +184,9 @@ printf '%s\n' 'p4242' 'fcwd' 'n/Users/alice/Projects/tailge' 'p4343' 'fcwd' 'n/U
 	t.Setenv("PATH", directory)
 	t.Setenv("TAILGE_LSOF_ARGS", argsFile)
 
-	got := processWorkingDirectories(context.Background(), "darwin", []int{4343, 4242, 4242, 0})
+	// This test covers batching and parsing, not the production best-effort
+	// deadline; leave room for slow process startup under concurrent test load.
+	got := processWorkingDirectoriesWithTimeout(context.Background(), "darwin", []int{4343, 4242, 4242, 0}, 10*time.Second)
 	if len(got) != 2 || got[4242] != "/Users/alice/Projects/tailge" || got[4343] != "/Users/alice/Projects/Other App" {
 		t.Fatalf("working directories = %#v", got)
 	}

@@ -207,6 +207,7 @@ func (m *workspaceModel) openHTTPSRootPreview(mode exposuredata.ExposureMode) {
 	}
 	if allAlready {
 		m.modal = modalNone
+		m.retryAction = nil
 		m.transient = fmt.Sprintf("Already %s HTTPS for %d selected service(s)", mode, len(items))
 		m.discardHTTPSRootAction()
 		return
