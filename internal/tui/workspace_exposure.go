@@ -48,6 +48,7 @@ func batchRouteSelection(mode exposuredata.ExposureMode, item exposure.Reconcile
 func (m *workspaceModel) openAction(requested *exposuredata.ExposureMode) {
 	item, ok := m.actionAnchorItem()
 	if !ok {
+		m.retryAction = nil
 		m.setBanner("No service is selected", true)
 		return
 	}
@@ -116,6 +117,7 @@ func (m *workspaceModel) invalidatePreviewIfChanged() {
 	}
 	m.modal = modalNone
 	m.discardHTTPSRootAction()
+	m.retryAction = nil
 	m.setBanner("Selection changed — refresh required", true)
 }
 
@@ -128,6 +130,16 @@ func observedMode(item exposure.ReconciledItem) exposuredata.ExposureMode {
 
 func (m *workspaceModel) actionAvailability(mode exposuredata.ExposureMode) workspace.ActionAvailability {
 	items := m.actionItems()
+	for _, item := range items {
+		if target, ok := itemTarget(item); ok {
+			if _, busy := m.activeOps[target.Normalized().Key()]; busy {
+				return workspace.ActionAvailability{Disabled: true, Reason: "Action unavailable: an operation is Applying for this target"}
+			}
+		}
+	}
+	if len(items) > 1 && m.batchID != "" {
+		return workspace.ActionAvailability{Disabled: true, Reason: "Action unavailable: another batch is Applying"}
+	}
 	availability := workspace.ActionAvailabilityForItems(items, mode, workspace.ActionContext{
 		ConfigError:    m.configErr,
 		View:           m.view,
@@ -249,6 +261,7 @@ func (m *workspaceModel) mutationApproval(item exposure.ReconciledItem, target t
 func (m *workspaceModel) startSingleOperation() tea.Cmd {
 	item, ok := m.actionAnchorItem()
 	if !ok || item.ID != m.actionSession.itemID {
+		m.retryAction = nil
 		if m.httpsRootAction {
 			m.modal = modalNone
 			m.discardHTTPSRootAction()
@@ -262,6 +275,7 @@ func (m *workspaceModel) startSingleOperation() tea.Cmd {
 		listenerFingerprint(m.view.Listeners, m.actionSession.target),
 		selectionFingerprint(m.actionItems()),
 	) {
+		m.retryAction = nil
 		if m.httpsRootAction {
 			m.modal = modalNone
 			m.discardHTTPSRootAction()
@@ -274,6 +288,7 @@ func (m *workspaceModel) startSingleOperation() tea.Cmd {
 		if len(m.actionItems()) != 1 || m.httpsRootPort < 1 {
 			m.modal = modalNone
 			m.discardHTTPSRootAction()
+			m.retryAction = nil
 			m.setBanner("HTTPS preview is incomplete; refresh and select one exact listener", true)
 			return nil
 		}
@@ -293,6 +308,7 @@ func (m *workspaceModel) startSingleOperation() tea.Cmd {
 		}
 		controller, timeout := m.controller, m.cfg.OperationTimeout
 		approval := m.mutationApproval(item, target)
+		m.retryAction = nil
 		m.discardHTTPSRootAction()
 		m.transient = "Applying " + string(m.actionSession.mode) + " HTTPS root to " + target.String()
 		return func() tea.Msg {
@@ -316,6 +332,7 @@ func (m *workspaceModel) startSingleOperation() tea.Cmd {
 	controller := m.controller
 	timeout := m.cfg.OperationTimeout
 	approval := m.mutationApproval(item, target)
+	m.retryAction = nil
 	return func() tea.Msg {
 		var receipt exposuredata.OperationReceipt
 		var err error
@@ -334,6 +351,10 @@ func (m *workspaceModel) startBatchOperation() tea.Cmd {
 	items := m.actionItems()
 	if len(items) <= 1 {
 		return m.startSingleOperation()
+	}
+	if m.batchID != "" {
+		m.setBanner("Another batch operation is still Applying", true)
+		return nil
 	}
 	if m.actionSession.preview.selectionHash == "" || selectionFingerprint(items) != m.actionSession.preview.selectionHash || routeFingerprint(m.view.Exposures.Routes, nil) != m.actionSession.preview.allRoutesHash {
 		m.setBanner("Selection changed — refresh required", true)

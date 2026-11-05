@@ -232,19 +232,19 @@ func (a *Adapter) Set(ctx context.Context, change ExposureChange) (exposuredata.
 	expectedKey := string(change.Mode) + ":" + transport + "=" + strconv.Itoa(listenPort)
 	if snapshot.Authoritative {
 		for _, route := range snapshot.Routes {
+			if route.ProviderKey == "" {
+				appErr := fault.NewError(fault.ErrUnknown, "tailscale", "an existing route has no exact endpoint selector", false, "read_only", "Review Tailscale Serve/Funnel status manually; Tailge will not mutate an unidentified endpoint.")
+				receipt.Error = ptr(appErr.Safe())
+				receipt.FinishedAt = a.now()
+				return receipt, appErr
+			}
+			if _, selectorErr := ParseListenerSelector(route.ProviderKey, route.Mode); selectorErr != nil {
+				appErr := fault.WrapError(fault.ErrUnknown, "tailscale", "an existing route has an invalid endpoint selector", false, "read_only", "Review Tailscale status manually; Tailge will not mutate an unidentified endpoint.", selectorErr)
+				receipt.Error = ptr(appErr.Safe())
+				receipt.FinishedAt = a.now()
+				return receipt, appErr
+			}
 			if pathRoute || rootHTTPS {
-				if route.ProviderKey == "" {
-					appErr := fault.NewError(fault.ErrUnknown, "tailscale", "an existing route has no exact endpoint selector", false, "read_only", "Review Tailscale Serve/Funnel status manually; Tailge will not mutate an unidentified shared endpoint.")
-					receipt.Error = ptr(appErr.Safe())
-					receipt.FinishedAt = a.now()
-					return receipt, appErr
-				}
-				if _, selectorErr := ParseListenerSelector(route.ProviderKey, route.Mode); selectorErr != nil {
-					appErr := fault.WrapError(fault.ErrUnknown, "tailscale", "an existing route has an invalid endpoint selector", false, "read_only", "Review Tailscale status manually; Tailge will not mutate an unidentified shared endpoint.", selectorErr)
-					receipt.Error = ptr(appErr.Safe())
-					receipt.FinishedAt = a.now()
-					return receipt, appErr
-				}
 				if expectedKey != "" && sameProviderEndpoint(route.ProviderKey, expectedKey) {
 					if route.Kind != exposuredata.RouteKindHTTPPath && route.Kind != exposuredata.RouteKindHTTPSRoot {
 						appErr := fault.NewError(fault.ErrUnsafe, "tailscale", "the HTTPS endpoint already has a non-HTTP handler", false, "conflict", "Remove or move the exact existing endpoint handler before adding an HTTP route.")

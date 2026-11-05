@@ -45,8 +45,9 @@ type configSavedMsg struct {
 }
 
 type configValidatedMsg struct {
-	cfg config.Config
-	err error
+	cfg      config.Config
+	revision uint64
+	err      error
 }
 
 type paletteSubcommandDoneMsg struct {

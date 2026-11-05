@@ -153,6 +153,40 @@ func (f *fakeProvider) Remove(_ context.Context, selector tailscale.RouteSelecto
 	return exposuredata.OperationReceipt{ID: "remove-" + selector.ID}, nil
 }
 
+type removeThenFailProvider struct {
+	*fakeProvider
+}
+
+func (p *removeThenFailProvider) Remove(ctx context.Context, selector tailscale.RouteSelector, expectedHash string) (exposuredata.OperationReceipt, error) {
+	receipt, err := p.fakeProvider.Remove(ctx, selector, expectedHash)
+	if err != nil {
+		return receipt, err
+	}
+	return receipt, errors.New("simulated remove failure after provider mutation")
+}
+
+type removeThenCancelProvider struct {
+	*fakeProvider
+	cancel  context.CancelFunc
+	removed bool
+}
+
+func (p *removeThenCancelProvider) Remove(ctx context.Context, selector tailscale.RouteSelector, expectedHash string) (exposuredata.OperationReceipt, error) {
+	receipt, err := p.fakeProvider.Remove(ctx, selector, expectedHash)
+	if err == nil {
+		p.removed = true
+		p.cancel()
+	}
+	return receipt, err
+}
+
+func (p *removeThenCancelProvider) List(ctx context.Context) (exposuredata.ExposureSnapshot, error) {
+	if p.removed && ctx.Err() != nil {
+		return exposuredata.ExposureSnapshot{Authoritative: false}, nil
+	}
+	return p.fakeProvider.List(ctx)
+}
+
 func testListener(target targetmodel.Target, name string) discovery.Listener {
 	return discovery.Listener{ID: name, Target: target, Name: name, Process: name, PID: 10, Scope: targetmodel.ScopeForAddress(target.Address), Metadata: discovery.MetadataComplete}
 }
@@ -395,6 +429,25 @@ func TestRefreshMarksLastKnownSourcesStaleAfterDegradation(t *testing.T) {
 	}
 }
 
+func TestApplyBlocksBroadModeChangesWhenMultipleExactRoutesMatch(t *testing.T) {
+	target := targetmodel.Target{Address: "127.0.0.1", Port: 8080, Protocol: "tcp"}.Normalized()
+	routes := []exposuredata.ExposureRoute{
+		{ID: "serve:tcp=8080", ProviderKey: "serve:tcp=8080", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:8080", Target: target, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipManaged, State: exposuredata.ExposureActive},
+		{ID: "funnel:tcp=10000", ProviderKey: "funnel:tcp=10000", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:8080", Target: target, Mode: exposuredata.ExposureFunnel, Ownership: exposuredata.OwnershipManaged, State: exposuredata.ExposureActive},
+	}
+	provider := &fakeProvider{snapshot: exposuredata.ExposureSnapshot{Authoritative: true, Routes: routes}, caps: tailscale.Capabilities{Serve: true, Funnel: true, ExactServe: true, ExactFunnel: true}, readiness: ready()}
+	discoverer := &fakeDiscoverer{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{testListener(target, "api")}}}
+	controller := NewController(discoverer, provider)
+
+	_, err := controller.Apply(context.Background(), target, exposuredata.ExposureServe, false, false, time.Second)
+	if err == nil || fault.AsAppError(err).Code != fault.ErrUnsafe || fault.AsAppError(err).State != "multiple" {
+		t.Fatalf("broad private mode change was not blocked for a known MULTI route set: %v", err)
+	}
+	if len(provider.sets) != 0 || len(provider.removes) != 0 {
+		t.Fatalf("broad mode change reached provider mutation: sets=%#v removes=%#v", provider.sets, provider.removes)
+	}
+}
+
 func TestApplySerializesMutationsForOneTarget(t *testing.T) {
 	target := targetmodel.Target{Address: "127.0.0.1", Port: 8080, Protocol: "tcp"}.Normalized()
 	provider := &fakeProvider{snapshot: exposuredata.ExposureSnapshot{Authoritative: true}, caps: tailscale.Capabilities{Serve: true, ExactServe: true}, readiness: ready(), setStarted: make(chan struct{}), releaseSet: make(chan struct{})}
@@ -458,6 +511,76 @@ func TestApplyReportsFailureAfterRestoringPreviousMode(t *testing.T) {
 	provider.mu.Unlock()
 	if len(routes) != 1 || routes[0].Mode != exposuredata.ExposureServe {
 		t.Fatalf("previous route was not restored: %#v", routes)
+	}
+}
+
+func TestApplyRollsBackWhenRemovalFailsAfterApplying(t *testing.T) {
+	target := targetmodel.Target{Address: "127.0.0.1", Port: 8080, Protocol: "tcp"}.Normalized()
+	old := exposuredata.ExposureRoute{ID: "serve:tcp=8080", ProviderKey: "serve:tcp=8080", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:8080", Target: target, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipManaged, State: exposuredata.ExposureActive}
+	base := &fakeProvider{snapshot: exposuredata.ExposureSnapshot{Authoritative: true, Routes: []exposuredata.ExposureRoute{old}}, caps: tailscale.Capabilities{Serve: true, Funnel: true, ExactServe: true, ExactFunnel: true}, readiness: ready()}
+	provider := &removeThenFailProvider{fakeProvider: base}
+	discoverer := &fakeDiscoverer{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{testListener(target, "api")}}}
+	controller := NewController(discoverer, provider)
+
+	_, err := controller.Apply(context.Background(), target, exposuredata.ExposureFunnel, true, false, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "simulated remove failure") {
+		t.Fatalf("expected provider removal error, got %v", err)
+	}
+	if len(base.removes) != 1 || len(base.sets) != 1 || base.sets[0].Mode != exposuredata.ExposureServe {
+		t.Fatalf("partial removal was not rolled back with the captured route: removes=%#v sets=%#v", base.removes, base.sets)
+	}
+	if len(base.snapshot.Routes) != 1 || routeFingerprint(base.snapshot.Routes[0]) != routeFingerprint(old) {
+		t.Fatalf("exact prior route was not restored after removal error: %#v", base.snapshot.Routes)
+	}
+}
+
+func TestApplyRollsBackWhenRemovalVerificationIsCancelled(t *testing.T) {
+	target := targetmodel.Target{Address: "127.0.0.1", Port: 8081, Protocol: "tcp"}.Normalized()
+	old := exposuredata.ExposureRoute{ID: "serve:tcp=8081", ProviderKey: "serve:tcp=8081", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:8081", Target: target, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipManaged, State: exposuredata.ExposureActive}
+	base := &fakeProvider{snapshot: exposuredata.ExposureSnapshot{Authoritative: true, Routes: []exposuredata.ExposureRoute{old}}, caps: tailscale.Capabilities{Serve: true, Funnel: true, ExactServe: true, ExactFunnel: true}, readiness: ready()}
+	ctx, cancel := context.WithCancel(context.Background())
+	provider := &removeThenCancelProvider{fakeProvider: base, cancel: cancel}
+	discoverer := &fakeDiscoverer{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{testListener(target, "api")}}}
+	controller := NewController(discoverer, provider)
+
+	_, err := controller.Apply(ctx, target, exposuredata.ExposureFunnel, true, false, time.Second)
+	if err == nil || fault.AsAppError(err).Code != fault.ErrCancelled {
+		t.Fatalf("cancelled removal verification was not reported: %v", err)
+	}
+	if len(base.sets) != 1 || base.sets[0].Mode != exposuredata.ExposureServe || len(base.snapshot.Routes) != 1 || routeFingerprint(base.snapshot.Routes[0]) != routeFingerprint(old) {
+		t.Fatalf("previous route was not restored after verification cancellation: sets=%#v routes=%#v", base.sets, base.snapshot.Routes)
+	}
+}
+
+func TestApplyReportsUnverifiedWhenGenericRollbackFails(t *testing.T) {
+	target := targetmodel.Target{Address: "127.0.0.1", Port: 8082, Protocol: "tcp"}.Normalized()
+	old := exposuredata.ExposureRoute{ID: "serve:tcp=8082", ProviderKey: "serve:tcp=8082", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:8082", Target: target, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipManaged, State: exposuredata.ExposureActive}
+	provider := &fakeProvider{snapshot: exposuredata.ExposureSnapshot{Authoritative: true, Routes: []exposuredata.ExposureRoute{old}}, caps: tailscale.Capabilities{Serve: true, Funnel: true, ExactServe: true, ExactFunnel: true}, readiness: ready(), setErr: errors.New("simulated route set failure")}
+	discoverer := &fakeDiscoverer{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{testListener(target, "api")}}}
+	controller := NewController(discoverer, provider)
+
+	_, err := controller.Apply(context.Background(), target, exposuredata.ExposureFunnel, true, false, time.Second)
+	if err == nil || fault.AsAppError(err).Code != fault.ErrVerification || fault.AsAppError(err).State != "unverified" {
+		t.Fatalf("failed exact rollback was not reported as unverified: %v", err)
+	}
+	if controller.operationStates[target.Key()] != exposuredata.ExposureUnverified {
+		t.Fatalf("failed exact rollback operation state = %q, want unverified", controller.operationStates[target.Key()])
+	}
+}
+
+func TestApplyRejectsRawTCPNoopWhenBackendDoesNotMatchSelectedListener(t *testing.T) {
+	listenerTarget := targetmodel.Target{Address: "::", Port: 4321, Protocol: "tcp"}.Normalized()
+	routeTarget := targetmodel.Target{Address: "127.0.0.1", Port: 4321, Protocol: "tcp"}.Normalized()
+	raw := exposuredata.ExposureRoute{ID: "serve:tcp=4321", ProviderKey: "serve:tcp=4321", Kind: exposuredata.RouteKindRawTCP, Backend: "tcp://127.0.0.1:4321", Target: routeTarget, Mode: exposuredata.ExposureServe, Ownership: exposuredata.OwnershipManaged, State: exposuredata.ExposureActive}
+	provider := &fakeProvider{snapshot: exposuredata.ExposureSnapshot{Authoritative: true, Routes: []exposuredata.ExposureRoute{raw}}, caps: tailscale.Capabilities{Serve: true, ExactServe: true}, readiness: ready()}
+	discoverer := &fakeDiscoverer{snapshot: discovery.ListenerSnapshot{Authoritative: true, Listeners: []discovery.Listener{testListener(listenerTarget, "api")}}}
+	controller := NewController(discoverer, provider)
+
+	if _, err := controller.Apply(context.Background(), listenerTarget, exposuredata.ExposureServe, false, false, time.Second); err == nil || !strings.Contains(err.Error(), "backend does not match") {
+		t.Fatalf("same-mode route with a different address-family backend was accepted: %v", err)
+	}
+	if len(provider.sets) != 0 || len(provider.removes) != 0 {
+		t.Fatalf("mismatched route identity reached provider mutation: sets=%#v removes=%#v", provider.sets, provider.removes)
 	}
 }
 

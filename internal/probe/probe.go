@@ -27,7 +27,7 @@ type Provider interface {
 }
 
 type ConfigStore interface {
-	Save(context.Context, config.Config) error
+	Update(context.Context, config.Config, func(*config.Config) error) (config.Config, error)
 }
 
 type Runner struct {
@@ -130,14 +130,18 @@ func (r Runner) runLocked(ctx context.Context, cfg *config.Config, target target
 		return err
 	}
 	probeAt := r.now().UTC().Format(time.RFC3339Nano)
-	if mode == exposuredata.ExposureServe {
-		cfg.ServeProbeVersion, cfg.ServeProbeAt = version, probeAt
-	} else {
-		cfg.FunnelProbeVersion, cfg.FunnelProbeAt = version, probeAt
-	}
-	if err := r.Config.Save(ctx, *cfg); err != nil {
+	updated, err := r.Config.Update(ctx, *cfg, func(current *config.Config) error {
+		if mode == exposuredata.ExposureServe {
+			current.ServeProbeVersion, current.ServeProbeAt = version, probeAt
+		} else {
+			current.FunnelProbeVersion, current.FunnelProbeAt = version, probeAt
+		}
+		return nil
+	})
+	if err != nil {
 		return fault.WrapError(fault.ErrConfig, "probe", "compatibility probe passed but evidence could not be persisted", true, "unknown", "Keep the evidence output and retry config persistence; mutations remain disabled.", err)
 	}
+	*cfg = updated
 	return nil
 }
 

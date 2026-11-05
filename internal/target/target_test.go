@@ -56,6 +56,20 @@ func TestTargetValidationRejectsUnsafeAddressText(t *testing.T) {
 	}
 }
 
+func TestScopedIPv6TargetsFailClosedWithoutCollapsingIdentity(t *testing.T) {
+	first := Target{Address: "fe80::1%en0", Port: 8080, Protocol: "tcp"}
+	second := Target{Address: "fe80::1%en1", Port: 8080, Protocol: "tcp"}
+	if err := first.Validate(); err == nil {
+		t.Fatal("scoped IPv6 target was accepted without preserving its interface identity")
+	}
+	if _, err := ParseTarget("[fe80::1%en0]:8080", "tcp"); err == nil {
+		t.Fatal("scoped IPv6 listener target was accepted for exact mutation")
+	}
+	if first.Normalized().Address != first.Address || first.Key() == second.Key() {
+		t.Fatalf("normalization erased distinct IPv6 zone identities: first=%q second=%q", first.Key(), second.Key())
+	}
+}
+
 func TestParseTargetAcceptsPortsAndURLsButValidatesBounds(t *testing.T) {
 	if target, err := ParseTarget("8080", "tcp"); err != nil || target.Address != "127.0.0.1" || target.Port != 8080 {
 		t.Fatalf("bare port parse = %#v, err=%v", target, err)

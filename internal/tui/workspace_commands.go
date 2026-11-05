@@ -14,6 +14,7 @@ import (
 	"github.com/arrokh/tailge/internal/exposure"
 	"github.com/arrokh/tailge/internal/exposuredata"
 	"github.com/arrokh/tailge/internal/target"
+	"github.com/arrokh/tailge/internal/workspace"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -48,6 +49,10 @@ func sortDescription(sortKey string) string {
 }
 
 func (m *workspaceModel) cycleSort() tea.Cmd {
+	if !m.configLoaded {
+		m.transient = "Configuration is still loading; try changing settings again shortly"
+		return nil
+	}
 	previousID, previousIndex := m.selectedID, m.selectedIdx
 	candidate := m.cfg
 	candidate.Sort = nextWorkspaceSort(candidate.Sort)
@@ -57,7 +62,7 @@ func (m *workspaceModel) cycleSort() tea.Cmd {
 		m.updateVisualSelection()
 	}
 	m.transient = "Sort: " + sortDescription(candidate.Sort)
-	return saveConfigCmd(m.ctx, m.manager, candidate)
+	return m.queueConfigSave(candidate)
 }
 
 func (m *workspaceModel) openCancel() {
@@ -173,6 +178,10 @@ func (m *workspaceModel) executePalette(query string) tea.Cmd {
 			m.setBanner("Usage: :sort name|name-desc|none|port|address|exposure", true)
 			return nil
 		}
+		if !m.configLoaded {
+			m.transient = "Configuration is still loading; try changing settings again shortly"
+			return nil
+		}
 		candidate := m.cfg
 		if err := config.SetValue(&candidate, "sort", parts[1]); err != nil {
 			m.setBanner(safeMessage(err), true)
@@ -184,23 +193,27 @@ func (m *workspaceModel) executePalette(query string) tea.Cmd {
 		if m.visualSelection {
 			m.updateVisualSelection()
 		}
-		return saveConfigCmd(m.ctx, m.manager, candidate)
+		return m.queueConfigSave(candidate)
 	case "config":
 		if len(parts) == 2 && parts[1] == "show" {
 			m.setBanner(m.cfg.YAML(), true)
 			return nil
 		}
 		if len(parts) == 2 && parts[1] == "validate" {
-			return validateConfigCmd(m.ctx, m.manager)
+			return validateConfigCmd(m.ctx, m.manager, m.configRevision)
 		}
 		if len(parts) == 4 && parts[1] == "set" {
+			if !m.configLoaded {
+				m.transient = "Configuration is still loading; try changing settings again shortly"
+				return nil
+			}
 			candidate := m.cfg
 			if err := config.SetValue(&candidate, parts[2], parts[3]); err != nil {
 				m.setBanner("Config: "+safeMessage(err), true)
 				return nil
 			}
 			m.cfg = candidate
-			return saveConfigCmd(m.ctx, m.manager, candidate)
+			return m.queueConfigSave(candidate)
 		}
 		m.setBanner("Palette config commands: :config show, :config set key value, or :config validate", true)
 	default:
@@ -291,15 +304,84 @@ func (m *workspaceModel) startRetry() tea.Cmd {
 		m.transient = "Retry is disabled while Applying"
 		return nil
 	}
+	intent := &retryIntent{itemID: item.ID, targetKey: target.Normalized().Key(), hasListener: item.Listener != nil}
+	if item.Listener != nil {
+		intent.processFingerprint = workspace.ProcessFingerprint(*item.Listener)
+	}
+	m.retryPending = intent
 	m.refreshState.requestRetryPreview()
 	m.transient = "Refreshing before retry preview..."
 	return m.startRefresh()
 }
 
-func validateConfigCmd(ctx context.Context, manager config.Manager) tea.Cmd {
+func (m *workspaceModel) openRetryPreview() {
+	intent := m.retryPending
+	m.retryPending = nil
+	if intent == nil {
+		return
+	}
+	for _, item := range m.items() {
+		if item.ID != intent.itemID {
+			continue
+		}
+		target, ok := itemTarget(item)
+		if !ok || target.Normalized().Key() != intent.targetKey || (item.Listener != nil) != intent.hasListener {
+			break
+		}
+		if item.Listener != nil && workspace.ProcessFingerprint(*item.Listener) != intent.processFingerprint {
+			break
+		}
+		if item.OperationState != exposuredata.ExposureFailed && item.OperationState != exposuredata.ExposureUnverified && item.OperationState != exposuredata.ExposureCancelled {
+			break
+		}
+		m.retryAction = intent
+		m.openAction(nil)
+		return
+	}
+	m.setBanner("Retry target changed or is no longer available; select it and refresh before retrying", true)
+}
+
+func (m *workspaceModel) queueConfigSave(cfg config.Config) tea.Cmd {
+	m.configRevision++
+	copyConfig := cfg
+	m.pendingConfigSave = &copyConfig
+	if m.configSaveInFlight {
+		return nil
+	}
+	return m.startPendingConfigSave()
+}
+
+func (m *workspaceModel) startPendingConfigSave() tea.Cmd {
+	if m.pendingConfigSave == nil {
+		return nil
+	}
+	cfg := *m.pendingConfigSave
+	m.pendingConfigSave = nil
+	m.configSaveInFlight = true
+	return saveConfigCmd(m.ctx, m.manager, cfg)
+}
+
+func (m *workspaceModel) finishConfigSave(message configSavedMsg) tea.Cmd {
+	m.configRevision++
+	m.configSaveInFlight = false
+	if m.pendingConfigSave != nil {
+		return m.startPendingConfigSave()
+	}
+	if message.err != nil {
+		m.configErr = message.err
+		m.setBanner("Configuration was not saved: "+safeMessage(message.err), true)
+		return nil
+	}
+	m.configErr = nil
+	m.cfg = message.cfg
+	m.transient = "Configuration saved"
+	return nil
+}
+
+func validateConfigCmd(ctx context.Context, manager config.Manager, revision uint64) tea.Cmd {
 	return func() tea.Msg {
 		cfg, _, _, err := manager.Load(ctx)
-		return configValidatedMsg{cfg: cfg, err: err}
+		return configValidatedMsg{cfg: cfg, revision: revision, err: err}
 	}
 }
 

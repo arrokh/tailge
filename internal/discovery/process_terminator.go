@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -35,6 +34,10 @@ func NewProcessTerminator(observer ListenerObserver) *OSProcessTerminator {
 // re-discovers the listener immediately before signalling and never escalates
 // to SIGKILL.
 func (t *OSProcessTerminator) Terminate(ctx context.Context, requested Listener) error {
+	return t.terminate(ctx, requested, processStartIdentity, syscall.Kill)
+}
+
+func (t *OSProcessTerminator) terminate(ctx context.Context, requested Listener, startIdentity func(context.Context, string, int) string, signal func(int, syscall.Signal) error) error {
 	if err := ctx.Err(); err != nil {
 		return fault.WrapError(fault.ErrCancelled, "discovery", "process termination was cancelled", true, "cancelled", "Retry after reviewing the selected process.", err)
 	}
@@ -63,10 +66,13 @@ func (t *OSProcessTerminator) Terminate(ctx context.Context, requested Listener)
 	}
 	// Re-check the stable process-start identity immediately before signalling;
 	// PID equality alone is unsafe because the OS may have reused the PID.
-	if currentStart := processStartIdentity(ctx, t.OS, requested.PID); currentStart == "" || currentStart != requested.ProcessStart {
+	if currentStart := startIdentity(ctx, t.OS, requested.PID); currentStart == "" || currentStart != requested.ProcessStart {
 		return fault.NewError(fault.ErrUnsafe, "discovery", "selected process identity changed", true, "changed", "Refresh and select the current process before terminating it.")
 	}
-	if err := syscall.Kill(requested.PID, syscall.SIGTERM); err != nil {
+	if err := ctx.Err(); err != nil {
+		return fault.WrapError(fault.ErrCancelled, "discovery", "process termination was cancelled before signalling", true, "cancelled", "Retry after reviewing the selected process.", err)
+	}
+	if err := signal(requested.PID, syscall.SIGTERM); err != nil {
 		return fault.WrapError(fault.ErrOperation, "discovery", "could not send SIGTERM to "+strconv.Itoa(requested.PID), true, "failed", "Check process permissions and retry; no SIGKILL was attempted.", err)
 	}
 	deadline := time.NewTimer(processTerminationWait)
@@ -162,19 +168,7 @@ func processStartIdentity(ctx context.Context, goos string, pid int) string {
 		return "linux:" + fields[19]
 	}
 	if goos == "darwin" {
-		command := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "lstart=")
-		command.WaitDelay = 2 * time.Second
-		var output boundedMetadataBuffer
-		output.max = 256
-		command.Stdout = &output
-		if err := command.Run(); err != nil {
-			return ""
-		}
-		value := strings.TrimSpace(sanitizeText(output.String()))
-		if value == "" {
-			return ""
-		}
-		return "darwin:" + value
+		return darwinProcessStartIdentity(pid)
 	}
 	return ""
 }

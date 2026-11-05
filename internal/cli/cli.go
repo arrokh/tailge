@@ -24,6 +24,7 @@ import (
 	"github.com/arrokh/tailge/internal/tailscale"
 	targetmodel "github.com/arrokh/tailge/internal/target"
 	"github.com/arrokh/tailge/internal/tui"
+	"github.com/charmbracelet/x/term"
 )
 
 const schemaVersion = 1
@@ -275,13 +276,13 @@ func (a app) runHTTPPathExposure(mode exposuredata.ExposureMode, parsed flagValu
 	if mode == exposuredata.ExposureFunnel && !parsed.bools["confirm-public"] {
 		return reportMaybeJSON(stdout, stderr, fault.NewError(fault.ErrUnsafe, "cli", "Funnel makes every path on the shared HTTPS hostname and port public", false, "not_confirmed", "Review all sibling handlers and repeat with --confirm-public."), parsed.bools["json"])
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	preflightCtx, cancelPreflight := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelPreflight()
 	if path == "" && mode != exposuredata.ExposureDisabled && !root {
 		if a.discoverer == nil {
 			return reportMaybeJSON(stdout, stderr, fault.NewError(fault.ErrDependency, "cli", "listener discovery is unavailable", true, "unavailable", "Refresh listener discovery and retry."), parsed.bools["json"])
 		}
-		listeners, discoverErr := a.discoverer.List(ctx)
+		listeners, discoverErr := a.discoverer.List(preflightCtx)
 		if discoverErr != nil || !listeners.Authoritative || listeners.Error != nil {
 			if discoverErr == nil {
 				discoverErr = fault.NewError(fault.ErrUnknown, "cli", "listener state is not authoritative", true, "unknown", "Refresh local listener discovery before generating a service path.")
@@ -306,10 +307,13 @@ func (a app) runHTTPPathExposure(mode exposuredata.ExposureMode, parsed flagValu
 			return reportMaybeJSON(stdout, stderr, fault.WrapError(fault.ErrInvalidInput, "cli", err.Error(), false, "invalid", "Select a valid discovered listener port.", err), parsed.bools["json"])
 		}
 	}
-	cfg, _, err := a.config.Ensure(ctx)
+	cfg, _, err := a.config.Ensure(preflightCtx)
 	if err != nil {
 		return reportMaybeJSON(stdout, stderr, err, parsed.bools["json"])
 	}
+	cancelPreflight()
+	operationCtx, cancelOperation := context.WithTimeout(context.Background(), 30*time.Second+cfg.OperationTimeout)
+	defer cancelOperation()
 	if a.tailscale == nil {
 		return reportMaybeJSON(stdout, stderr, fault.NewError(fault.ErrDependency, "cli", "Tailscale provider is unavailable", true, "unavailable", "Install Tailscale and retry."), parsed.bools["json"])
 	}
@@ -320,7 +324,7 @@ func (a app) runHTTPPathExposure(mode exposuredata.ExposureMode, parsed flagValu
 	var applyErr error
 	var route exposuredata.ExposureRoute
 	if mode == exposuredata.ExposureDisabled {
-		snapshot, listErr := a.tailscale.List(ctx)
+		snapshot, listErr := a.tailscale.List(operationCtx)
 		if listErr != nil || !snapshot.Authoritative || snapshot.Error != nil {
 			if listErr == nil {
 				listErr = fault.NewError(fault.ErrUnknown, "cli", "provider route state is not authoritative", true, "unknown", "Refresh Tailscale status before disabling a path.")
@@ -342,22 +346,22 @@ func (a app) runHTTPPathExposure(mode exposuredata.ExposureMode, parsed flagValu
 			return reportMaybeJSON(stdout, stderr, fault.NewError(fault.ErrAmbiguous, "cli", "the named HTTP path does not identify exactly one configured route", false, "ambiguous", "Review exposure status and provide the exact target and path."), parsed.bools["json"])
 		}
 		route = matches[0]
-		receipt, applyErr = controller.ApplyRouteIdentity(ctx, target, route.ID, parsed.bools["confirm-external"], cfg.OperationTimeout)
+		receipt, applyErr = controller.ApplyRouteIdentity(operationCtx, target, route.ID, parsed.bools["confirm-external"], cfg.OperationTimeout)
 	} else if root {
 		options := exposure.HTTPSRootOptions{HTTPSPort: httpsPort, LocalhostBackendAlias: parsed.bools["localhost-backend"], ReplaceRawTCP: parsed.bools["replace-raw-tcp"], ConfirmExternal: parsed.bools["confirm-external"]}
-		receipt, applyErr = controller.ApplyHTTPSRootWithOptions(ctx, target, options, cfg.OperationTimeout)
+		receipt, applyErr = controller.ApplyHTTPSRootWithOptions(operationCtx, target, options, cfg.OperationTimeout)
 		route = exposuredata.ExposureRoute{ProviderKey: string(mode) + ":https=" + strconv.Itoa(httpsPort), Kind: exposuredata.RouteKindHTTPSRoot, Path: "/", Target: target, Mode: mode}
 		if applyErr == nil && receipt.Verified {
-			if observed, ok := observedHTTPSRoute(ctx, a.tailscale, target, mode, "/", httpsPort, true, parsed.bools["localhost-backend"]); ok {
+			if observed, ok := observedHTTPSRoute(operationCtx, a.tailscale, target, mode, "/", httpsPort, true, parsed.bools["localhost-backend"]); ok {
 				route = observed
 			}
 		}
 	} else {
 		options := exposure.HTTPPathOptions{LocalhostBackendAlias: parsed.bools["localhost-backend"]}
-		receipt, applyErr = controller.ApplyHTTPPathWithOptions(ctx, target, path, mode, parsed.bools["confirm-public"], options, cfg.OperationTimeout)
+		receipt, applyErr = controller.ApplyHTTPPathWithOptions(operationCtx, target, path, mode, parsed.bools["confirm-public"], options, cfg.OperationTimeout)
 		route = exposuredata.ExposureRoute{ProviderKey: string(mode) + ":https=443", Kind: exposuredata.RouteKindHTTPPath, Path: path, Target: target, Mode: mode}
 		if applyErr == nil && receipt.Verified {
-			if observed, ok := observedHTTPSRoute(ctx, a.tailscale, target, mode, path, 443, false, parsed.bools["localhost-backend"]); ok {
+			if observed, ok := observedHTTPSRoute(operationCtx, a.tailscale, target, mode, path, 443, false, parsed.bools["localhost-backend"]); ok {
 				route = observed
 			}
 		}
@@ -502,6 +506,9 @@ func (a app) configCommand(args []string, stdout, stderr io.Writer) int {
 		if len(args) != 1 {
 			return reportError(stderr, invalidArgs("config path accepts no arguments"))
 		}
+		if strings.TrimSpace(a.config.Path) == "" {
+			return reportError(stderr, fault.NewError(fault.ErrConfig, "config", "cannot determine the config file path", false, "unavailable", "Set a valid home directory and retry."))
+		}
 		fmt.Fprintln(stdout, a.config.Path)
 		return 0
 	case "show":
@@ -570,7 +577,13 @@ func (a app) doctor(args []string, stdout, stderr io.Writer) int {
 		err := fault.NewError(fault.ErrDependency, "doctor", "Tailscale provider is unavailable", true, "unavailable", "Configure Tailscale and retry.")
 		return reportDoctor(stdout, stderr, readinessmodel.Readiness{At: time.Now(), Status: readinessmodel.ReadinessUnknown}, err, parsed.bools["json"])
 	}
-	cfg, _, cfgErr := a.config.Ensure(ctx)
+	cfg := config.Defaults()
+	var cfgErr error
+	if parsed.values["probe"] != "" {
+		cfg, _, cfgErr = a.config.Ensure(ctx)
+	} else {
+		cfg, _, _, cfgErr = a.config.Load(ctx)
+	}
 	if cfgErr != nil {
 		cfg = config.Defaults()
 	}
@@ -842,15 +855,17 @@ func parseTarget(raw, address, protocol string) (targetmodel.Target, error) {
 	if strings.IndexFunc(address, func(r rune) bool { return r < 0x20 || r == 0x7f || r == '\\' || r == '"' }) >= 0 {
 		return targetmodel.Target{}, fmt.Errorf("address contains unsupported control or quoting characters")
 	}
-	if address != "" && !strings.Contains(raw, ":") {
+	if address != "" {
+		if strings.Contains(raw, ":") {
+			return targetmodel.Target{}, fmt.Errorf("--address cannot be used with a target that already includes an address")
+		}
 		raw = net.JoinHostPort(targetmodel.NormalizeAddress(address), raw)
 	}
 	return targetmodel.ParseTarget(raw, protocol)
 }
 
 func isTTY(file *os.File) bool {
-	info, err := file.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
+	return file != nil && term.IsTerminal(file.Fd())
 }
 
 func isTTYFile(writer io.Writer) bool {

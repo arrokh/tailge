@@ -116,7 +116,7 @@ func (m *workspaceModel) finishRefreshPart(seq uint64) tea.Cmd {
 		m.transient = ""
 	}
 	if m.refreshState.consumeRetryPreview() {
-		m.openAction(nil)
+		m.openRetryPreview()
 	}
 	if m.refreshState.consumeAgain() {
 		return m.startRefresh()
@@ -131,6 +131,8 @@ func (m *workspaceModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clampOffsets()
 		return m, nil
 	case configLoadedMsg:
+		m.configRevision++
+		m.configLoaded = true
 		m.cfg = message.cfg
 		m.configErr = message.err
 		if message.err != nil && m.cfg == (config.Config{}) {
@@ -151,6 +153,7 @@ func (m *workspaceModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		oldID, oldIdx := m.selectedID, m.selectedIdx
 		available := viewAvailable(message.view)
+		providerSnapshotFresh := available && message.view.Exposures.Authoritative && !message.view.Exposures.Stale && message.view.Exposures.Error == nil
 		viewErr := message.err
 		if !available && m.hasView && viewErr == nil {
 			viewErr = fault.NewError(fault.ErrUnknown, "tui", "refresh returned no snapshot", true, "unknown", "Refresh again before changing exposure.")
@@ -161,6 +164,8 @@ func (m *workspaceModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.pruneSelection()
 		m.viewErr = viewErr
+		m.applyObservedOperationOutcomes(providerSnapshotFresh)
+		m.markActiveOperationsApplying()
 		m.reselect(oldID, oldIdx)
 		m.updateVisualSelection()
 		m.invalidatePreviewIfChanged()
@@ -280,22 +285,18 @@ func (m *workspaceModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyStatus(message)
 		return m, nil
 	case configSavedMsg:
-		if message.err != nil {
-			m.configErr = message.err
-			m.setBanner("Configuration was not saved: "+safeMessage(message.err), true)
-		} else {
-			m.configErr = nil
-			m.cfg = message.cfg
-			m.transient = "Configuration saved"
-		}
-		return m, nil
+		return m, m.finishConfigSave(message)
 	case configValidatedMsg:
+		if message.revision != m.configRevision || m.configSaveInFlight || m.pendingConfigSave != nil {
+			return m, nil
+		}
 		if message.err != nil {
 			m.configErr = message.err
 			m.setBanner("Config: "+safeMessage(message.err), true)
 		} else {
 			m.configErr = nil
 			m.cfg = message.cfg
+			m.controller.ReadinessOptions = tailscale.ReadinessOptions{ServeProbeVersion: m.cfg.ServeProbeVersion, FunnelProbeVersion: m.cfg.FunnelProbeVersion}
 			m.transient = "Configuration is valid"
 		}
 		return m, nil

@@ -107,7 +107,11 @@ func selectionFingerprint(items []exposure.ReconciledItem) string {
 			parts = append(parts, item.ID+":unavailable")
 			continue
 		}
-		parts = append(parts, item.ID+":"+target.Key()+":"+routeFingerprint(item.Routes, nil))
+		process := ""
+		if item.Listener != nil {
+			process = workspace.ProcessFingerprint(*item.Listener)
+		}
+		parts = append(parts, item.ID+":"+target.Key()+":"+process+":"+routeFingerprint(item.Routes, nil))
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, "\x00")
@@ -131,7 +135,7 @@ func listenerFingerprint(snapshot discovery.ListenerSnapshot, target targetmodel
 	ids := []string{}
 	for _, listener := range snapshot.Listeners {
 		if exposure.Matches(listener.Target, target) {
-			ids = append(ids, listener.ID+":"+listener.Target.Key())
+			ids = append(ids, listener.ID+":"+workspace.ProcessFingerprint(listener))
 		}
 	}
 	sort.Strings(ids)

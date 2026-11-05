@@ -138,6 +138,127 @@ func TestSortShortcutCyclesAndPreservesSelectedIdentity(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRetryPreviewStaysBoundToFailedTarget(t *testing.T) {
+	m := workspaceFixture()
+	m.view.Items[0].OperationState = exposuredata.ExposureFailed
+	secondListener := discovery.Listener{ID: "listener-two", Name: "api", Process: "node", ProcessStart: "test:4343", PID: 4343, CommandLine: "node api", Target: targetmodel.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}, Scope: targetmodel.ScopeLoopback, Metadata: discovery.MetadataComplete}
+	m.view.Items = append(m.view.Items, exposure.ReconciledItem{ID: secondListener.ID, Listener: &secondListener, State: exposuredata.ExposureState("disabled"), Mode: exposuredata.ExposureDisabled})
+	m.view.Listeners.Listeners = append(m.view.Listeners.Listeners, secondListener)
+	m.selectedID = m.view.Items[0].ID
+	m.reselect(m.selectedID, 0)
+	m.selectedItems = map[string]bool{secondListener.ID: true}
+
+	if cmd := m.startRetry(); cmd == nil || m.retryPending == nil || m.retryPending.itemID != m.view.Items[0].ID {
+		item, _ := m.selectedItem()
+		t.Fatalf("retry did not capture the failed target: cmd=%t intent=%#v selected=%#v transient=%q", cmd != nil, m.retryPending, item, m.transient)
+	}
+	m.selectedID, m.selectedIdx = secondListener.ID, 1
+	seq := m.refreshState.sequence()
+	m.Update(viewLoadedMsg{seq: seq, view: m.view})
+	m.Update(readinessLoadedMsg{seq: seq, data: m.readiness})
+	items := m.actionItems()
+	if m.modal != modalAction || len(items) != 1 || items[0].ID != "listener-app" {
+		t.Fatalf("retry preview drifted to the changed selection or marked set: modal=%v items=%#v", m.modal, items)
+	}
+	if !m.isMarked(secondListener.ID) {
+		t.Fatal("retry preview changed the user's marked selection")
+	}
+	m.Update(keyType(tea.KeyEsc))
+	if m.retryAction != nil {
+		t.Fatal("cancelled retry preview left its target override active")
+	}
+}
+
+func TestWorkspaceRetryCancelsWhenCapturedProcessIdentityChanges(t *testing.T) {
+	m := workspaceFixture()
+	m.view.Items[0].OperationState = exposuredata.ExposureFailed
+	if cmd := m.startRetry(); cmd == nil {
+		t.Fatal("retry did not start refresh")
+	}
+	fresh := m.view
+	fresh.Items = append([]exposure.ReconciledItem(nil), m.view.Items...)
+	fresh.Items[0].Listener = new(discovery.Listener)
+	*fresh.Items[0].Listener = *m.view.Items[0].Listener
+	fresh.Items[0].Listener.ProcessStart = "test:reused-pid"
+	fresh.Listeners.Listeners = append([]discovery.Listener(nil), m.view.Listeners.Listeners...)
+	fresh.Listeners.Listeners[0].ProcessStart = "test:reused-pid"
+	seq := m.refreshState.sequence()
+	m.Update(viewLoadedMsg{seq: seq, view: fresh})
+	m.Update(readinessLoadedMsg{seq: seq, data: m.readiness})
+	if m.modal != modalNone || m.retryAction != nil || !strings.Contains(m.banner, "Retry target changed") {
+		t.Fatalf("retry retargeted a reused process identity: modal=%v retry=%#v banner=%q", m.modal, m.retryAction, m.banner)
+	}
+}
+
+func TestWorkspaceWaitsForConfigLoadBeforePersistingChanges(t *testing.T) {
+	m := workspaceFixture()
+	m.configLoaded = false
+	if cmd := m.cycleSort(); cmd != nil || m.cfg.Sort != "name" || m.pendingConfigSave != nil {
+		t.Fatalf("sort change raced config loading: cmd=%t sort=%q pending=%#v", cmd != nil, m.cfg.Sort, m.pendingConfigSave)
+	}
+	if cmd := m.executePalette(":config set color_theme light"); cmd != nil || m.cfg.ColorTheme != "auto" || m.pendingConfigSave != nil {
+		t.Fatalf("palette config change raced config loading: cmd=%t theme=%q pending=%#v", cmd != nil, m.cfg.ColorTheme, m.pendingConfigSave)
+	}
+}
+
+func TestWorkspaceIgnoresConfigValidationFromAnOlderRevision(t *testing.T) {
+	m := workspaceFixture()
+	manager, err := config.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.manager = manager
+	if cmd := m.cycleSort(); cmd == nil {
+		t.Fatal("first config save did not start")
+	}
+	staleRevision := m.configRevision
+	m.cycleSort()
+	updatedSort := m.cfg.Sort
+	m.Update(configValidatedMsg{cfg: config.Defaults(), revision: staleRevision})
+	if m.cfg.Sort != updatedSort || m.pendingConfigSave == nil || m.configRevision == staleRevision {
+		t.Fatalf("stale validation overwrote newer settings: sort=%q want=%q pending=%#v revision=%d", m.cfg.Sort, updatedSort, m.pendingConfigSave, m.configRevision)
+	}
+}
+
+func TestWorkspaceConfigWritesCoalesceInOrder(t *testing.T) {
+	m := workspaceFixture()
+	manager, err := config.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.manager = manager
+
+	first := m.cycleSort()
+	if first == nil || !m.configSaveInFlight {
+		t.Fatal("first config save did not start")
+	}
+	m.cycleSort()
+	if m.pendingConfigSave == nil || m.pendingConfigSave.Sort != "none" {
+		t.Fatalf("newer config write was not queued: %#v", m.pendingConfigSave)
+	}
+	firstMessage, ok := first().(configSavedMsg)
+	if !ok {
+		t.Fatalf("first config save returned %#v", firstMessage)
+	}
+	_, second := m.Update(firstMessage)
+	if second == nil || !m.configSaveInFlight || m.pendingConfigSave != nil {
+		t.Fatalf("queued config write did not start after the first completed: cmd=%t active=%t pending=%#v", second != nil, m.configSaveInFlight, m.pendingConfigSave)
+	}
+	secondMessage, ok := second().(configSavedMsg)
+	if !ok {
+		t.Fatalf("second config save returned %#v", secondMessage)
+	}
+	m.Update(secondMessage)
+
+	stored, _, _, err := manager.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Sort != "none" || m.cfg.Sort != "none" {
+		t.Fatalf("older save reverted the latest sort: disk=%q model=%q", stored.Sort, m.cfg.Sort)
+	}
+}
+
 func TestModeFilterShortcutTogglesNonOffRowsAndPreservesSelection(t *testing.T) {
 	m := workspaceFixture()
 	offListener := discovery.Listener{ID: "listener-off", Name: "off", Target: targetmodel.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}}
@@ -448,7 +569,7 @@ func workspaceFixture() *workspaceModel {
 				Items:     []exposure.ReconciledItem{{ID: listener.ID, Listener: &listener, Routes: []exposuredata.ExposureRoute{route}, State: exposuredata.ExposureActive, Mode: exposuredata.ExposureServe}},
 			},
 			readiness: readiness.Readiness{At: now, Status: readiness.ReadinessReady, Modes: []readiness.ModeReadiness{{Mode: exposuredata.ExposureServe, Status: readiness.ReadinessReady, HTTPPathStatus: readiness.ReadinessReady}, {Mode: exposuredata.ExposureFunnel, Status: readiness.ReadinessReady, HTTPPathStatus: readiness.ReadinessReady}}},
-			hasView:   true, hasReadiness: true, refreshState: refreshCoordinator{seq: 1, viewDone: true, readinessDone: true},
+			hasView:   true, hasReadiness: true, configLoaded: true, refreshState: refreshCoordinator{seq: 1, viewDone: true, readinessDone: true},
 			focus: focusList, width: 120, height: 30,
 			activeOps: map[string]context.CancelFunc{},
 		},
@@ -1254,6 +1375,53 @@ func TestWorkspaceRefreshKeepsLastViewVisible(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRefreshPreservesApplyingForEveryActiveBatchTarget(t *testing.T) {
+	m := workspaceFixture()
+	first := m.view.Items[0]
+	secondListener := discovery.Listener{ID: "listener-two", Name: "api", Process: "node", ProcessStart: "test:4343", PID: 4343, Target: targetmodel.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}, Scope: targetmodel.ScopeLoopback, Metadata: discovery.MetadataComplete}
+	second := exposure.ReconciledItem{ID: secondListener.ID, Listener: &secondListener, State: exposuredata.ExposureState("disabled"), Mode: exposuredata.ExposureDisabled}
+	m.view.Items = append(m.view.Items, second)
+	m.view.Listeners.Listeners = append(m.view.Listeners.Listeners, secondListener)
+	firstTarget, _ := itemTarget(first)
+	secondTarget, _ := itemTarget(second)
+	m.activeOps[firstTarget.Key()] = func() {}
+	m.activeOps[secondTarget.Key()] = func() {}
+	m.markApplying(firstTarget.Key())
+	m.markApplying(secondTarget.Key())
+
+	if m.startRefresh() == nil {
+		t.Fatal("refresh did not start")
+	}
+	fresh := m.view
+	fresh.Items = append([]exposure.ReconciledItem(nil), m.view.Items...)
+	fresh.Items[0].State, fresh.Items[0].OperationState = exposuredata.ExposureActive, ""
+	fresh.Items[0].LastOperation = &exposuredata.OperationReceipt{Error: &fault.SafeError{Code: fault.ErrOperation, State: "partial_failure"}}
+	fresh.Items[1].State, fresh.Items[1].OperationState = exposuredata.ExposureState("disabled"), ""
+	m.Update(viewLoadedMsg{seq: m.refreshState.sequence(), view: fresh})
+
+	for _, key := range []string{firstTarget.Key(), secondTarget.Key()} {
+		found := false
+		for _, item := range m.view.Items {
+			target, ok := itemTarget(item)
+			if ok && target.Key() == key {
+				found = true
+				if item.State != exposuredata.ExposureApplying || item.OperationState != exposuredata.ExposureApplying {
+					t.Errorf("refresh erased Applying state for %q: state=%q operation=%q", key, item.State, item.OperationState)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("refreshed view lost active target %q", key)
+		}
+	}
+
+	m.selectedID = second.ID
+	m.reselect(second.ID, 1)
+	if availability := m.actionAvailability(exposuredata.ExposureServe); !availability.Disabled {
+		t.Fatalf("refresh re-enabled an Applying batch target: %#v", availability)
+	}
+}
+
 func TestWorkspaceClosesPreviewWhenRouteFingerprintChanges(t *testing.T) {
 	m := workspaceFixture()
 	m.openAction(ptrMode(exposuredata.ExposureFunnel))
@@ -1351,6 +1519,37 @@ func TestWorkspaceBlocksMutationWhenListenerSnapshotIsStale(t *testing.T) {
 	}
 }
 
+func TestWorkspacePreviewFingerprintIncludesEverySelectedProcessIdentity(t *testing.T) {
+	t.Run("single target listener snapshot", func(t *testing.T) {
+		m := workspaceFixture()
+		m.openAction(ptrMode(exposuredata.ExposureFunnel))
+		m.view.Listeners.Listeners[0].ProcessStart = "test:reused-pid"
+		m.invalidatePreviewIfChanged()
+		if m.modal != modalNone || !strings.Contains(m.banner, "Selection changed") {
+			t.Fatalf("preview survived a listener process-start identity change: modal=%v banner=%q", m.modal, m.banner)
+		}
+	})
+
+	t.Run("secondary batch target", func(t *testing.T) {
+		m := workspaceFixture()
+		secondListener := discovery.Listener{ID: "listener-two", Name: "api", Process: "node", ProcessStart: "test:4343", PID: 4343, CommandLine: "node api", Target: targetmodel.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}, Scope: targetmodel.ScopeLoopback, Metadata: discovery.MetadataComplete}
+		m.view.Items = append(m.view.Items, exposure.ReconciledItem{ID: secondListener.ID, Listener: &secondListener, State: exposuredata.ExposureState("disabled"), Mode: exposuredata.ExposureDisabled})
+		m.view.Listeners.Listeners = append(m.view.Listeners.Listeners, secondListener)
+		m.selectedItems = map[string]bool{m.view.Items[0].ID: true, secondListener.ID: true}
+		m.openAction(ptrMode(exposuredata.ExposureServe))
+		if m.modal != modalAction {
+			t.Fatalf("batch preview did not open: %v", m.modal)
+		}
+
+		m.view.Items[1].Listener.ProcessStart = "test:reused-pid"
+		m.view.Listeners.Listeners[1].ProcessStart = "test:reused-pid"
+		m.invalidatePreviewIfChanged()
+		if m.modal != modalNone || !strings.Contains(m.banner, "Selection changed") {
+			t.Fatalf("batch preview survived a secondary listener process identity change: modal=%v banner=%q", m.modal, m.banner)
+		}
+	})
+}
+
 func TestWorkspaceConfirmationDefersToRefresh(t *testing.T) {
 	m := workspaceFixture()
 	m.openAction(ptrMode(exposuredata.ExposureFunnel))
@@ -1387,6 +1586,26 @@ func TestWorkspaceConfirmationRemainsVisibleUntilOperatorActsDuringRefresh(t *te
 	m.Update(readinessLoadedMsg{seq: seq, data: m.readiness})
 	if m.modal != modalNone || !strings.Contains(m.banner, "Selection changed") {
 		t.Fatalf("changed preview remained confirmable after refresh: modal=%v banner=%q", m.modal, m.banner)
+	}
+}
+
+func TestWorkspaceDisabledNoopWaitsForPendingRefresh(t *testing.T) {
+	m := workspaceFixture()
+	m.view.Items[0].Routes = nil
+	m.view.Items[0].State = exposuredata.ExposureState("disabled")
+	m.view.Items[0].Mode = exposuredata.ExposureDisabled
+	m.view.Exposures.Routes = nil
+	if m.startRefresh() == nil {
+		t.Fatal("refresh did not start")
+	}
+	m.Update(keyRune(' '))
+	choice, ok := m.actionSession.selectedChoice()
+	if !ok || !choice.disabled || !choice.wait {
+		t.Fatalf("disabled no-op did not wait for refresh: %#v", choice)
+	}
+	m.Update(keyType(tea.KeyEnter))
+	if m.modal != modalAction || strings.Contains(m.transient, "Already disabled") {
+		t.Fatalf("cached no-op was reported during refresh: modal=%v transient=%q", m.modal, m.transient)
 	}
 }
 
@@ -1832,6 +2051,26 @@ func TestHTTPSActionPreservesExactIPv6BackendWithoutAdditionalShortcut(t *testin
 	result, ok := command().(operationDoneMsg)
 	if !ok || result.err != nil || !result.receipt.Verified || len(provider.sets) != 1 || provider.sets[0].Backend != backend {
 		t.Fatalf("exact IPv6 backend was not passed to the root operation: result=%#v changes=%#v", result, provider.sets)
+	}
+}
+
+func TestWorkspaceCancellationOutcomeIsUnverifiedUntilFreshProviderRead(t *testing.T) {
+	m := workspaceFixture()
+	m.view.Items[0].OperationState = exposuredata.ExposureCancelled
+	m.view.Items[0].LastOperation = &exposuredata.OperationReceipt{Error: &fault.SafeError{Code: fault.ErrCancelled, State: "cancelled"}}
+	m.applyObservedOperationOutcomes(false)
+	if got := m.view.Items[0].OperationState; got != exposuredata.ExposureUnverified {
+		t.Fatalf("cancelled operation without a fresh provider read was reported as %q", got)
+	}
+	m.applyObservedOperationOutcomes(true)
+	if got := m.view.Items[0].OperationState; got != exposuredata.ExposureCancelled {
+		t.Fatalf("fresh provider read did not resolve cancellation to Cancelled: %q", got)
+	}
+
+	m.view.Items[0].LastOperation.Error = &fault.SafeError{Code: fault.ErrOperation, State: "partial_failure"}
+	m.applyObservedOperationOutcomes(true)
+	if got := m.view.Items[0].OperationState; got != exposuredata.ExposureUnverified {
+		t.Fatalf("partial replacement failure was reported as %q instead of Unverified", got)
 	}
 }
 
@@ -2618,6 +2857,24 @@ func TestBatchDisableSelectsHTTPRouteByIdentity(t *testing.T) {
 	providerKey, routeID := batchRouteSelection(exposuredata.ExposureDisabled, item)
 	if providerKey != "serve:https=443" || routeID != "api-route" {
 		t.Fatalf("batch disable did not retain exact HTTP route identity: key=%q id=%q", providerKey, routeID)
+	}
+}
+
+func TestWorkspaceRefusesOverlappingBatchLifecycle(t *testing.T) {
+	m := workspaceFixture()
+	second := discovery.Listener{ID: "listener-two", Name: "api", Process: "node", ProcessStart: "test:4343", PID: 4343, Target: targetmodel.Target{Address: "127.0.0.1", Port: 4000, Protocol: "tcp"}, Scope: targetmodel.ScopeLoopback, Metadata: discovery.MetadataComplete}
+	third := discovery.Listener{ID: "listener-three", Name: "worker", Process: "node", ProcessStart: "test:4344", PID: 4344, Target: targetmodel.Target{Address: "127.0.0.1", Port: 5000, Protocol: "tcp"}, Scope: targetmodel.ScopeLoopback, Metadata: discovery.MetadataComplete}
+	fourth := discovery.Listener{ID: "listener-four", Name: "proxy", Process: "node", ProcessStart: "test:4345", PID: 4345, Target: targetmodel.Target{Address: "127.0.0.1", Port: 6000, Protocol: "tcp"}, Scope: targetmodel.ScopeLoopback, Metadata: discovery.MetadataComplete}
+	for _, listener := range []discovery.Listener{second, third, fourth} {
+		m.view.Items = append(m.view.Items, exposure.ReconciledItem{ID: listener.ID, Listener: &listener, State: exposuredata.ExposureState("disabled"), Mode: exposuredata.ExposureDisabled})
+	}
+	m.batchID, m.batchTotal, m.batchCompleted = "existing-batch", 2, 1
+	m.selectedItems = map[string]bool{third.ID: true, fourth.ID: true}
+	if availability := m.actionAvailability(exposuredata.ExposureServe); !availability.Disabled || !strings.Contains(availability.Reason, "another batch") {
+		t.Fatalf("a second batch remained available while one was Applying: %#v", availability)
+	}
+	if cmd := m.startBatchOperation(); cmd != nil || m.batchID != "existing-batch" || m.batchTotal != 2 || m.batchCompleted != 1 {
+		t.Fatalf("second batch overwrote existing lifecycle: cmd=%v id=%q total=%d completed=%d", cmd != nil, m.batchID, m.batchTotal, m.batchCompleted)
 	}
 }
 

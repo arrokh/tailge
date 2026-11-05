@@ -247,6 +247,9 @@ func (op exactExposureOperation) run(ctx context.Context) (receipt exposuredata.
 	}
 	allRouteIDs := RouteIDs(exposures.Routes, target)
 	routeIDs := allRouteIDs
+	if mode != exposuredata.ExposureDisabled && len(routeIDs) > 1 {
+		return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "broad mode changes are blocked while multiple exact routes match this listener", false, "multiple", "Choose an exact route operation; Tailge will not change or consolidate a multiple-route set.")
+	}
 	if mode == exposuredata.ExposureDisabled && (selectedProviderKey != "" || op.selectedRouteID != "" || selectedRouteMode != exposuredata.ExposureDisabled) {
 		selected := make([]string, 0, 1)
 		for _, route := range exposures.Routes {
@@ -352,6 +355,11 @@ func (op exactExposureOperation) run(ctx context.Context) (receipt exposuredata.
 	if len(routeIDs) == 1 {
 		route := findRoute(exposures.Routes, routeIDs[0])
 		previous = &route
+		selector, selectorErr := tailscale.ParseListenerSelector(route.ProviderKey, route.Mode)
+		isRawTCPRoute := route.Kind == exposuredata.RouteKindRawTCP || (selectorErr == nil && selector.Transport == "tcp")
+		if mode != exposuredata.ExposureDisabled && isRawTCPRoute && !tailscale.RawTCPBackendMatchesTarget(target, route.Backend) {
+			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "existing raw-TCP route backend does not match the exact selected listener", false, "conflict", "Refresh and select a route whose numeric backend matches this listener; Tailge will not treat another address family as the same endpoint.")
+		}
 		if route.Ownership != exposuredata.OwnershipManaged && !confirmExternal {
 			return exposuredata.OperationReceipt{}, fault.NewError(fault.ErrUnsafe, "exposure", "the selected route has unknown/external ownership", false, "external", "Review the route and pass `--confirm-external` to replace it.")
 		}
@@ -380,6 +388,11 @@ func (op exactExposureOperation) run(ctx context.Context) (receipt exposuredata.
 			removed, removeErr := c.provider.Remove(operationCtx, tailscale.RouteSelector{ID: route.ProviderKey, Target: &target, Mode: route.Mode, Service: route.Service, Path: route.Path, Backend: route.Backend, AllRoutesHash: precondition.AllRoutesHash}, precondition.RouteIDsHash)
 			c.recordReceiptEvent(operationID, "remove-before-replace", target, route.Mode, removeErr)
 			if removeErr != nil {
+				rollbackErr := c.rollbackReplacement(operationCtx, target, route)
+				c.recordReceiptEvent(operationID, "rollback", route.Target, route.Mode, rollbackErr)
+				if rollbackErr != nil {
+					return removed, fault.WrapError(fault.ErrVerification, "exposure", "route removal failed and rollback failed", false, "unverified", "Inspect the current route state manually; the exact previous route could not be restored.", rollbackErr)
+				}
 				return removed, removeErr
 			}
 			verified, afterRemove, verifyErr := c.verifyAbsent(operationCtx, route)
@@ -387,6 +400,11 @@ func (op exactExposureOperation) run(ctx context.Context) (receipt exposuredata.
 			if verifyErr != nil || !verified {
 				if verifyErr == nil {
 					verifyErr = fault.NewError(fault.ErrVerification, "exposure", "existing route removal could not be verified before replacement", true, "unknown", "Refresh and inspect Tailscale before retrying.")
+				}
+				rollbackErr := c.rollbackReplacement(operationCtx, target, route)
+				c.recordReceiptEvent(operationID, "rollback", route.Target, route.Mode, rollbackErr)
+				if rollbackErr != nil {
+					return removed, fault.WrapError(fault.ErrVerification, "exposure", "route removal verification failed and rollback failed", false, "unverified", "Inspect the current route state manually; the exact previous route could not be restored.", rollbackErr)
 				}
 				return removed, verifyErr
 			}
@@ -399,7 +417,7 @@ func (op exactExposureOperation) run(ctx context.Context) (receipt exposuredata.
 			rollbackErr := c.rollbackReplacement(operationCtx, target, *previous)
 			c.recordReceiptEvent(operationID, "rollback", previous.Target, previous.Mode, rollbackErr)
 			if rollbackErr != nil {
-				return receipt, fault.WrapError(fault.ErrOperation, "exposure", "listener disappeared and rollback failed", false, "partial_failure", "Inspect the current route state manually; the previous route could not be restored.", rollbackErr)
+				return receipt, fault.WrapError(fault.ErrVerification, "exposure", "listener disappeared and rollback failed", false, "unverified", "Inspect the current route state manually; the previous route could not be restored.", rollbackErr)
 			}
 		}
 		return receipt, err
@@ -411,7 +429,7 @@ func (op exactExposureOperation) run(ctx context.Context) (receipt exposuredata.
 			rollbackErr := c.rollbackReplacement(operationCtx, target, *previous)
 			c.recordReceiptEvent(operationID, "rollback", previous.Target, previous.Mode, rollbackErr)
 			if rollbackErr != nil {
-				return receipt, fault.WrapError(fault.ErrOperation, "exposure", "replacement failed and rollback failed", false, "partial_failure", "Inspect the current route state manually; neither the requested nor previous mode is verified.", rollbackErr)
+				return receipt, fault.WrapError(fault.ErrVerification, "exposure", "replacement failed and rollback failed", false, "unverified", "Inspect the current route state manually; neither the requested nor previous mode is verified.", rollbackErr)
 			}
 		}
 		return receipt, setErr
@@ -423,7 +441,7 @@ func (op exactExposureOperation) run(ctx context.Context) (receipt exposuredata.
 			rollbackErr := c.rollbackReplacement(operationCtx, target, *previous)
 			c.recordReceiptEvent(operationID, "rollback", previous.Target, previous.Mode, rollbackErr)
 			if rollbackErr != nil {
-				return receipt, fault.WrapError(fault.ErrOperation, "exposure", "replacement verification failed and rollback failed", false, "partial_failure", "Inspect the current route state manually; the previous route could not be restored.", rollbackErr)
+				return receipt, fault.WrapError(fault.ErrVerification, "exposure", "replacement verification failed and rollback failed", false, "unverified", "Inspect the current route state manually; the previous route could not be restored.", rollbackErr)
 			}
 		}
 		receipt.Error = ptr(fault.AsAppError(verifyErr).Safe())

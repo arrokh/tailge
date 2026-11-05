@@ -18,16 +18,27 @@ import (
 // It contains no Bubble Tea messages, terminal handles, provider adapters, or
 // OS effects. The Bubble Tea model owns the adapter that translates this state
 // into commands and rendering.
+type retryIntent struct {
+	itemID             string
+	targetKey          string
+	processFingerprint string
+	hasListener        bool
+}
+
 type workspaceState struct {
-	cfg          config.Config
-	configErr    error
-	view         exposure.View
-	readiness    readiness.Readiness
-	viewErr      error
-	readyErr     error
-	banner       string
-	bannerSticky bool
-	transient    string
+	cfg                config.Config
+	configErr          error
+	configLoaded       bool
+	configRevision     uint64
+	configSaveInFlight bool
+	pendingConfigSave  *config.Config
+	view               exposure.View
+	readiness          readiness.Readiness
+	viewErr            error
+	readyErr           error
+	banner             string
+	bannerSticky       bool
+	transient          string
 
 	width  int
 	height int
@@ -68,6 +79,8 @@ type workspaceState struct {
 	paletteIndex            int
 
 	refreshState        refreshCoordinator
+	retryPending        *retryIntent
+	retryAction         *retryIntent
 	hasView             bool
 	hasReadiness        bool
 	gGeneration         uint64
@@ -247,6 +260,25 @@ func (s *workspaceState) pruneSelection() {
 
 func (s *workspaceState) actionItems() []exposure.ReconciledItem {
 	items := s.items()
+	if s.retryAction != nil {
+		for _, item := range items {
+			if item.ID != s.retryAction.itemID {
+				continue
+			}
+			target, ok := itemTarget(item)
+			if !ok || target.Normalized().Key() != s.retryAction.targetKey {
+				return nil
+			}
+			if (item.Listener != nil) != s.retryAction.hasListener {
+				return nil
+			}
+			if item.Listener != nil && workspace.ProcessFingerprint(*item.Listener) != s.retryAction.processFingerprint {
+				return nil
+			}
+			return []exposure.ReconciledItem{item}
+		}
+		return nil
+	}
 	selected := make([]exposure.ReconciledItem, 0, len(items))
 	for _, item := range items {
 		if s.isMarked(item.ID) {
@@ -367,6 +399,33 @@ func (s *workspaceState) markApplying(key string) {
 		if ok && itemKey.Key() == key {
 			s.view.Items[i].OperationState = exposuredata.ExposureApplying
 			s.view.Items[i].State = exposuredata.ExposureApplying
+		}
+	}
+}
+
+func (s *workspaceState) markActiveOperationsApplying() {
+	for targetKey := range s.activeOps {
+		s.markApplying(targetKey)
+	}
+}
+
+func (s *workspaceState) applyObservedOperationOutcomes(providerSnapshotFresh bool) {
+	for i := range s.view.Items {
+		item := &s.view.Items[i]
+		if item.LastOperation == nil || item.LastOperation.Error == nil {
+			continue
+		}
+		state := workspace.OperationStateForSafeError(item.LastOperation.Error)
+		if state == exposuredata.ExposureUnverified {
+			item.OperationState = state
+			continue
+		}
+		if state == exposuredata.ExposureCancelled {
+			if providerSnapshotFresh {
+				item.OperationState = exposuredata.ExposureCancelled
+			} else {
+				item.OperationState = exposuredata.ExposureUnverified
+			}
 		}
 	}
 }
