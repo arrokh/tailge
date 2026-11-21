@@ -70,10 +70,15 @@ func (m *workspaceModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "w":
 		m.toggleModeNotOffFilter()
 		m.clampOffsets()
-	case "s":
-		m.openAction(ptrMode(exposuredata.ExposureServe))
-	case "f":
-		m.openAction(ptrMode(exposuredata.ExposureFunnel))
+	case "s", "f":
+		mode := exposuredata.ExposureServe
+		if key == "f" {
+			mode = exposuredata.ExposureFunnel
+		}
+		m.openAction(&mode)
+		if m.modal == modalAction {
+			return m.chooseAction()
+		}
 	case "d":
 		m.openAction(ptrMode(exposuredata.ExposureDisabled))
 	case "O":
@@ -310,6 +315,8 @@ func (m *workspaceModel) updateModal(msg tea.KeyMsg, key string) (tea.Model, tea
 		return m.updateActionModal(msg, key)
 	case modalDisableRoute:
 		return m.updateDisableRouteModal(msg, key)
+	case modalFunnelPort:
+		return m.updateFunnelPortModal(key)
 	case modalConfirm:
 		return m.updateConfirmModal(msg, key)
 	case modalTerminateProcess:
@@ -318,6 +325,25 @@ func (m *workspaceModel) updateModal(msg tea.KeyMsg, key string) (tea.Model, tea
 		return m.updateChoiceModal(msg, key)
 	case modalSkillUninstall:
 		return m.updateSkillUninstallModal(key)
+	}
+	return m, nil
+}
+
+func (m *workspaceModel) updateFunnelPortModal(key string) (tea.Model, tea.Cmd) {
+	n := len(m.funnelPortChoices)
+	if n == 0 || key == "esc" {
+		m.modal = modalNone
+		m.retryAction = nil
+		m.discardHTTPSRootAction()
+		return m, nil
+	}
+	switch key {
+	case "up", "k":
+		m.actionSession.index = (m.actionSession.index + n - 1) % n
+	case "down", "j":
+		m.actionSession.index = (m.actionSession.index + 1) % n
+	case "enter":
+		m.openHTTPSRootPreviewAtPort(exposuredata.ExposureFunnel, m.funnelPortChoices[m.actionSession.index])
 	}
 	return m, nil
 }

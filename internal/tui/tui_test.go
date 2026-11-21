@@ -1630,18 +1630,16 @@ func TestWorkspaceDirectActionKeysOpenPreview(t *testing.T) {
 		key  rune
 		mode exposuredata.ExposureMode
 	}{
-
 		{key: 's', mode: exposuredata.ExposureServe},
 		{key: 'f', mode: exposuredata.ExposureFunnel},
-		{key: 'd', mode: exposuredata.ExposureDisabled},
 	} {
 		m := workspaceFixture()
-		m.Update(keyRune(test.key))
-		if m.modal != modalAction || m.actionSession.mode != test.mode || m.actionSession.index != modeIndex(test.mode) || m.actionSession.itemID == "" {
-			t.Fatalf("key %q did not open the expected action preview: modal=%v mode=%q index=%d item=%q", test.key, m.modal, m.actionSession.mode, m.actionSession.index, m.actionSession.itemID)
+		_, cmd := m.Update(keyRune(test.key))
+		if cmd != nil || m.modal != modalConfirm || m.actionSession.mode != test.mode || m.actionSession.confirm || len(m.activeOps) != 0 {
+			t.Fatalf("key %q must open a Cancel-first preview without applying: modal=%v mode=%q", test.key, m.modal, m.actionSession.mode)
 		}
-		if view := m.View(); !strings.Contains(view, "EXPOSURE ACTION") {
-			t.Fatalf("key %q opened action state but did not render the modal: %q", test.key, view)
+		if view := m.View(); !strings.Contains(view, "CONFIRM EXPOSURE") {
+			t.Fatalf("key %q did not render confirmation: %q", test.key, view)
 		}
 	}
 }
@@ -1886,6 +1884,51 @@ func TestFunnelShortcutConvertsExactTCPRouteToHTTPSOnObservedPort(t *testing.T) 
 	}
 	if len(provider.snapshot.Routes) != 1 || provider.snapshot.Routes[0].Mode != exposuredata.ExposureFunnel || provider.snapshot.Routes[0].Kind != exposuredata.RouteKindHTTPSRoot || provider.snapshot.Routes[0].URL != "https://dev.example.ts.net:10000/" {
 		t.Fatalf("public HTTPS route was not verified on the observed port: %#v", provider.snapshot.Routes)
+	}
+}
+
+func TestFunnelShortcutCanChooseFreePortWithoutReplacingPrivateRoots(t *testing.T) {
+	m := workspaceFixture()
+	item := &m.view.Items[0]
+	item.Routes = nil
+	item.State, item.Mode = exposuredata.ExposureState("disabled"), exposuredata.ExposureDisabled
+	other := targetmodel.Target{Address: "127.0.0.1", Port: 8765, Protocol: "tcp"}
+	root := exposuredata.ExposureRoute{ID: "private-443", ProviderKey: "serve:https=443", Kind: exposuredata.RouteKindHTTPSRoot, Path: "/", Backend: "http://127.0.0.1:8765", Target: other, Mode: exposuredata.ExposureServe, State: exposuredata.ExposureActive}
+	m.view.Exposures.Routes = []exposuredata.ExposureRoute{root}
+	provider := &httpsRootTestProvider{snapshot: m.view.Exposures, caps: httpsRootCapabilities(), readiness: httpsRootReadiness()}
+	m.controller = exposure.NewController(&httpsRootTestListener{snapshot: m.view.Listeners}, provider)
+
+	m.Update(keyRune('f'))
+	m.Update(keyRune('f'))
+	if !strings.Contains(m.View(), "CHOOSE FUNNEL HTTPS PORT") {
+		t.Fatalf("occupied 443 did not open a port chooser: modal=%v banner=%q", m.modal, m.banner)
+	}
+	m.Update(keyType(tea.KeyDown)) // 8443 → 10000
+	second := root
+	second.ID, second.ProviderKey = "private-8443", "serve:https=8443"
+	m.view.Exposures.Routes = append(m.view.Exposures.Routes, second)
+	m.invalidatePreviewIfChanged()
+	if m.modal != modalNone {
+		t.Fatal("route changes must invalidate the port chooser")
+	}
+	provider.snapshot = m.view.Exposures
+	m.Update(keyRune('f'))
+	m.Update(keyRune('f'))
+	if strings.Contains(m.View(), "> 8443") || !strings.Contains(m.View(), "> 10000") {
+		t.Fatal("only the remaining unoccupied port should be offered")
+	}
+	_, cmd := m.Update(keyType(tea.KeyEnter))
+	if cmd != nil || m.modal != modalConfirm || m.actionSession.confirm || !strings.Contains(m.View(), "funnel:https=10000") {
+		t.Fatalf("port selection must open a Cancel-first preview, not apply: modal=%v port=%d", m.modal, m.httpsRootPort)
+	}
+	m.Update(keyType(tea.KeyTab))
+	_, cmd = m.Update(keyType(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatalf("confirmed Funnel did not run: %s", m.banner)
+	}
+	result := cmd().(operationDoneMsg)
+	if result.err != nil || !result.receipt.Verified || len(provider.removes) != 0 || len(provider.sets) != 1 || provider.sets[0].ProviderKey != "funnel:https=10000" {
+		t.Fatalf("expected only a verified Funnel root on 10000: result=%#v removes=%#v sets=%#v", result, provider.removes, provider.sets)
 	}
 }
 

@@ -23,4 +23,5 @@ const (
 	modalHelp
 	modalPalette
 	modalChooseURL
+	modalFunnelPort
 )
