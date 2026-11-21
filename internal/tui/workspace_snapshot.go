@@ -16,10 +16,12 @@ import (
 // and the list, details, and action flows. It applies the same filtering,
 // ordering, sectioning, and port identity rules for every consumer.
 type workspaceSnapshot struct {
-	view           exposure.View
-	query          string
-	cfg            config.Config
-	modeNotOffOnly bool
+	view            exposure.View
+	query           string
+	cfg             config.Config
+	modeNotOffOnly  bool
+	hiddenProcesses map[string]bool
+	hiddenView      processVisibility
 }
 
 func newWorkspaceSnapshot(view exposure.View, query string, cfg config.Config, modeNotOffOnly bool) workspaceSnapshot {
@@ -51,7 +53,22 @@ func (s workspaceSnapshot) Items() []exposure.ReconciledItem {
 	// applying the user's presentation sort. Otherwise changing sort can change
 	// which listener receives exposure actions for the collapsed row.
 	items := deduplicatePortItems(sectioned(ordered(displayed(s.view, "", s.cfg), "port")))
-	items = sectioned(ordered(items, s.cfg.Sort))
+	items = ordered(items, s.cfg.Sort)
+	if s.hiddenView == showAllProcesses && len(s.hiddenProcesses) > 0 {
+		// Keep normal rows first, then hidden rows, within each section.
+		sort.SliceStable(items, func(i, j int) bool {
+			return !s.hiddenProcesses[processHideKey(items[i])] && s.hiddenProcesses[processHideKey(items[j])]
+		})
+	} else if len(s.hiddenProcesses) > 0 || s.hiddenView == showHiddenProcesses {
+		filtered := items[:0]
+		for _, item := range items {
+			if s.hiddenProcesses[processHideKey(item)] == (s.hiddenView == showHiddenProcesses) {
+				filtered = append(filtered, item)
+			}
+		}
+		items = filtered
+	}
+	items = sectioned(items)
 	if s.modeNotOffOnly {
 		filtered := make([]exposure.ReconciledItem, 0, len(items))
 		for _, item := range items {

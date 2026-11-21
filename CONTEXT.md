@@ -91,7 +91,7 @@ The workspace supports Tab/Shift-Tab, h/l, and Left/Right as equivalent ways to 
 _Avoid_: one-keyboard-style-only navigation
 
 **Action selector**:
-`s` and `f` take the operator directly to a Cancel-focused HTTPS preview (or the Funnel port chooser if needed). Space opens a centered action selector for browsing; `d` opens it with Disable selected. Every route change still requires a distinct confirmation. It initially focuses the current observed mode, or Disabled when no route exists or state is unsafe. While the selector is open, `d`, `s`, or `f` immediately chooses Disable, private HTTPS Serve, or public HTTPS Funnel and advances to the same Cancel-focused confirmation as arrows plus Enter; a blocked choice remains blocked, and no shortcut skips confirmation.
+`s` and `f` take the operator directly to a Cancel-focused HTTPS preview (or the Funnel port chooser if needed). Space opens a centered action selector for browsing; `d` opens it with Disable selected, except for a single inactive item where it goes straight to the exact-route removal preview or chooser. Every route change still requires a distinct confirmation. It initially focuses the current observed mode, or Disabled when no route exists or state is unsafe. While the selector is open, `d`, `s`, or `f` immediately chooses Disable, private HTTPS Serve, or public HTTPS Funnel and advances to the same Cancel-focused confirmation as arrows plus Enter; a blocked choice remains blocked, and no shortcut skips confirmation.
 _Avoid_: inline mutation, hidden action choice
 
 **Explicit confirmation**:
@@ -161,6 +161,10 @@ _Avoid_: bulk exposure, broad disable
 **Name-first order**:
 Within each visual service section, items default to case-insensitive ascending service name, then address, port, and stable identity. `e` or `S` cycles Name ascending, Name descending, and unsorted observation order; existing explicit port/address/exposure preferences remain configurable. Sorting never changes target identity.
 _Avoid_: unstable refresh order
+
+**Hidden process list**:
+`i` toggles the focused listener's discovered process name in a session-only hide list. `I` cycles Visible, All, and Hidden Only. All groups hidden listeners last within their section, with the current sort within each group. The view composes with search and the mode filter; inactive routes are not processes and cannot be hidden by name. This never changes provider state.
+_Avoid_: process termination, route removal, persistent rules without explicit configuration
 
 **Visible system listener**:
 System or privileged listeners remain in the list by default and may be hidden only as a presentation preference; visibility never grants or removes exposure authorization.
