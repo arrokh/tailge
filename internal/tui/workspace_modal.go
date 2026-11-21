@@ -187,6 +187,17 @@ func (m *workspaceModel) modalView() string {
 			}
 		}
 		lines = append(lines, "", "This removes only the selected exact route.", "↑/↓ or j/k select · Enter preview · Esc back")
+	case modalFunnelPort:
+		title = "CHOOSE FUNNEL HTTPS PORT"
+		lines = append(lines, "The default endpoint is occupied. Choose a free public HTTPS port:")
+		for i, port := range m.funnelPortChoices {
+			marker := "  "
+			if i == m.actionSession.index {
+				marker = "> "
+			}
+			lines = append(lines, fmt.Sprintf("%s%d", marker, port))
+		}
+		lines = append(lines, "", "↑/↓ or j/k select · Enter preview · Esc cancel")
 	case modalConfirm:
 		title = "CONFIRM EXPOSURE"
 		count := len(m.actionItems())

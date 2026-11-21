@@ -104,7 +104,7 @@ func (m *workspaceModel) invalidatePreviewIfChanged() {
 	// apply boundary rechecks refresh/readiness state and the preview before
 	// starting a mutation; closing confirmation here would turn a background
 	// refresh into an unsolicited operator action.
-	if m.modal != modalAction && m.modal != modalDisableRoute && !(m.httpsRootAction && m.modal == modalConfirm) {
+	if m.modal != modalAction && m.modal != modalDisableRoute && m.modal != modalFunnelPort && !(m.httpsRootAction && m.modal == modalConfirm) {
 		return
 	}
 	if !m.actionSession.previewChanged(
@@ -168,6 +168,9 @@ func (m *workspaceModel) actionAvailability(mode exposuredata.ExposureMode) work
 			return workspace.ActionAvailability{Disabled: true, Reason: item.ID + ": " + reason}
 		}
 		port, _, _, reason := httpsRootRoutePlan(m.view.Exposures.Routes, item, mode)
+		if mode == exposuredata.ExposureFunnel && reason == httpsEndpointOccupied && len(funnelAlternatePorts(m.view.Exposures.Routes, item)) > 0 {
+			continue // Funnel is single-target; the chooser validates the exact port.
+		}
 		if reason != "" {
 			return workspace.ActionAvailability{Disabled: true, Reason: item.ID + ": " + reason}
 		}
@@ -202,7 +205,7 @@ func (m *workspaceModel) startOperation() tea.Cmd {
 		item, ok := m.actionAnchorItem()
 		if !ok {
 			availability = workspace.ActionAvailability{Disabled: true, Reason: "No exact listener is selected"}
-		} else if port, replacement, already, reason := httpsRootRoutePlan(m.view.Exposures.Routes, item, m.actionSession.mode); reason != "" || already || port != m.httpsRootPort || (replacement != nil && replacement.ID != m.httpsRootRouteID) || (replacement == nil && m.httpsRootReplaceRoute) {
+		} else if port, replacement, already, reason := httpsRootRoutePlanAtPort(m.view.Exposures.Routes, item, m.actionSession.mode, m.httpsRootPort); reason != "" || already || port != m.httpsRootPort || (replacement != nil && replacement.ID != m.httpsRootRouteID) || (replacement == nil && m.httpsRootReplaceRoute) {
 			if reason == "" {
 				reason = "The exact HTTPS route changed after preview"
 			}

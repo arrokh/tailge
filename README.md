@@ -30,7 +30,7 @@ flowchart LR
 
 ## Prerequisites
 
-- Go 1.26.10+ and `make` to build from source
+- Go 1.26.11+ and `make` to build from source
 - macOS or Linux for listener discovery
 - An installed and logged-in Tailscale client for exposure features (optional for local scans)
 - An interactive TTY for the workspace; CLI commands also work in scripts and CI
@@ -113,7 +113,7 @@ tailge skill uninstall --confirm
 
 ## Exposure safety
 
-TCP listener discovery never implies HTTP: raw routes remain protocol-agnostic. In the TUI, `s` previews a private HTTPS Serve root and `f` previews a public HTTPS Funnel root for the selected HTTP-speaking service; both show the HTTP-backend assumption, exact route replacement, and HTTPS endpoint before confirmation. `s` uses the local listener's port. `f` preserves an existing Funnel HTTPS-capable port (for example, converts `funnel:tcp=10000` to `funnel:https=10000`) or uses 443 for a new route, and always requires explicit public confirmation. Route changes use fresh identity checks and exact rollback. The CLI's raw `exposure serve`/`funnel` commands remain protocol-agnostic, and its separate `exposure http` commands are explicit HTTP intent. `o` uses an observed HTTPS URL when available; for an active Serve TCP route, it may open a UI-only HTTP preview using Tailscale-reported MagicDNS and the exact port. That convenience does not change route identity or prove the service speaks HTTP. See the [usage guide](docs/usage.md#routes-and-safety) and [architecture guide](docs/architecture.md#https-route-kinds-and-roots) for transport and route-identity context.
+TCP listener discovery never implies HTTP: raw routes remain protocol-agnostic. In the TUI, `s` previews a private HTTPS Serve root and `f` previews a public HTTPS Funnel root for the selected HTTP-speaking service; both show the HTTP-backend assumption, exact route replacement, and HTTPS endpoint before confirmation. `s` uses the local listener's port. `f` preserves an existing Funnel HTTPS-capable port (for example, converts `funnel:tcp=10000` to `funnel:https=10000`) or defaults to 443. If another route occupies 443, choose an available 8443 or 10000 before previewing. Funnel always requires explicit public confirmation. Route changes use fresh identity checks and exact rollback. For non-HTTP TCP services, use `tailge exposure serve ADDRESS:PORT` or `tailge exposure funnel ADDRESS:PORT --confirm-public` (Funnel only supports its permitted public ports). A process needs a listening TCP port before it can be exposed. `o` uses an observed HTTPS URL when available; for an active Serve TCP route, it may open a UI-only HTTP preview using Tailscale-reported MagicDNS and the exact port. That convenience does not change route identity or prove the service speaks HTTP. See the [usage guide](docs/usage.md#routes-and-safety) and [architecture guide](docs/architecture.md#https-route-kinds-and-roots) for transport and route-identity context.
 
 ## Keyboard shortcuts
 
@@ -124,7 +124,8 @@ TCP listener discovery never implies HTTP: raw routes remain protocol-agnostic. 
 | `/` | Search the list |
 | `w` | Toggle filter to services whose mode is not OFF (default: all services) |
 | `Tab` / `Shift-Tab` | Switch between list and details |
-| `s` / `f` / `d` | Open the action selector; choose private HTTPS Serve / public HTTPS Funnel / Disable, then confirm separately |
+| `s` / `f` | Preview private HTTPS Serve / public HTTPS Funnel directly; port choice and public confirmation remain separate |
+| `Space` / `d` | Browse exposure actions / open the selector with Disable selected |
 | `o` | Open an observed HTTPS URL, or preview a Serve TCP route via Tailscale MagicDNS |
 | `O` | Open the selected local listener at `http://localhost:<port>/` |
 | `y` | Copy an observed HTTPS URL or the same Serve TCP preview |

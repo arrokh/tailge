@@ -67,6 +67,7 @@ type workspaceState struct {
 	actionSession           exposureActionSession
 	httpsRootAction         bool
 	httpsRootPort           int
+	funnelPortChoices       []int
 	httpsRootRouteID        string
 	httpsRootReplaceRoute   bool
 	urlAction               string

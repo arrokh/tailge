@@ -13,6 +13,7 @@ import (
 func (m *workspaceModel) discardHTTPSRootAction() {
 	m.httpsRootAction = false
 	m.httpsRootPort = 0
+	m.funnelPortChoices = nil
 	m.httpsRootRouteID = ""
 	m.httpsRootReplaceRoute = false
 }
@@ -87,6 +88,12 @@ func (m *workspaceModel) httpsActionStatusLabel() string {
 // route identity. Serve roots use the local listener port. A current Funnel
 // route keeps its HTTPS-capable public port; new Funnel roots default to 443.
 func httpsRootRoutePlan(routes []exposuredata.ExposureRoute, item exposure.ReconciledItem, mode exposuredata.ExposureMode) (int, *exposuredata.ExposureRoute, bool, string) {
+	return httpsRootRoutePlanAtPort(routes, item, mode, 0)
+}
+
+const httpsEndpointOccupied = "HTTPS action unavailable: the requested HTTPS endpoint is already occupied"
+
+func httpsRootRoutePlanAtPort(routes []exposuredata.ExposureRoute, item exposure.ReconciledItem, mode exposuredata.ExposureMode, funnelPort int) (int, *exposuredata.ExposureRoute, bool, string) {
 	if item.Listener == nil {
 		return 0, nil, false, "HTTPS action unavailable: select a current local listener"
 	}
@@ -100,6 +107,9 @@ func httpsRootRoutePlan(routes []exposuredata.ExposureRoute, item exposure.Recon
 	port := target.Port
 	if mode == exposuredata.ExposureFunnel {
 		port = 443
+		if funnelPort != 0 {
+			port = funnelPort
+		}
 	}
 	var replacement *exposuredata.ExposureRoute
 	already := false
@@ -163,9 +173,22 @@ func httpsRootRoutePlan(routes []exposuredata.ExposureRoute, item exposure.Recon
 		return port, nil, true, ""
 	}
 	if endpointRoutes > 0 {
-		return 0, nil, false, "HTTPS action unavailable: the requested HTTPS endpoint is already occupied"
+		return 0, nil, false, httpsEndpointOccupied
 	}
 	return port, replacement, false, ""
+}
+
+// Only offer alternatives to an occupied default. An observed supported
+// Funnel port stays pinned, and every alternative must pass the full plan.
+func funnelAlternatePorts(routes []exposuredata.ExposureRoute, item exposure.ReconciledItem) []int {
+	var ports []int
+	for _, port := range []int{8443, 10000} {
+		planned, _, already, reason := httpsRootRoutePlanAtPort(routes, item, exposuredata.ExposureFunnel, port)
+		if reason == "" && !already && planned == port {
+			ports = append(ports, port)
+		}
+	}
+	return ports
 }
 
 func httpsRootReadinessReason(status readiness.ReadinessStatus, message, remediation string) string {
@@ -180,6 +203,10 @@ func httpsRootReadinessReason(status readiness.ReadinessStatus, message, remedia
 }
 
 func (m *workspaceModel) openHTTPSRootPreview(mode exposuredata.ExposureMode) {
+	m.openHTTPSRootPreviewAtPort(mode, 0)
+}
+
+func (m *workspaceModel) openHTTPSRootPreviewAtPort(mode exposuredata.ExposureMode, funnelPort int) {
 	items := m.actionItems()
 	if len(items) == 0 || (len(items) > 1 && mode == exposuredata.ExposureFunnel) {
 		m.setBanner("Funnel HTTPS roots share one public hostname and port; choose one exact listener at a time", true)
@@ -191,8 +218,12 @@ func (m *workspaceModel) openHTTPSRootPreview(mode exposuredata.ExposureMode) {
 	}
 	item := items[0]
 	listenerTarget := item.Listener.Target.Normalized()
-	port, replacement, firstAlready, reason := httpsRootRoutePlan(m.view.Exposures.Routes, item, mode)
-	if reason != "" {
+	port, replacement, firstAlready, reason := httpsRootRoutePlanAtPort(m.view.Exposures.Routes, item, mode, funnelPort)
+	var alternatives []int
+	if mode == exposuredata.ExposureFunnel && funnelPort == 0 && reason == httpsEndpointOccupied {
+		alternatives = funnelAlternatePorts(m.view.Exposures.Routes, item)
+	}
+	if reason != "" && len(alternatives) == 0 {
 		m.setBanner(reason, true)
 		return
 	}
@@ -220,6 +251,13 @@ func (m *workspaceModel) openHTTPSRootPreview(mode exposuredata.ExposureMode) {
 		selectionFingerprint(items),
 	)
 	m.actionSession.confirm = false
+	m.funnelPortChoices = nil
+	if len(alternatives) > 0 {
+		m.funnelPortChoices = alternatives
+		m.actionSession.index = 0
+		m.modal = modalFunnelPort
+		return
+	}
 	if replacement == nil {
 		m.actionSession.routeID = ""
 		m.actionSession.routeKey = ""
