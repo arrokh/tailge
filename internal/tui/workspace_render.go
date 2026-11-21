@@ -272,7 +272,7 @@ func footerKeyHints(width int, focus paneFocus, searching, zoomed, canZoom bool,
 	}
 	switch {
 	case width >= 120:
-		return "↑↓ Move · Tab Focus · v/V · s/f/d HTTPS · x Term · e/S Sort · w Filter · / Find" + zoomHint + " · ? Help · q Quit"
+		return "↑↓ Move · Tab Focus · v/V · s/f/d HTTPS · x Term · e/S Sort · w Filter · i/I Hide · / Find" + zoomHint + " · ? Help · q Quit"
 	case width >= 100:
 		return "↑↓ Move · Tab Focus · s/f/d · e/S Sort · w Filter · / Find · ? Help · q Quit" + zoomHint
 	case width >= 72:
@@ -357,7 +357,13 @@ func (m *workspaceModel) renderList(width, height int) string {
 	if !m.hasView && !m.refreshState.viewComplete() {
 		return title + "\n\n  ◌ Loading listeners..."
 	}
+	if len(m.hiddenProcesses) > 0 || m.hiddenView != hideListedProcesses {
+		title += " · " + m.hiddenView.label() + " (I)"
+	}
 	if len(items) == 0 {
+		if m.hiddenView == showHiddenProcesses {
+			return title + "\n\n  No hidden processes match.\n\n  Press I to show visible rows, or adjust search and filters."
+		}
 		if m.query != "" {
 			if m.modeNotOffOnly {
 				return title + "\n\n  NO MATCHING SERVICES\n\n  Press w to include OFF services, or edit/clear search."
@@ -366,6 +372,9 @@ func (m *workspaceModel) renderList(width, height int) string {
 		}
 		if m.modeNotOffOnly {
 			return title + "\n\n  NO SERVICES WITH MODE NOT OFF\n\n  Press w to show all services."
+		}
+		if len(m.hiddenProcesses) > 0 {
+			return title + "\n\n  No visible services. Press I to change the process view."
 		}
 		return title + "\n\n  No local listeners or configured routes."
 	}
@@ -383,6 +392,11 @@ func (m *workspaceModel) renderList(width, height int) string {
 		status := ""
 		if m.processTerminating(item) {
 			status = "TERMINATING"
+		}
+		if m.hiddenView == showAllProcesses && m.hiddenProcesses[processHideKey(item)] {
+			listener := *item.Listener
+			listener.Name = "[H] " + valueOr(listener.Name, listener.Target.String())
+			item.Listener = &listener
 		}
 		lines = append(lines, listenerTableRowWithStatus(item, width, active, marked, visual, m.cfg.ColorTheme, status))
 	}

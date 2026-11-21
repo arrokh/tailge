@@ -106,6 +106,8 @@ The workspace command palette launches the existing `media serve` and `skill` CL
 
 ## Internal control flow
 
+The presentation snapshot applies the session-only process hide list after choosing the stable primary row per port. The All view groups hidden process rows last within their section without changing target identity. Search, mode filter, and sorting still apply. Inactive configured route rows do not belong to process hide rules.
+
 Refreshes build a shared snapshot. Exposure actions use that snapshot for a preview, then repeat the safety checks immediately before an exact mutation and read-after-write verification.
 
 ```mermaid

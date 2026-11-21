@@ -242,7 +242,8 @@ The workspace uses Bubble Tea's alternate screen and raw keyboard mode only afte
 | `/` | Incremental search; `Enter` accepts, `Esc` cancels, `Ctrl-u` clears |
 | `w` | Toggle mode filter: show only services whose mode is not OFF; default is unfiltered |
 | `s` / `f` | Preview private HTTPS Serve / public HTTPS Funnel directly; confirm separately |
-| `d` | Open the action selector with Disable selected |
+| `d` | Open Disable; on an inactive route, go straight to the exact removal preview or chooser |
+| `i` / `I` | Toggle hiding the focused process name / cycle Visible, All, and Hidden Only |
 | `Space` | Open the exposure selector; press `d`, `s`, or `f` to choose, or use arrows/j/k plus Enter |
 | `v` | Toggle the current item |
 | `V` | Enter or exit Vim-style visual-line selection |

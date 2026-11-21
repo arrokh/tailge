@@ -125,7 +125,8 @@ TCP listener discovery never implies HTTP: raw routes remain protocol-agnostic. 
 | `w` | Toggle filter to services whose mode is not OFF (default: all services) |
 | `Tab` / `Shift-Tab` | Switch between list and details |
 | `s` / `f` | Preview private HTTPS Serve / public HTTPS Funnel directly; port choice and public confirmation remain separate |
-| `Space` / `d` | Browse exposure actions / open the selector with Disable selected |
+| `Space` / `d` | Browse exposure actions / disable a route (on a single inactive item, go straight to the exact removal preview or chooser) |
+| `i` / `I` | Hide or unhide the focused process name / cycle Visible, All, Hidden Only. All sorts hidden rows last; the hide list resets on exit. |
 | `o` | Open an observed HTTPS URL, or preview a Serve TCP route via Tailscale MagicDNS |
 | `O` | Open the selected local listener at `http://localhost:<port>/` |
 | `y` | Copy an observed HTTPS URL or the same Serve TCP preview |

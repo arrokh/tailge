@@ -47,6 +47,8 @@ type workspaceState struct {
 
 	query             string
 	modeNotOffOnly    bool
+	hiddenProcesses   map[string]bool
+	hiddenView        processVisibility
 	searching         bool
 	previousQ         string
 	selectedID        string
@@ -318,7 +320,9 @@ func (s *workspaceState) selectedItem() (exposure.ReconciledItem, bool) {
 }
 
 func (s workspaceState) items() []exposure.ReconciledItem {
-	return newWorkspaceSnapshot(s.view, s.query, s.cfg, s.modeNotOffOnly).Items()
+	snapshot := newWorkspaceSnapshot(s.view, s.query, s.cfg, s.modeNotOffOnly)
+	snapshot.hiddenProcesses, snapshot.hiddenView = s.hiddenProcesses, s.hiddenView
+	return snapshot.Items()
 }
 
 func (s *workspaceState) toggleModeNotOffFilter() {

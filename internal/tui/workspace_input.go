@@ -81,6 +81,16 @@ func (m *workspaceModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "d":
 		m.openAction(ptrMode(exposuredata.ExposureDisabled))
+		if m.modal == modalAction {
+			items := m.actionItems()
+			if len(items) == 1 && items[0].State == exposuredata.ExposureInactive {
+				return m.chooseAction()
+			}
+		}
+	case "i":
+		m.toggleHiddenProcess()
+	case "I":
+		m.cycleProcessVisibility()
 	case "O":
 		return m, m.openLocalURL()
 	case "v":
